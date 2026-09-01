@@ -47,7 +47,7 @@ Create a **public** GitHub repository named `SRankSentinel`, then upload the con
 
 The custom repository URL will be:
 
-`https://raw.githubusercontent.com/Wrothy/SRankSentinel/main/repo.json`
+`https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json`
 
 Do not add that URL to Dalamud until a `v0.1.0` GitHub release exists, because `repo.json` deliberately points to the pinned release ZIP.
 
