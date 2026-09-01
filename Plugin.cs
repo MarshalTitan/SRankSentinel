@@ -24,7 +24,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IFramework framework;
     private readonly IPluginLog log;
     private readonly VNavmeshIpc vnav;
-    private readonly ICallGateSubscriber<object> huntAlerts;
+    private readonly ICallGateSubscriber<object, object> huntAlerts;
     private readonly Configuration config;
 
     private bool configOpen;
@@ -62,7 +62,7 @@ public sealed class Plugin : IDalamudPlugin
         // HuntAlerts publishes its own HuntTrainMessage class. Subscribing as object lets
         // us consume it without linking HuntAlerts as a compile-time dependency; public
         // fields are read by name in OnHuntAlert.
-        huntAlerts = pi.GetIpcSubscriber<object>("HuntAlerts.OnHuntTrainMessageReceived");
+        huntAlerts = pi.GetIpcSubscriber<object, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
 
         framework.Update += OnFrameworkUpdate;
@@ -364,7 +364,7 @@ public sealed class Plugin : IDalamudPlugin
         return vnav.PointOnFloorSafe(candidate, 12f);
     }
 
-    private Vector3 PlayerPosition() => clientState.LocalPlayer?.Position ?? Vector3.Zero;
+    private Vector3 PlayerPosition() => objects.LocalPlayer?.Position ?? Vector3.Zero;
 
     private bool EnsureMounted(DateTime now)
     {
@@ -439,11 +439,11 @@ public sealed class Plugin : IDalamudPlugin
             ImGui.TextWrapped($"Current: {current.CreatureName} | {current.World} | territory {current.TerritoryId} | instance {current.Instance}");
 
         ImGui.Separator();
-        DrawFloat("Flag approach distance", ref config.FlagApproachDistance, 60f, 120f);
-        DrawFloat("Waiting distance", ref config.WaitingDistance, 55f, 100f);
-        DrawFloat("Emergency minimum", ref config.EmergencyDistance, 45f, 90f);
+        config.FlagApproachDistance = DrawFloat("Flag approach distance", config.FlagApproachDistance, 60f, 120f);
+        config.WaitingDistance = DrawFloat("Waiting distance", config.WaitingDistance, 55f, 100f);
+        config.EmergencyDistance = DrawFloat("Emergency minimum", config.EmergencyDistance, 45f, 90f);
         ImGui.BeginDisabled();
-        DrawFloat("Engage HP % (reserved for v0.2)", ref config.EngageHpPercent, 1f, 99f);
+        config.EngageHpPercent = DrawFloat("Engage HP % (reserved for v0.2)", config.EngageHpPercent, 1f, 99f);
         ImGui.EndDisabled();
 
         if (ImGui.Button("Save settings"))
@@ -467,11 +467,10 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.End();
     }
 
-    private static void DrawFloat(string label, ref float value, float min, float max)
+    private static float DrawFloat(string label, float value, float min, float max)
     {
-        var v = value;
-        if (ImGui.SliderFloat(label, ref v, min, max, "%.0f y"))
-            value = v;
+        ImGui.SliderFloat(label, ref value, min, max, "%.0f y");
+        return value;
     }
 
     private enum SentinelState
