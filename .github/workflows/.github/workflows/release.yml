@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud dev build
+        shell: pwsh
+        run: |
+          $dalamudDir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Force -Path $dalamudDir | Out-Null
+          Invoke-WebRequest -Uri "https://goatcorp.github.io/dalamud-distrib/latest.zip" -OutFile dalamud.zip
+          Expand-Archive -Path dalamud.zip -DestinationPath $dalamudDir -Force
+          Remove-Item dalamud.zip
+
+      - run: dotnet restore SRankSentinel.csproj
+      - run: dotnet build SRankSentinel.csproj -c Release --no-restore
+
+      - name: Prepare release zip
+        shell: pwsh
+        run: Copy-Item "bin/Release/SRankSentinel/latest.zip" "SRankSentinel.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: SRankSentinel.zip
+          generate_release_notes: true
