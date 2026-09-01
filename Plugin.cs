@@ -1,8 +1,10 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.Chat;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.Command;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
@@ -20,6 +22,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICommandManager commands;
     private readonly IClientState clientState;
     private readonly ICondition condition;
+    private readonly IChatGui chat;
     private readonly IObjectTable objects;
     private readonly IFramework framework;
     private readonly IPluginLog log;
@@ -43,6 +46,7 @@ public sealed class Plugin : IDalamudPlugin
         ICommandManager commandManager,
         IClientState clientState,
         ICondition condition,
+        IChatGui chatGui,
         IObjectTable objectTable,
         IFramework framework,
         IPluginLog pluginLog)
@@ -51,6 +55,7 @@ public sealed class Plugin : IDalamudPlugin
         commands = commandManager;
         this.clientState = clientState;
         this.condition = condition;
+        chat = chatGui;
         objects = objectTable;
         this.framework = framework;
         log = pluginLog;
@@ -64,6 +69,7 @@ public sealed class Plugin : IDalamudPlugin
         // Subscribing as object would deserialize the payload as JObject and hide its fields.
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
+        chat.ChatMessage += OnSonarChatMessage;
 
         framework.Update += OnFrameworkUpdate;
         pi.UiBuilder.Draw += DrawUi;
@@ -81,6 +87,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         vnav.StopSafe();
         huntAlerts.Unsubscribe(OnHuntAlert);
+        chat.ChatMessage -= OnSonarChatMessage;
         framework.Update -= OnFrameworkUpdate;
         pi.UiBuilder.Draw -= DrawUi;
         pi.UiBuilder.OpenMainUi -= OpenConfig;
@@ -95,23 +102,90 @@ public sealed class Plugin : IDalamudPlugin
         if (!config.Enabled || payload is null)
             return;
 
-        var huntType = payload.huntType ?? string.Empty;
+        AcceptSRankAlert(
+            payload.huntType,
+            payload.huntWorld,
+            payload.creatureName,
+            payload.startTerritoryTypeId,
+            payload.instance,
+            payload.mapLocationX,
+            payload.mapLocationY,
+            "HuntAlerts");
+    }
+
+    private void OnSonarChatMessage(IHandleableChatMessage chatMessage)
+    {
+        if (!config.Enabled || !chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.Ordinal))
+            return;
+
+        try
+        {
+            var text = chatMessage.Message.TextValue;
+            if (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            const string sRankPrefix = "Rank S:";
+            var namePayload = chatMessage.Message.Payloads
+                .OfType<TextPayload>()
+                .Select(payload => payload.Text)
+                .FirstOrDefault(value => value?.StartsWith(sRankPrefix, StringComparison.OrdinalIgnoreCase) == true);
+
+            // "Rank SS:" and other ranks intentionally do not match the exact S-rank prefix.
+            if (namePayload is null)
+                return;
+
+            var creature = namePayload[sRankPrefix.Length..].Trim();
+            var mapLink = chatMessage.Message.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
+            if (mapLink is null || string.IsNullOrWhiteSpace(creature))
+            {
+                status = "Sonar S-rank alert received, but its creature/map link could not be read";
+                log.Warning("Ignored Sonar S-rank message because creature or map-link data was unavailable.");
+                return;
+            }
+
+            AcceptSRankAlert(
+                "srank",
+                ParseSonarWorld(text),
+                creature,
+                mapLink.TerritoryType.RowId,
+                ParseSonarInstance(text),
+                mapLink.XCoord,
+                mapLink.YCoord,
+                "Sonar");
+        }
+        catch (Exception ex)
+        {
+            status = "Sonar alert could not be parsed; navigation was not started";
+            log.Warning("Could not parse Sonar S-rank message safely: {Error}", ex.Message);
+        }
+    }
+
+    private void AcceptSRankAlert(
+        string? huntType,
+        string? world,
+        string? creature,
+        uint territory,
+        int instance,
+        float mapX,
+        float mapY,
+        string source)
+    {
+        huntType ??= string.Empty;
+        world ??= string.Empty;
+        creature ??= string.Empty;
+
         if (!huntType.Equals("srank", StringComparison.OrdinalIgnoreCase))
             return;
 
-        var world = payload.huntWorld ?? string.Empty;
-        var creature = payload.creatureName ?? string.Empty;
-        var territory = payload.startTerritoryTypeId;
-        var instance = payload.instance;
-        var mapX = payload.mapLocationX;
-        var mapY = payload.mapLocationY;
-
         if (territory == 0 || string.IsNullOrWhiteSpace(creature))
         {
-            status = "S-rank alert received, but HuntAlerts did not include creature/territory data";
-            log.Warning("Ignored S-rank IPC event because territory or creature name was unavailable.");
+            status = $"S-rank alert received, but {source} did not include creature/territory data";
+            log.Warning("Ignored {Source} S-rank event because territory or creature name was unavailable.", source);
             return;
         }
+
+        if (instance < 1)
+            instance = 1;
 
         var incoming = new HuntAlertSnapshot(huntType, world, creature, territory, instance, mapX, mapY, DateTime.UtcNow);
         if (current?.Key == incoming.Key)
@@ -130,7 +204,32 @@ public sealed class Plugin : IDalamudPlugin
         flagPoint = null;
         safePoint = null;
         SetState(SentinelState.WaitForTerritory, $"Waiting for travel to {creature} ({world})");
-        log.Information("Accepted S-rank alert: {Name}, territory {Territory}, world {World}, instance {Instance}", creature, territory, world, instance);
+        log.Information("Accepted {Source} S-rank alert: {Name}, territory {Territory}, world {World}, instance {Instance}", source, creature, territory, world, instance);
+    }
+
+    private static string ParseSonarWorld(string text)
+    {
+        var start = text.LastIndexOf('<');
+        var end = start >= 0 ? text.IndexOf('>', start + 1) : -1;
+        if (start < 0 || end <= start)
+            return string.Empty;
+
+        // Sonar may place a private-use cross-world icon inside the angle brackets.
+        return new string(text[(start + 1)..end]
+            .Where(character => char.IsLetterOrDigit(character))
+            .ToArray());
+    }
+
+    private static int ParseSonarInstance(string text)
+    {
+        // Sonar's instance glyphs are U+E0B1 through U+E0B9.
+        for (var instance = 1; instance <= 9; instance++)
+        {
+            if (text.Contains((char)(0xE0B0 + instance)))
+                return instance;
+        }
+
+        return 1;
     }
 
     private void OnFrameworkUpdate(IFramework _)
@@ -434,7 +533,7 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         ImGui.TextUnformatted("v0.1 SAFETY PROTOTYPE — NEVER ATTACKS");
-        ImGui.TextWrapped("HuntAlerts/HuntTrainAssistant/Lifestream perform world/zone travel. Sentinel only handles the final in-zone safe approach using vnavmesh.");
+        ImGui.TextWrapped("HuntAlerts or Sonar can trigger HuntTrainAssistant/Lifestream travel. Sentinel only handles the final in-zone safe approach using vnavmesh.");
         ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
