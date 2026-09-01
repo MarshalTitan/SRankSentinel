@@ -67,6 +67,7 @@ public sealed class Plugin : IDalamudPlugin
 
         framework.Update += OnFrameworkUpdate;
         pi.UiBuilder.Draw += DrawUi;
+        pi.UiBuilder.OpenMainUi += OpenConfig;
         pi.UiBuilder.OpenConfigUi += OpenConfig;
         commands.AddHandler(Command, new CommandInfo((_, _) => configOpen = true)
         {
@@ -82,6 +83,7 @@ public sealed class Plugin : IDalamudPlugin
         huntAlerts.Unsubscribe(OnHuntAlert);
         framework.Update -= OnFrameworkUpdate;
         pi.UiBuilder.Draw -= DrawUi;
+        pi.UiBuilder.OpenMainUi -= OpenConfig;
         pi.UiBuilder.OpenConfigUi -= OpenConfig;
         commands.RemoveHandler(Command);
     }
