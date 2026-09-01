@@ -10,6 +10,8 @@ internal sealed class VNavmeshIpc
     private readonly ICallGateSubscriber<Vector3?> flagToPoint;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveCloseTo;
     private readonly ICallGateSubscriber<Vector3, bool, bool> moveTo;
+    private readonly ICallGateSubscriber<bool> pathIsRunning;
+    private readonly ICallGateSubscriber<bool> pathfindInProgress;
     private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> pointOnFloor;
     private readonly ICallGateSubscriber<object> stop;
 
@@ -19,6 +21,8 @@ internal sealed class VNavmeshIpc
         flagToPoint = pi.GetIpcSubscriber<Vector3?>("vnavmesh.Query.Mesh.FlagToPoint");
         moveCloseTo = pi.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
         moveTo = pi.GetIpcSubscriber<Vector3, bool, bool>("vnavmesh.SimpleMove.PathfindAndMoveTo");
+        pathIsRunning = pi.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
+        pathfindInProgress = pi.GetIpcSubscriber<bool>("vnavmesh.SimpleMove.PathfindInProgress");
         pointOnFloor = pi.GetIpcSubscriber<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor");
         stop = pi.GetIpcSubscriber<object>("vnavmesh.Path.Stop");
     }
@@ -44,6 +48,18 @@ internal sealed class VNavmeshIpc
     public bool MoveToSafe(Vector3 destination, bool fly)
     {
         try { return moveTo.InvokeFunc(destination, fly); }
+        catch { return false; }
+    }
+
+    public bool IsPathRunningSafe()
+    {
+        try { return pathIsRunning.InvokeFunc(); }
+        catch { return false; }
+    }
+
+    public bool IsPathfindInProgressSafe()
+    {
+        try { return pathfindInProgress.InvokeFunc(); }
         catch { return false; }
     }
 

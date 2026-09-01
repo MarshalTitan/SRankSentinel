@@ -9,6 +9,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using Lumina.Excel.Sheets;
 using System.Numerics;
 
 namespace SRankSentinel;
@@ -24,11 +25,16 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICondition condition;
     private readonly IChatGui chat;
     private readonly IObjectTable objects;
+    private readonly IDataManager data;
+    private readonly IGameGui gameGui;
     private readonly IFramework framework;
     private readonly IPluginLog log;
     private readonly VNavmeshIpc vnav;
+    private readonly LifestreamIpc lifestream;
     private readonly ICallGateSubscriber<HuntTrainMessageDto, object> huntAlerts;
     private readonly Configuration config;
+    private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
+    private readonly Queue<Vector3> parkingCandidates = new();
 
     private bool configOpen;
     private HuntAlertSnapshot? current;
@@ -39,6 +45,10 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime stateSinceUtc = DateTime.UtcNow;
     private DateTime lastTickUtc = DateTime.MinValue;
     private DateTime nextActionUtc = DateTime.MinValue;
+    private uint queuedAetheryteId;
+    private MapLinkPayload? queuedMapLink;
+    private bool ownsQueuedTravel;
+    private bool queuedFlagPrepared;
     private string status = "Idle";
 
     public Plugin(
@@ -48,6 +58,8 @@ public sealed class Plugin : IDalamudPlugin
         ICondition condition,
         IChatGui chatGui,
         IObjectTable objectTable,
+        IDataManager dataManager,
+        IGameGui gameGui,
         IFramework framework,
         IPluginLog pluginLog)
     {
@@ -57,12 +69,15 @@ public sealed class Plugin : IDalamudPlugin
         this.condition = condition;
         chat = chatGui;
         objects = objectTable;
+        data = dataManager;
+        this.gameGui = gameGui;
         this.framework = framework;
         log = pluginLog;
 
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pi);
         vnav = new VNavmeshIpc(pi);
+        lifestream = new LifestreamIpc(pi);
 
         // HuntAlerts owns its message type. A local DTO with matching public properties lets
         // Dalamud preserve the cross-plugin payload without a compile-time dependency.
@@ -122,7 +137,13 @@ public sealed class Plugin : IDalamudPlugin
         {
             var text = chatMessage.Message.TextValue;
             if (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase))
+            {
+                if (current is not null && text.Contains(current.CreatureName, StringComparison.OrdinalIgnoreCase))
+                    MarkCurrentComplete($"Sonar confirmed {current.CreatureName} was killed");
+
+                RemoveKilledQueuedAlerts(text);
                 return;
+            }
 
             const string sRankPrefix = "Rank S:";
             var namePayload = chatMessage.Message.Payloads
@@ -188,23 +209,127 @@ public sealed class Plugin : IDalamudPlugin
             instance = 1;
 
         var incoming = new HuntAlertSnapshot(huntType, world, creature, territory, instance, mapX, mapY, DateTime.UtcNow);
-        if (current?.Key == incoming.Key)
+        if (current?.Key == incoming.Key || pendingAlerts.Any(alert => alert.Key == incoming.Key))
             return;
 
-        // v0.1 intentionally does not queue multiple marks. Never abandon an active
-        // approach to chase a new notification; that is safer for unattended testing.
-        if (current is not null && state is not SentinelState.Idle and not SentinelState.Complete and not SentinelState.Aborted)
+        // Never abandon an active approach. Preserve later S ranks in arrival order so
+        // the completed mark can be cleared before the next travel workflow begins.
+        if ((current is not null && state is not SentinelState.Idle and not SentinelState.Aborted) ||
+            state is SentinelState.ReturningHome)
         {
-            log.Information("Ignored new S-rank alert while another safe-approach test is active: {Name}", creature);
+            pendingAlerts.Enqueue(incoming);
+            status = $"Queued {creature}; {pendingAlerts.Count} S rank(s) waiting";
+            log.Information("Queued S-rank alert while another lifecycle is active: {Name} ({Count} waiting)", creature, pendingAlerts.Count);
             return;
         }
 
+        StartAlert(incoming, source);
+    }
+
+    private void StartAlert(HuntAlertSnapshot incoming, string source)
+    {
         current = incoming;
         mark = null;
         flagPoint = null;
         safePoint = null;
-        SetState(SentinelState.WaitForTerritory, $"Waiting for travel to {creature} ({world})");
-        log.Information("Accepted {Source} S-rank alert: {Name}, territory {Territory}, world {World}, instance {Instance}", source, creature, territory, world, instance);
+        parkingCandidates.Clear();
+        queuedAetheryteId = 0;
+        queuedMapLink = null;
+        queuedFlagPrepared = false;
+        ownsQueuedTravel = source.Equals("queued alert", StringComparison.OrdinalIgnoreCase);
+        nextActionUtc = DateTime.MinValue;
+        if (ownsQueuedTravel)
+            PrepareQueuedTravel(incoming);
+        SetState(SentinelState.WaitForTerritory, $"Waiting for travel to {incoming.CreatureName} ({incoming.World})");
+        log.Information("Accepted {Source} S-rank alert: {Name}, territory {Territory}, world {World}, instance {Instance}", source, incoming.CreatureName, incoming.TerritoryId, incoming.World, incoming.Instance);
+    }
+
+    private void PrepareQueuedTravel(HuntAlertSnapshot alert)
+    {
+        var aetheryte = data.GetExcelSheet<Aetheryte>()
+            .FirstOrDefault(row => row.IsAetheryte && row.Territory.RowId == alert.TerritoryId);
+        queuedAetheryteId = aetheryte.RowId;
+
+        var map = data.GetExcelSheet<Map>()
+            .FirstOrDefault(row => row.TerritoryType.RowId == alert.TerritoryId);
+        if (map.RowId != 0)
+            queuedMapLink = new MapLinkPayload(alert.TerritoryId, map.RowId, alert.MapX, alert.MapY);
+
+        if (queuedAetheryteId == 0)
+            log.Warning("Queued alert {Name} has no territory aetheryte; waiting for the existing travel plugins instead.", alert.CreatureName);
+    }
+
+    private void DriveQueuedTravel(DateTime now)
+    {
+        if (!ownsQueuedTravel || current is null)
+            return;
+
+        var localPlayer = objects.LocalPlayer;
+        var currentWorld = localPlayer?.CurrentWorld.Value.Name.ToString() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(current.World) &&
+            !currentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+        {
+            if (now < nextActionUtc || lifestream.IsBusySafe())
+                return;
+
+            if (lifestream.ChangeWorldSafe(current.World))
+            {
+                status = $"Queued S rank: changing world to {current.World} through Lifestream";
+                nextActionUtc = now.AddSeconds(15);
+            }
+            else
+            {
+                status = $"Queued S rank: waiting to retry world travel to {current.World}";
+                nextActionUtc = now.AddSeconds(5);
+            }
+            return;
+        }
+
+        if (clientState.TerritoryType == current.TerritoryId)
+        {
+            PrepareQueuedMapFlag();
+            return;
+        }
+
+        if (queuedAetheryteId == 0 || now < nextActionUtc || lifestream.IsBusySafe())
+            return;
+
+        if (lifestream.TeleportSafe(queuedAetheryteId))
+        {
+            status = $"Queued S rank: teleporting normally toward {current.CreatureName}";
+            nextActionUtc = now.AddSeconds(15);
+        }
+        else
+        {
+            status = $"Queued S rank: waiting to retry the zone teleport for {current.CreatureName}";
+            nextActionUtc = now.AddSeconds(5);
+        }
+    }
+
+    private void PrepareQueuedMapFlag()
+    {
+        if (queuedFlagPrepared || queuedMapLink is null)
+            return;
+
+        queuedFlagPrepared = gameGui.OpenMapWithMapLink(queuedMapLink);
+        if (!queuedFlagPrepared)
+            status = "Queued S rank reached; waiting to retry its map flag";
+    }
+
+    private void RemoveKilledQueuedAlerts(string sonarText)
+    {
+        if (pendingAlerts.Count == 0)
+            return;
+
+        var survivors = pendingAlerts
+            .Where(alert => !sonarText.Contains(alert.CreatureName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (survivors.Length == pendingAlerts.Count)
+            return;
+
+        pendingAlerts.Clear();
+        foreach (var alert in survivors)
+            pendingAlerts.Enqueue(alert);
     }
 
     private static string ParseSonarWorld(string text)
@@ -234,7 +359,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework _)
     {
-        if (!config.Enabled || current is null)
+        if (!config.Enabled || (current is null && state is not SentinelState.ReturningHome))
             return;
 
         // Keep this intentionally low-frequency; none of the safety decisions require
@@ -257,12 +382,14 @@ public sealed class Plugin : IDalamudPlugin
 
     private void Tick(DateTime now)
     {
-        if (current is null)
+        if (current is null && state is not SentinelState.ReturningHome)
             return;
 
         switch (state)
         {
             case SentinelState.WaitForTerritory:
+                DriveQueuedTravel(now);
+
                 if ((now - stateSinceUtc).TotalSeconds > config.ArrivalTimeoutSeconds)
                 {
                     Abort("Timed out waiting for HuntAlerts/HuntTrainAssistant/Lifestream travel");
@@ -276,6 +403,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
 
             case SentinelState.WaitForFlag:
+                PrepareQueuedMapFlag();
+
                 if ((now - stateSinceUtc).TotalSeconds > 30)
                 {
                     Abort("Map flag could not be resolved; refusing to guess a hunt position");
@@ -332,6 +461,20 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     vnav.StopSafe();
                     SetState(SentinelState.Landing, "At safe parking point; landing normally");
+                    return;
+                }
+
+                if ((now - stateSinceUtc).TotalSeconds > 4 &&
+                    !vnav.IsPathRunningSafe() &&
+                    !vnav.IsPathfindInProgressSafe())
+                {
+                    if (!TryStartNextParkingRoute(true))
+                    {
+                        Abort("All sampled safe parking routes were unreachable");
+                        return;
+                    }
+
+                    SetState(SentinelState.MoveToSafePoint, $"Trying another safe parking route ({parkingCandidates.Count} alternatives remain)");
                 }
                 return;
 
@@ -368,8 +511,7 @@ public sealed class Plugin : IDalamudPlugin
 
                 if (mark is IBattleChara battle && battle.CurrentHp == 0)
                 {
-                    vnav.StopSafe();
-                    SetState(SentinelState.Complete, "S rank is dead; v0.1 complete (no return-home automation yet)");
+                    MarkCurrentComplete($"{mark.Name.TextValue} is dead");
                     return;
                 }
 
@@ -394,7 +536,32 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     vnav.StopSafe();
                     SetState(SentinelState.SafeWait, "Safe radius restored");
+                    return;
                 }
+
+
+                if ((now - stateSinceUtc).TotalSeconds > 4 &&
+                    !vnav.IsPathRunningSafe() &&
+                    !vnav.IsPathfindInProgressSafe())
+                {
+                    if (!TryStartNextParkingRoute(false))
+                    {
+                        vnav.StopSafe();
+                        SetState(SentinelState.SafeWait, "No alternate ground-retreat route was reachable; holding position");
+                        return;
+                    }
+
+                    SetState(SentinelState.GroundRetreat, $"Trying another ground-retreat route ({parkingCandidates.Count} alternatives remain)");
+                }
+                return;
+
+            case SentinelState.Complete:
+                if (now >= nextActionUtc)
+                    FinishCompletedAlert();
+                return;
+
+            case SentinelState.ReturningHome:
+                TickReturnHome(now);
                 return;
         }
     }
@@ -411,49 +578,37 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginSafeParking(IGameObject target)
     {
-        var point = CalculateSafeGroundPoint(target, config.WaitingDistance);
-        if (point is null)
-        {
-            Abort("Could not find a valid ground parking point outside the S rank");
-            return;
-        }
-
-        safePoint = point;
         if (!EnsureMounted(DateTime.UtcNow))
             return;
 
-        if (!vnav.MoveToSafe(point.Value, true))
+        PrepareParkingCandidates(target, config.WaitingDistance);
+        if (!TryStartNextParkingRoute(true))
         {
-            Abort("vnavmesh could not route to the safe parking point");
+            Abort("No reachable point was found among the sampled safe parking positions");
             return;
         }
 
-        SetState(SentinelState.MoveToSafePoint, $"Parking about {config.WaitingDistance:0}y from actual S rank");
+        SetState(SentinelState.MoveToSafePoint, $"Parking about {config.WaitingDistance:0}y from actual S rank ({parkingCandidates.Count} alternatives ready)");
     }
 
     private void BeginGroundRetreat(IGameObject target)
     {
-        var point = CalculateSafeGroundPoint(target, config.WaitingDistance);
-        if (point is null)
+        PrepareParkingCandidates(target, config.WaitingDistance);
+        if (!TryStartNextParkingRoute(false))
         {
             vnav.StopSafe();
-            status = "S rank moved inside emergency radius, but no safe ground retreat point was found; holding position";
+            status = "S rank moved inside emergency radius, but no sampled ground-retreat route was reachable; holding position";
             return;
         }
 
-        safePoint = point;
-        if (!vnav.MoveToSafe(point.Value, false))
-        {
-            vnav.StopSafe();
-            status = "Ground retreat path failed; navigation stopped";
-            return;
-        }
-
-        SetState(SentinelState.GroundRetreat, "S rank roamed too close; backing away on the ground");
+        SetState(SentinelState.GroundRetreat, $"S rank roamed too close; backing away on the ground ({parkingCandidates.Count} alternatives ready)");
     }
 
-    private Vector3? CalculateSafeGroundPoint(IGameObject target, float distance)
+    private void PrepareParkingCandidates(IGameObject target, float distance)
     {
+        parkingCandidates.Clear();
+        safePoint = null;
+
         var player = PlayerPosition();
         var away = player - target.Position;
         away.Y = 0;
@@ -461,9 +616,55 @@ public sealed class Plugin : IDalamudPlugin
             away = Vector3.UnitX;
         away = Vector3.Normalize(away);
 
-        var candidate = target.Position + away * distance;
-        candidate.Y = 1024f; // let vnavmesh project the candidate onto real terrain
-        return vnav.PointOnFloorSafe(candidate, 12f);
+        // Try the natural away-from-mark direction first, then fan out to both sides.
+        // A second, slightly wider ring helps when the requested radius lands on a
+        // cliff, building, hole in the mesh, or disconnected terrain island.
+        ReadOnlySpan<float> angleOffsets = [0f, 30f, -30f, 60f, -60f, 90f, -90f, 120f, -120f, 150f, -150f, 180f];
+        ReadOnlySpan<float> radiusOffsets = [0f, 8f];
+        var accepted = new List<Vector3>();
+        var minimumDistance = MathF.Max(config.EmergencyDistance + 3f, distance - 6f);
+
+        foreach (var radiusOffset in radiusOffsets)
+        {
+            foreach (var angleOffset in angleOffsets)
+            {
+                var radians = angleOffset * MathF.PI / 180f;
+                var cos = MathF.Cos(radians);
+                var sin = MathF.Sin(radians);
+                var direction = new Vector3(
+                    away.X * cos - away.Z * sin,
+                    0f,
+                    away.X * sin + away.Z * cos);
+
+                var candidate = target.Position + direction * (distance + radiusOffset);
+                candidate.Y = 1024f; // let vnavmesh project each sample onto real terrain
+                var projected = vnav.PointOnFloorSafe(candidate, 12f);
+                if (projected is null || HorizontalDistance(projected.Value, target.Position) < minimumDistance)
+                    continue;
+
+                if (accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
+                    continue;
+
+                accepted.Add(projected.Value);
+                parkingCandidates.Enqueue(projected.Value);
+            }
+        }
+    }
+
+    private bool TryStartNextParkingRoute(bool fly)
+    {
+        while (parkingCandidates.Count > 0)
+        {
+            var candidate = parkingCandidates.Dequeue();
+            if (!vnav.MoveToSafe(candidate, fly))
+                continue;
+
+            safePoint = candidate;
+            return true;
+        }
+
+        safePoint = null;
+        return false;
     }
 
     private Vector3 PlayerPosition() => objects.LocalPlayer?.Position ?? Vector3.Zero;
@@ -495,6 +696,88 @@ public sealed class Plugin : IDalamudPlugin
         var dx = a.X - b.X;
         var dz = a.Z - b.Z;
         return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    private void MarkCurrentComplete(string reason)
+    {
+        if (current is null || state is SentinelState.Complete)
+            return;
+
+        vnav.StopSafe();
+        nextActionUtc = DateTime.UtcNow.AddSeconds(2);
+        SetState(SentinelState.Complete, $"{reason}; clearing completed alert");
+    }
+
+    private void FinishCompletedAlert()
+    {
+        var completedName = current?.CreatureName ?? "S rank";
+        ClearCurrentAlert();
+
+        if (pendingAlerts.TryDequeue(out var next))
+        {
+            StartAlert(next, "queued alert");
+            status = $"{completedName} cleared; processing queued S rank {next.CreatureName} ({pendingAlerts.Count} still waiting)";
+            return;
+        }
+
+        if (config.ReturnToUldahAfterKill)
+        {
+            nextActionUtc = DateTime.UtcNow;
+            SetState(SentinelState.ReturningHome, $"{completedName} cleared; returning to Ul'dah through Lifestream");
+            return;
+        }
+
+        SetState(SentinelState.Idle, $"{completedName} cleared; idle");
+    }
+
+    private void TickReturnHome(DateTime now)
+    {
+        // Ul'dah - Steps of Nald / Steps of Thal.
+        if (clientState.TerritoryType is 130 or 131)
+        {
+            if (pendingAlerts.TryDequeue(out var next))
+            {
+                StartAlert(next, "queued alert");
+                return;
+            }
+
+            SetState(SentinelState.Idle, "Returned to Ul'dah; idle");
+            return;
+        }
+
+        if ((now - stateSinceUtc).TotalSeconds > 180)
+        {
+            SetState(SentinelState.Idle, "Completed alert cleared, but the return to Ul'dah timed out");
+            return;
+        }
+
+        if (now < nextActionUtc || lifestream.IsBusySafe())
+            return;
+
+        if (lifestream.TeleportToUldahSafe())
+        {
+            status = "Lifestream accepted the normal teleport to Ul'dah";
+            nextActionUtc = now.AddSeconds(15);
+        }
+        else
+        {
+            status = "Waiting to retry the normal Lifestream teleport to Ul'dah";
+            nextActionUtc = now.AddSeconds(5);
+        }
+    }
+
+    private void ClearCurrentAlert()
+    {
+        vnav.StopSafe();
+        current = null;
+        mark = null;
+        safePoint = null;
+        flagPoint = null;
+        parkingCandidates.Clear();
+        queuedAetheryteId = 0;
+        queuedMapLink = null;
+        ownsQueuedTravel = false;
+        queuedFlagPrepared = false;
     }
 
     private void SetState(SentinelState next, string message)
@@ -539,11 +822,16 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextWrapped($"Status: {status}");
         if (current is not null)
             ImGui.TextWrapped($"Current: {current.CreatureName} | {current.World} | territory {current.TerritoryId} | instance {current.Instance}");
+        if (pendingAlerts.Count > 0)
+            ImGui.TextWrapped($"Queued S ranks: {pendingAlerts.Count} | Next: {pendingAlerts.Peek().CreatureName}");
 
         ImGui.Separator();
-        config.FlagApproachDistance = DrawFloat("Flag approach distance", config.FlagApproachDistance, 60f, 120f);
-        config.WaitingDistance = DrawFloat("Waiting distance", config.WaitingDistance, 55f, 100f);
-        config.EmergencyDistance = DrawFloat("Emergency minimum", config.EmergencyDistance, 45f, 90f);
+        config.FlagApproachDistance = DrawFloat("Flag approach distance", config.FlagApproachDistance, 30f, 90f);
+        config.WaitingDistance = DrawFloat("Waiting distance", config.WaitingDistance, 25f, 70f);
+        config.EmergencyDistance = DrawFloat("Emergency minimum", config.EmergencyDistance, 15f, 50f);
+        var returnToUldah = config.ReturnToUldahAfterKill;
+        if (ImGui.Checkbox("Return to Ul'dah after final queued S rank", ref returnToUldah))
+            config.ReturnToUldahAfterKill = returnToUldah;
         ImGui.BeginDisabled();
         config.EngageHpPercent = DrawFloat("Engage HP % (reserved for v0.2)", config.EngageHpPercent, 1f, 99f);
         ImGui.EndDisabled();
@@ -554,13 +842,10 @@ public sealed class Plugin : IDalamudPlugin
         if (ImGui.Button("STOP / ABORT"))
             Abort("Stopped manually");
         ImGui.SameLine();
-        if (ImGui.Button("Clear completed alert"))
+        if (ImGui.Button("Clear alert / queue"))
         {
-            vnav.StopSafe();
-            current = null;
-            mark = null;
-            safePoint = null;
-            flagPoint = null;
+            ClearCurrentAlert();
+            pendingAlerts.Clear();
             SetState(SentinelState.Idle, "Idle");
         }
 
@@ -586,6 +871,7 @@ public sealed class Plugin : IDalamudPlugin
         SafeWait,
         GroundRetreat,
         Complete,
+        ReturningHome,
         Aborted,
     }
 }

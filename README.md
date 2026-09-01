@@ -11,15 +11,16 @@ A private-use / custom-repository Dalamud plugin prototype for safely approachin
 3. S Rank Sentinel waits until the correct territory is loaded and vnavmesh is ready.
 4. It reads the map flag that HuntTrainAssistant opened and flies toward it, but only to a conservative outer radius.
 5. It positively identifies the real S-rank object by creature name.
-6. It computes a terrain-valid parking point about 65 yalms from the actual mark.
+6. It samples multiple terrain-valid points around the actual mark and tries alternate vnavmesh routes until it finds reachable parking about 40 yalms away.
 7. It lands/dismounts using the game's normal land/dismount action.
 8. While waiting, if the S rank roams inside the emergency radius, it backs away on the ground.
+9. After a confirmed kill, it clears the completed alert, advances to the next queued S rank, or uses Lifestream's normal teleport to return to Ul'dah.
 
 ### Safety defaults
 
-- Flag approach: **80y**
-- Normal waiting radius: **65y**
-- Emergency minimum: **55y**
+- Flag approach: **50y**
+- Normal waiting radius: **40y**
+- Emergency minimum: **30y**
 - Future engagement threshold: **95% HP** (not active in v0.1)
 - If the map flag or actual S rank cannot be identified, Sentinel **stops instead of guessing**.
 - No coordinate warping / SetPosition / teleport-to-mouse behavior is used.
@@ -71,5 +72,7 @@ For the first real S-rank test, keep the plugin window open. Verify:
 - It lands around the configured waiting distance.
 - It never targets or attacks the S rank.
 - If the mark roams inside the emergency radius, Sentinel moves away instead of toward it.
+- An unreachable parking sample causes Sentinel to try other projected points rather than aborting immediately.
+- A confirmed kill clears automatically; queued S ranks run in arrival order, otherwise Sentinel returns to Ul'dah through Lifestream.
 
 Use **STOP / ABORT** in the plugin window if anything looks wrong.
