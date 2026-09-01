@@ -1,7 +1,0 @@
-{
-  "Name": "S Rank Sentinel",
-  "Author": "Wrothy",
-  "Punchline": "Safely approaches S ranks without early-pulling them.",
-  "Description": "Prototype companion for HuntAlerts/HuntTrainAssistant. Uses vnavmesh for normal in-zone navigation and parks at a configurable safe distance from an S rank. v0.1 never attacks.",
-  "Tags": ["hunts", "s-rank", "navigation", "automation"]
-}
