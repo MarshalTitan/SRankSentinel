@@ -24,7 +24,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IFramework framework;
     private readonly IPluginLog log;
     private readonly VNavmeshIpc vnav;
-    private readonly ICallGateSubscriber<object, object> huntAlerts;
+    private readonly ICallGateSubscriber<HuntTrainMessageDto, object> huntAlerts;
     private readonly Configuration config;
 
     private bool configOpen;
@@ -59,10 +59,10 @@ public sealed class Plugin : IDalamudPlugin
         config.Initialize(pi);
         vnav = new VNavmeshIpc(pi);
 
-        // HuntAlerts publishes its own HuntTrainMessage class. Subscribing as object lets
-        // us consume it without linking HuntAlerts as a compile-time dependency; public
-        // fields are read by name in OnHuntAlert.
-        huntAlerts = pi.GetIpcSubscriber<object, object>("HuntAlerts.OnHuntTrainMessageReceived");
+        // HuntAlerts owns its message type. A local DTO with matching public properties lets
+        // Dalamud preserve the cross-plugin payload without a compile-time dependency.
+        // Subscribing as object would deserialize the payload as JObject and hide its fields.
+        huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
 
         framework.Update += OnFrameworkUpdate;
@@ -90,24 +90,25 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OpenConfig() => configOpen = true;
 
-    private void OnHuntAlert(object payload)
+    private void OnHuntAlert(HuntTrainMessageDto payload)
     {
         if (!config.Enabled || payload is null)
             return;
 
-        var huntType = ReflectionReader.Read<string>(payload, "huntType") ?? string.Empty;
+        var huntType = payload.huntType ?? string.Empty;
         if (!huntType.Equals("srank", StringComparison.OrdinalIgnoreCase))
             return;
 
-        var world = ReflectionReader.Read<string>(payload, "huntWorld") ?? string.Empty;
-        var creature = ReflectionReader.Read<string>(payload, "creatureName") ?? string.Empty;
-        var territory = ReflectionReader.Read<uint>(payload, "startTerritoryTypeId");
-        var instance = ReflectionReader.Read<int>(payload, "instance");
-        var mapX = ReflectionReader.Read<float>(payload, "mapLocationX");
-        var mapY = ReflectionReader.Read<float>(payload, "mapLocationY");
+        var world = payload.huntWorld ?? string.Empty;
+        var creature = payload.creatureName ?? string.Empty;
+        var territory = payload.startTerritoryTypeId;
+        var instance = payload.instance;
+        var mapX = payload.mapLocationX;
+        var mapY = payload.mapLocationY;
 
         if (territory == 0 || string.IsNullOrWhiteSpace(creature))
         {
+            status = "S-rank alert received, but HuntAlerts did not include creature/territory data";
             log.Warning("Ignored S-rank IPC event because territory or creature name was unavailable.");
             return;
         }
@@ -488,4 +489,22 @@ public sealed class Plugin : IDalamudPlugin
         Complete,
         Aborted,
     }
+}
+
+
+// Property names intentionally mirror HuntAlerts' IPC payload. Dalamud serializes the
+// provider's type into this local type, keeping the plugins decoupled at compile time.
+internal sealed class HuntTrainMessageDto
+{
+    public HuntTrainMessageDto()
+    {
+    }
+
+    public string huntType { get; set; } = string.Empty;
+    public string huntWorld { get; set; } = string.Empty;
+    public string creatureName { get; set; } = string.Empty;
+    public uint startTerritoryTypeId { get; set; }
+    public int instance { get; set; }
+    public float mapLocationX { get; set; }
+    public float mapLocationY { get; set; }
 }
