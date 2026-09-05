@@ -53,7 +53,9 @@ public sealed class Plugin : IDalamudPlugin
     private bool tagAttempted;
     private uint activeTagActionId;
     private bool discardAtUldah;
-    private bool returningHome;
+    private bool ssChainObserved;
+    private bool ssSpawnAnnounced;
+    private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
     private string status = "Idle";
 
     public Plugin(
@@ -120,6 +122,13 @@ public sealed class Plugin : IDalamudPlugin
         if (!config.Enabled || payload is null)
             return;
 
+        if (HuntCatalog.IsForgivenGossip(payload.creatureName))
+        {
+            if (SsAlertMatchesCurrent(payload.huntWorld, payload.startTerritoryTypeId, payload.instance))
+                ObserveSsChain("HuntAlerts reported a Forgiven Gossip precursor");
+            return;
+        }
+
         AcceptSRankAlert(
             payload.huntType,
             payload.huntWorld,
@@ -133,12 +142,54 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnSonarChatMessage(IHandleableChatMessage chatMessage)
     {
-        if (!config.Enabled || !chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.Ordinal))
+        if (!config.Enabled)
             return;
 
         try
         {
             var text = chatMessage.Message.TextValue;
+            var isSonar = chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.Ordinal);
+            var mapLink = chatMessage.Message.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
+
+            if (state == SentinelState.SsWatch)
+            {
+                if (HuntCatalog.IsSsChainStartMessage(text))
+                    ObserveSsChain("The Forgiven Gossip chain started");
+                if (HuntCatalog.IsSsChainWithdrawnMessage(text))
+                {
+                    ssWatchDeadlineUtc = DateTime.UtcNow;
+                    status = "The Forgiven Gossip chain withdrew; SS opportunity ended";
+                }
+                if (HuntCatalog.IsSsSpawnMessage(text))
+                {
+                    ssChainObserved = true;
+                    ssSpawnAnnounced = true;
+                    ssWatchDeadlineUtc = DateTime.UtcNow.AddSeconds(config.SsChainTimeoutSeconds);
+                    status = "Forgiven Rebellion announced; waiting for its alert or game object location";
+                }
+                if (text.Contains(HuntCatalog.ForgivenGossipName, StringComparison.OrdinalIgnoreCase))
+                    ObserveSsChain("Forgiven Gossip observed; remaining stationary and not targeting it");
+            }
+
+            if (!text.Contains("was just killed", StringComparison.OrdinalIgnoreCase) &&
+                text.Contains(HuntCatalog.ForgivenRebellionName, StringComparison.OrdinalIgnoreCase) &&
+                mapLink is not null)
+            {
+                AcceptSRankAlert(
+                    "ssrank",
+                    isSonar ? ParseSonarWorld(text) : travel.CurrentWorld,
+                    HuntCatalog.ForgivenRebellionName,
+                    mapLink.TerritoryType.RowId,
+                    ParseSonarInstance(text),
+                    mapLink.XCoord,
+                    mapLink.YCoord,
+                    isSonar ? "Sonar" : "game hunt message");
+                return;
+            }
+
+            if (!isSonar)
+                return;
+
             if (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase))
             {
                 var killedWorld = ParseSonarWorld(text);
@@ -159,7 +210,6 @@ public sealed class Plugin : IDalamudPlugin
                 return;
 
             var creature = namePayload[prefix.Length..].Trim();
-            var mapLink = chatMessage.Message.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
             if (mapLink is null || string.IsNullOrWhiteSpace(creature))
             {
                 status = "Sonar S-rank alert did not contain a readable creature/map link";
@@ -193,8 +243,13 @@ public sealed class Plugin : IDalamudPlugin
         float mapY,
         string source)
     {
-        if (!string.Equals(huntType, "srank", StringComparison.OrdinalIgnoreCase))
+        var isForgivenRebellion = HuntCatalog.IsForgivenRebellion(creature);
+        if (!isForgivenRebellion && !string.Equals(huntType, "srank", StringComparison.OrdinalIgnoreCase))
             return;
+        if (HuntCatalog.IsForgivenGossip(creature))
+            return;
+        if (isForgivenRebellion && territory == 0 && state == SentinelState.SsWatch && current is not null)
+            territory = current.TerritoryId;
         if (territory == 0 || string.IsNullOrWhiteSpace(creature))
         {
             status = $"{source} alert was missing the S-rank name or territory";
@@ -217,9 +272,26 @@ public sealed class Plugin : IDalamudPlugin
         if (current?.Key == incoming.Key || pendingAlerts.Any(alert => alert.Key == incoming.Key))
             return;
 
+        if (isForgivenRebellion &&
+            current is not null &&
+            (state == SentinelState.SsWatch ||
+             (killConfirmed && clientState.TerritoryType == current.TerritoryId && !travel.IsBusy)) &&
+            current.World.Equals(incoming.World, StringComparison.OrdinalIgnoreCase) &&
+            current.TerritoryId == incoming.TerritoryId)
+        {
+            var currentInstance = travel.CurrentInstance;
+            if (currentInstance > 0)
+                incoming = incoming with { Instance = currentInstance };
+            StartSsAlertDirect(incoming, source);
+            return;
+        }
+
         if (current is not null || state != SentinelState.Idle)
         {
-            pendingAlerts.Enqueue(incoming);
+            if (isForgivenRebellion)
+                EnqueuePriority(incoming);
+            else
+                pendingAlerts.Enqueue(incoming);
             status = $"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting";
             return;
         }
@@ -235,10 +307,48 @@ public sealed class Plugin : IDalamudPlugin
         tagAttempted = false;
         activeTagActionId = 0;
         discardAtUldah = false;
-        returningHome = false;
+        ssChainObserved = false;
+        ssSpawnAnnounced = false;
+        ssWatchDeadlineUtc = DateTime.MinValue;
         PrepareCurrentTravel();
         SetState(SentinelState.ResetToUldah,
             $"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}");
+    }
+
+    private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)
+    {
+        vnav.StopSafe();
+        current = alert;
+        mark = null;
+        killConfirmed = false;
+        tagAttempted = false;
+        activeTagActionId = 0;
+        discardAtUldah = false;
+        ssChainObserved = true;
+        ssSpawnAnnounced = true;
+        ssWatchDeadlineUtc = DateTime.MinValue;
+        PrepareCurrentTravel();
+
+        var visibleSs = FindMark();
+        if (visibleSs is not null)
+        {
+            mark = visibleSs;
+            SetState(SentinelState.ApproachFlag,
+                $"{source}: Forgiven Rebellion visible; prioritizing the SS directly");
+            return;
+        }
+
+        SetState(currentMapLink is null ? SentinelState.ApproachFlag : SentinelState.WaitForFlag,
+            $"{source}: prioritizing Forgiven Rebellion directly without an Ul'dah reset");
+    }
+
+    private void EnqueuePriority(HuntAlertSnapshot alert)
+    {
+        var queued = pendingAlerts.ToArray();
+        pendingAlerts.Clear();
+        pendingAlerts.Enqueue(alert);
+        foreach (var existing in queued)
+            pendingAlerts.Enqueue(existing);
     }
 
     private void PrepareCurrentTravel()
@@ -264,7 +374,7 @@ public sealed class Plugin : IDalamudPlugin
             territoryAetheryteId = attuned.FirstOrDefault();
         var map = data.GetExcelSheet<Map>()
             .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
-        if (map.RowId != 0)
+        if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
             currentMapLink = new MapLinkPayload(current.TerritoryId, map.RowId, current.MapX, current.MapY);
     }
 
@@ -366,6 +476,9 @@ public sealed class Plugin : IDalamudPlugin
             case SentinelState.GroundRetreat:
                 TickGroundRetreat(now);
                 return;
+            case SentinelState.SsWatch:
+                TickSsWatch(now);
+                return;
         }
     }
 
@@ -385,10 +498,8 @@ public sealed class Plugin : IDalamudPlugin
                     StartAlert(next, $"{finished} cleared; next queued alert");
                     return;
                 }
-
-                if (BeginReturnHome(now, $"{finished} cleared"))
-                    return;
-                SetState(SentinelState.Idle, $"{finished} cleared; reset complete in Ul'dah");
+                SetState(SentinelState.Idle,
+                    $"{finished} cleared; standing by in Ul'dah on {travel.CurrentWorld}");
                 return;
             }
 
@@ -399,9 +510,8 @@ public sealed class Plugin : IDalamudPlugin
                     StartAlert(next, "Ul'dah reset complete; next queued alert");
                     return;
                 }
-                if (BeginReturnHome(now, "Ul'dah reset complete"))
-                    return;
-                SetState(SentinelState.Idle, "Reset complete in Ul'dah");
+                SetState(SentinelState.Idle,
+                    $"Reset complete; standing by in Ul'dah on {travel.CurrentWorld}");
                 return;
             }
 
@@ -531,31 +641,11 @@ public sealed class Plugin : IDalamudPlugin
             FailWorldVisit($"Arrival on {targetWorld} timed out");
     }
 
-    private bool BeginReturnHome(DateTime now, string reason)
-    {
-        var homeWorld = travel.HomeWorld;
-        if (string.IsNullOrWhiteSpace(homeWorld) ||
-            travel.CurrentWorld.Equals(homeWorld, StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        returningHome = true;
-        nextActionUtc = now;
-        SetState(SentinelState.WorldVisit, $"{reason}; returning normally to home world {homeWorld}");
-        return true;
-    }
-
-    private string WorldVisitTarget() => returningHome ? travel.HomeWorld : current?.World ?? string.Empty;
+    private string WorldVisitTarget() => current?.World ?? string.Empty;
 
     private void CompleteWorldVisit(string targetWorld)
     {
         vnav.StopSafe();
-        if (returningHome)
-        {
-            returningHome = false;
-            SetState(SentinelState.Idle, $"Returned home to {targetWorld}; standing by in Ul'dah");
-            return;
-        }
-
         SetState(SentinelState.TeleportToTerritory,
             $"Arrived on {targetWorld}; preparing territory teleport");
     }
@@ -563,13 +653,6 @@ public sealed class Plugin : IDalamudPlugin
     private void FailWorldVisit(string reason)
     {
         vnav.StopSafe();
-        if (returningHome)
-        {
-            returningHome = false;
-            SetState(SentinelState.Idle, $"{reason}; remaining safely at the Ul'dah aetheryte");
-            return;
-        }
-
         FailCurrent(reason);
     }
 
@@ -890,6 +973,65 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private void TickSsWatch(DateTime now)
+    {
+        if (current is null)
+        {
+            SetState(SentinelState.ResetToUldah, "SS watch lost its completed S-rank context");
+            return;
+        }
+
+        if (!travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
+            clientState.TerritoryType != current.TerritoryId)
+        {
+            SetState(SentinelState.ResetToUldah,
+                "Left the completed S-rank territory during SS watch; returning to Ul'dah on the current world");
+            return;
+        }
+
+        var visibleSs = FindBattleNpc(HuntCatalog.ForgivenRebellionDataId, HuntCatalog.ForgivenRebellionName);
+        if (visibleSs is not null)
+        {
+            var ss = new HuntAlertSnapshot(
+                "ssrank", current.World, HuntCatalog.ForgivenRebellionName, current.TerritoryId,
+                HuntCatalog.ForgivenRebellionDataId, current.PreferredAetheryteId,
+                travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance,
+                0f, 0f, now);
+            StartSsAlertDirect(ss, "game object scan");
+            return;
+        }
+
+        var gossipCount = objects.OfType<IBattleChara>().Count(actor =>
+            actor.ObjectKind == ObjectKind.BattleNpc && !actor.IsDead &&
+            HuntCatalog.IsForgivenGossip(actor.Name.TextValue));
+        if (gossipCount > 0)
+            ObserveSsChain($"{gossipCount} Forgiven Gossip precursor(s) visible; ignoring them safely");
+
+        if (now >= ssWatchDeadlineUtc)
+        {
+            nextActionUtc = now;
+            SetState(SentinelState.ResetToUldah,
+                ssChainObserved
+                    ? "Forgiven Rebellion opportunity expired; returning to Ul'dah on the current world"
+                    : "No Forgiven Gossip chain occurred; returning to Ul'dah on the current world");
+            return;
+        }
+
+        if (combat.IsPlayerDead)
+        {
+            status = combat.TryAcceptRaise()
+                ? "Accepted Raise during SS watch; Return remains locked until the opportunity ends"
+                : "Dead during SS watch; waiting for Raise and refusing to use Return";
+            return;
+        }
+
+        var remaining = Math.Max(0, (int)Math.Ceiling((ssWatchDeadlineUtc - now).TotalSeconds));
+        status = ssChainObserved
+            ? $"SS watch: {(ssSpawnAnnounced ? "Forgiven Rebellion announced" : "Forgiven Gossip chain active")}; " +
+              $"holding position without targeting precursors ({remaining}s remaining)"
+            : $"SS watch: checking for a Forgiven Gossip chain ({remaining}s grace remaining)";
+    }
+
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
         if (fly && !EnsureMounted(DateTime.UtcNow))
@@ -977,11 +1119,40 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is null || clientState.TerritoryType != current.TerritoryId)
             return null;
-        return objects
-            .OfType<IBattleChara>()
-            .FirstOrDefault(o => o.ObjectKind == ObjectKind.BattleNpc &&
-                ((current.MarkDataId != 0 && o.BaseId == current.MarkDataId) ||
-                 o.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)));
+        return FindBattleNpc(current.MarkDataId, current.CreatureName);
+    }
+
+    private IBattleChara? FindBattleNpc(uint dataId, string name)
+    {
+        return objects.OfType<IBattleChara>().FirstOrDefault(actor =>
+            actor.ObjectKind == ObjectKind.BattleNpc &&
+            ((dataId != 0 && actor.BaseId == dataId) ||
+             actor.Name.TextValue.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+             (HuntCatalog.IsForgivenRebellion(name) &&
+              HuntCatalog.IsForgivenRebellion(actor.Name.TextValue))));
+    }
+
+    private bool SsAlertMatchesCurrent(string? world, uint territoryId, int instance)
+    {
+        if (state != SentinelState.SsWatch || current is null ||
+            (territoryId != 0 && current.TerritoryId != territoryId))
+            return false;
+        var alertWorld = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
+        var currentInstance = travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance;
+        return current.World.Equals(alertWorld, StringComparison.OrdinalIgnoreCase) &&
+               (instance <= 0 || currentInstance == Math.Max(1, instance));
+    }
+
+    private void ObserveSsChain(string reason)
+    {
+        if (state != SentinelState.SsWatch)
+            return;
+        if (!ssChainObserved)
+        {
+            ssChainObserved = true;
+            ssWatchDeadlineUtc = DateTime.UtcNow.AddSeconds(config.SsChainTimeoutSeconds);
+        }
+        status = $"{reason}; Forgiven Gossip will not be targeted or approached";
     }
 
     private void ConfirmKill(string reason)
@@ -991,8 +1162,21 @@ public sealed class Plugin : IDalamudPlugin
         killConfirmed = true;
         discardAtUldah = false;
         vnav.StopSafe();
-        nextActionUtc = DateTime.UtcNow.AddSeconds(2);
-        SetState(SentinelState.ResetToUldah, $"{reason}; resetting through Ul'dah");
+        var now = DateTime.UtcNow;
+        if (HuntCatalog.IsShadowbringersS(current.TerritoryId, current.CreatureName))
+        {
+            ssChainObserved = false;
+            ssSpawnAnnounced = false;
+            ssWatchDeadlineUtc = now.AddSeconds(config.SsNoChainGraceSeconds);
+            nextActionUtc = DateTime.MinValue;
+            SetState(SentinelState.SsWatch,
+                $"{reason}; holding in-zone briefly to watch for Forgiven Gossip and Forgiven Rebellion");
+            return;
+        }
+
+        nextActionUtc = now.AddSeconds(2);
+        SetState(SentinelState.ResetToUldah,
+            $"{reason}; returning to Ul'dah on the current visited world");
     }
 
     private void FailCurrent(string reason)
@@ -1017,7 +1201,9 @@ public sealed class Plugin : IDalamudPlugin
         tagAttempted = false;
         activeTagActionId = 0;
         discardAtUldah = false;
-        returningHome = false;
+        ssChainObserved = false;
+        ssSpawnAnnounced = false;
+        ssWatchDeadlineUtc = DateTime.MinValue;
         parkingCandidates.Clear();
     }
 
@@ -1130,7 +1316,7 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         ImGui.TextUnformatted("STANDALONE S-RANK ORCHESTRATOR");
-        ImGui.TextWrapped("HuntAlerts and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, and post-kill recovery.");
+        ImGui.TextWrapped("HuntAlerts and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, Shadowbringers SS watch, and post-kill recovery.");
         ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
@@ -1144,6 +1330,8 @@ public sealed class Plugin : IDalamudPlugin
         config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 35f, 70f);
         config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 20f, 50f);
         config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f);
+        ImGui.TextWrapped($"Shadowbringers SS watch: {config.SsNoChainGraceSeconds}s chain grace, " +
+                          $"{config.SsChainTimeoutSeconds}s after Forgiven Gossip appears.");
         var automaticTag = config.AutomaticTagAction;
         if (ImGui.Checkbox("Choose ranged tag from current job", ref automaticTag))
             config.AutomaticTagAction = automaticTag;
@@ -1167,7 +1355,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        ImGui.TextWrapped("Safety gates: the mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, never runs a rotation, never writes coordinates, and never uses Return until the mark's death is confirmed.");
+        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, and never runs a rotation. Forgiven Gossip precursors are observation-only and are never targeted, approached, or attacked.");
         ImGui.End();
     }
 
@@ -1197,6 +1385,7 @@ public sealed class Plugin : IDalamudPlugin
         SafeWait,
         TagApproach,
         GroundRetreat,
+        SsWatch,
     }
 }
 

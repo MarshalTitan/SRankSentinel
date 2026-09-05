@@ -33,9 +33,6 @@ internal sealed class NativeTravel(
     public string CurrentWorld =>
         objects.LocalPlayer?.CurrentWorld.Value.Name.ToString() ?? string.Empty;
 
-    public string HomeWorld =>
-        objects.LocalPlayer?.HomeWorld.Value.Name.ToString() ?? string.Empty;
-
     public unsafe int CurrentInstance
     {
         get

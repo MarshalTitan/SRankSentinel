@@ -13,6 +13,12 @@ internal sealed record SRankDefinition(
 /// </summary>
 internal static class HuntCatalog
 {
+    public const uint ForgivenRebellionDataId = 8915;
+    public const string ForgivenRebellionName = "Forgiven Rebellion";
+    public const string ForgivenGossipName = "Forgiven Gossip";
+
+    private static readonly HashSet<uint> ShadowbringersTerritories = [813, 814, 815, 816, 817, 818];
+
     private static readonly SRankDefinition[] Definitions =
     [
         new(2962, 134, 52, "Croque-Mitaine"),
@@ -71,11 +77,41 @@ internal static class HuntCatalog
 
     public static SRankDefinition? Resolve(uint territoryId, string alertName)
     {
+        if (IsForgivenRebellion(alertName) && IsShadowbringersTerritory(territoryId))
+        {
+            var zone = Definitions.FirstOrDefault(definition => definition.TerritoryId == territoryId);
+            return zone is null
+                ? null
+                : new SRankDefinition(ForgivenRebellionDataId, territoryId, zone.PreferredAetheryteId,
+                    ForgivenRebellionName);
+        }
+
         var normalized = Normalize(alertName);
         return Definitions.FirstOrDefault(definition =>
                    definition.TerritoryId == territoryId && Normalize(definition.Name) == normalized)
                ?? Definitions.FirstOrDefault(definition => definition.TerritoryId == territoryId);
     }
+
+    public static bool IsShadowbringersTerritory(uint territoryId) =>
+        ShadowbringersTerritories.Contains(territoryId);
+
+    public static bool IsShadowbringersS(uint territoryId, string name) =>
+        IsShadowbringersTerritory(territoryId) && !IsForgivenRebellion(name);
+
+    public static bool IsForgivenRebellion(string? name) =>
+        Normalize(name ?? string.Empty).EndsWith("FORGIVENREBELLION", StringComparison.Ordinal);
+
+    public static bool IsForgivenGossip(string? name) =>
+        Normalize(name ?? string.Empty).EndsWith("FORGIVENGOSSIP", StringComparison.Ordinal);
+
+    public static bool IsSsChainStartMessage(string text) =>
+        text.Contains("minions of an extraordinarily powerful mark are on the hunt", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsSsChainWithdrawnMessage(string text) =>
+        text.Contains("minions of an extraordinarily powerful mark have withdrawn", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsSsSpawnMessage(string text) =>
+        text.Contains("presence of an extraordinarily powerful mark", StringComparison.OrdinalIgnoreCase);
 
     private static string Normalize(string value) =>
         new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
