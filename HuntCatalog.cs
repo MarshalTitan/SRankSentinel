@@ -155,6 +155,11 @@ internal static class HuntCatalog
     public static bool IsShadowbringersTerritory(uint territoryId) =>
         ShadowbringersTerritories.Contains(territoryId);
 
+    public static bool IsSupportedTerritory(uint territoryId) =>
+        ShadowbringersTerritories.Contains(territoryId) ||
+        EndwalkerTerritories.Contains(territoryId) ||
+        DawntrailTerritories.Contains(territoryId);
+
     public static SsProfile? GetSsProfileForTerritory(uint territoryId) =>
         SsProfiles.FirstOrDefault(profile => profile.TerritoryIds.Contains(territoryId));
 

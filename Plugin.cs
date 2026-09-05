@@ -417,6 +417,11 @@ public sealed class Plugin : IDalamudPlugin
             status = $"Ignored {source} alert for {creature.Trim()}: territory does not match its expansion";
             return;
         }
+        if (!HuntCatalog.IsSupportedTerritory(territory))
+        {
+            status = $"Ignored {source} alert for {creature.Trim()}: only Shadowbringers, Endwalker, and Dawntrail are supported";
+            return;
+        }
 
         world = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
         if (!travel.IsSameDataCenter(world))
@@ -621,6 +626,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.WaitForInstance:
                 TickWaitForInstance(now);
+                return;
+            case SentinelState.WaitForMesh:
+                TickWaitForMesh();
                 return;
             case SentinelState.WaitForFlag:
                 TickWaitForFlag(now);
@@ -888,7 +896,7 @@ public sealed class Plugin : IDalamudPlugin
         var instance = travel.CurrentInstance;
         if (instance == current.Instance || (current.Instance == 1 && instance == 0))
         {
-            SetState(SentinelState.WaitForFlag, "Territory and instance ready; resolving map flag");
+            BeginMeshWait("Territory and instance ready");
             return;
         }
         nextActionUtc = DateTime.UtcNow;
@@ -901,7 +909,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (travel.CurrentInstance == current.Instance)
         {
-            SetState(SentinelState.WaitForFlag, "Correct instance reached; resolving map flag");
+            BeginMeshWait("Correct instance reached");
             return;
         }
         if (TravelTimedOut(now))
@@ -947,11 +955,38 @@ public sealed class Plugin : IDalamudPlugin
         if (!travel.IsBusy && clientState.TerritoryType == current.TerritoryId &&
             travel.CurrentInstance == current.Instance)
         {
-            SetState(SentinelState.WaitForFlag, "Correct instance reached; resolving map flag");
+            BeginMeshWait("Correct instance reached");
             return;
         }
         if (TravelTimedOut(now))
             FailCurrent($"Arrival in instance {current.Instance} timed out");
+    }
+
+    private void BeginMeshWait(string reason)
+    {
+        vnav.StopSafe();
+        nextActionUtc = DateTime.MinValue;
+        SetState(SentinelState.WaitForMesh,
+            $"{reason}; holding at the aetheryte until vnavmesh finishes preparing this territory");
+    }
+
+    private void TickWaitForMesh()
+    {
+        if (current is null)
+            return;
+
+        // Mesh downloads/generation can take minutes. This state intentionally has no timeout,
+        // performs no movement or mount toggles, and keeps the active hunt reserved while newer
+        // alerts continue to enter the persistent queue.
+        if (!vnav.IsReadySafe())
+        {
+            status = $"Waiting at the aetheryte for vnavmesh mesh readiness; " +
+                     $"{pendingAlerts.Count} newer hunt(s) queued without replacing {current.CreatureName}";
+            return;
+        }
+
+        SetState(SentinelState.WaitForFlag,
+            "vnavmesh mesh is fully ready; resolving the active hunt's map flag");
     }
 
     private void TickWaitForFlag(DateTime now)
@@ -960,7 +995,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (!vnav.IsReadySafe())
         {
-            status = "Waiting for vnavmesh to become ready";
+            BeginMeshWait("vnavmesh mesh readiness was lost");
             return;
         }
         if (!flagPrepared && currentMapLink is not null)
@@ -1590,6 +1625,7 @@ public sealed class Plugin : IDalamudPlugin
         IsWithinFreshnessWindow(alert.ReceivedAtUtc, now) &&
         !killedAlerts.ContainsKey(alert.Key) &&
         travel.IsSameDataCenter(alert.World) &&
+        HuntCatalog.IsSupportedTerritory(alert.TerritoryId) &&
         HuntCatalog.Resolve(alert.TerritoryId, alert.CreatureName) is not null;
 
     private bool IsWithinFreshnessWindow(DateTime timestamp, DateTime now)
@@ -1833,6 +1869,7 @@ public sealed class Plugin : IDalamudPlugin
         ChangeInstance,
         SelectInstance,
         WaitForInstance,
+        WaitForMesh,
         WaitForFlag,
         ApproachFlag,
         MoveToSafePoint,
