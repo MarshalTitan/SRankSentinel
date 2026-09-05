@@ -128,6 +128,30 @@ internal static class HuntCatalog
                ?? Definitions.FirstOrDefault(definition => definition.TerritoryId == territoryId);
     }
 
+    /// <summary>
+    /// Strict resolver for machine-readable feeds. Unlike the human-alert resolver above, this
+    /// never guesses the sole S rank in a territory when the supplied identity is unknown.
+    /// </summary>
+    public static SRankDefinition? ResolveStrict(uint territoryId, string alertName)
+    {
+        var ssProfile = GetSsProfileForTerritory(territoryId);
+        if (ssProfile is not null && IsSsName(alertName, ssProfile))
+        {
+            var zone = Definitions.FirstOrDefault(definition => definition.TerritoryId == territoryId);
+            return zone is null
+                ? null
+                : new SRankDefinition(ssProfile.SsDataId, territoryId, zone.PreferredAetheryteId,
+                    ssProfile.SsName);
+        }
+
+        var normalized = Normalize(alertName);
+        return Definitions.FirstOrDefault(definition =>
+            definition.TerritoryId == territoryId && Normalize(definition.Name) == normalized);
+    }
+
+    public static bool NamesMatch(string? left, string? right) =>
+        Normalize(left ?? string.Empty) == Normalize(right ?? string.Empty);
+
     public static bool IsShadowbringersTerritory(uint territoryId) =>
         ShadowbringersTerritories.Contains(territoryId);
 

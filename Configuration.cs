@@ -6,8 +6,13 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 6;
+    public int Version { get; set; } = 7;
     public bool Enabled { get; set; } = true;
+    public bool EnableFaloop { get; set; } = true;
+    public bool EnableHuntAlertsFallback { get; set; } = true;
+    public bool EnableSonarFallback { get; set; } = true;
+    public string FaloopUsername { get; set; } = string.Empty;
+    public string FaloopSessionId { get; set; } = string.Empty;
     public float FlagApproachDistance { get; set; } = 60f;
     public float WaitingDistance { get; set; } = 45f;
     public float EmergencyDistance { get; set; } = 38f;
@@ -69,6 +74,17 @@ public sealed class Configuration : IPluginConfiguration
             PendingAlerts ??= [];
             KilledAlerts ??= [];
             Version = 6;
+            Save();
+        }
+
+        if (Version < 7)
+        {
+            EnableFaloop = true;
+            EnableHuntAlertsFallback = true;
+            EnableSonarFallback = true;
+            FaloopUsername ??= string.Empty;
+            FaloopSessionId ??= string.Empty;
+            Version = 7;
             Save();
         }
     }

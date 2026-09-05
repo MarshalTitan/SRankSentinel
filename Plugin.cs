@@ -10,6 +10,7 @@ using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using Lumina.Excel.Sheets;
+using System.Collections.Concurrent;
 using System.Numerics;
 
 namespace SRankSentinel;
@@ -32,8 +33,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly VNavmeshIpc vnav;
     private readonly NativeTravel travel;
     private readonly CombatController combat;
+    private readonly FaloopClient faloop;
     private readonly ICallGateSubscriber<HuntTrainMessageDto, object> huntAlerts;
     private readonly Configuration config;
+    private readonly ConcurrentQueue<FaloopFeedEvent> faloopEvents = new();
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Queue<Vector3> parkingCandidates = new();
@@ -59,6 +62,10 @@ public sealed class Plugin : IDalamudPlugin
     private SsProfile? activeSsProfile;
     private DateTime postKillSsGraceDeadlineUtc = DateTime.MinValue;
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
+    private Task<FaloopAuthenticationResult>? faloopLoginTask;
+    private string faloopUsername = string.Empty;
+    private string faloopPassword = string.Empty;
+    private string faloopLoginStatus = string.Empty;
     private string status = "Idle";
 
     public Plugin(
@@ -90,6 +97,9 @@ public sealed class Plugin : IDalamudPlugin
         vnav = new VNavmeshIpc(pi);
         travel = new NativeTravel(gameGui, objectTable, targetManager, condition, dataManager);
         combat = new CombatController(gameGui, condition, objectTable, targetManager);
+        faloop = new FaloopClient(pluginLog);
+        faloop.EventReceived += OnFaloopEvent;
+        faloopUsername = config.FaloopUsername;
 
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
@@ -107,12 +117,17 @@ public sealed class Plugin : IDalamudPlugin
         if (TryDequeueNextValid(out var restored))
             StartAlert(restored, "restored persistent queue");
 
+        if (config.Enabled && config.EnableFaloop)
+            faloop.Start(config.FaloopSessionId);
+
         log.Information("S Rank Sentinel standalone orchestrator loaded.");
     }
 
     public void Dispose()
     {
         vnav.StopSafe();
+        faloop.EventReceived -= OnFaloopEvent;
+        faloop.Dispose();
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
         framework.Update -= OnFrameworkUpdate;
@@ -124,9 +139,133 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OpenConfig() => configOpen = true;
 
+    private void OnFaloopEvent(FaloopFeedEvent feedEvent)
+    {
+        if (config.Enabled && config.EnableFaloop)
+            faloopEvents.Enqueue(feedEvent);
+    }
+
+    private void BeginFaloopLogin()
+    {
+        if (faloopLoginTask is { IsCompleted: false })
+            return;
+        if (string.IsNullOrWhiteSpace(faloopUsername) || string.IsNullOrEmpty(faloopPassword))
+        {
+            faloopLoginStatus = "Enter the Faloop username and password first.";
+            return;
+        }
+
+        config.FaloopUsername = faloopUsername.Trim();
+        config.EnableFaloop = true;
+        config.Save();
+        faloopLoginStatus = "Authenticating with Faloop...";
+        faloopLoginTask = faloop.AuthenticateAsync(config.FaloopUsername, faloopPassword);
+        faloopPassword = string.Empty;
+    }
+
+    private void CompleteFaloopLoginIfReady()
+    {
+        if (faloopLoginTask is not { IsCompleted: true } completed)
+            return;
+        faloopLoginTask = null;
+        try
+        {
+            var result = completed.GetAwaiter().GetResult();
+            if (!result.Success)
+            {
+                faloopLoginStatus = result.Error;
+                return;
+            }
+
+            config.FaloopSessionId = result.SessionId;
+            config.EnableFaloop = true;
+            config.Save();
+            if (config.Enabled)
+            {
+                faloop.Start(result.SessionId);
+                faloopLoginStatus = "Authenticated; connecting to the live feed.";
+            }
+            else
+            {
+                faloop.Stop("Authenticated; Sentinel is disabled");
+                faloopLoginStatus = "Authenticated; enable Sentinel to connect to the live feed.";
+            }
+        }
+        catch (Exception ex)
+        {
+            faloopLoginStatus = "Faloop login failed; see the plugin log.";
+            log.Warning("Could not complete Faloop login: {Error}", ex.Message);
+        }
+    }
+
+    private void DrainFaloopEvents()
+    {
+        while (faloopEvents.TryDequeue(out var feedEvent))
+            HandleFaloopEvent(feedEvent);
+    }
+
+    private void HandleFaloopEvent(FaloopFeedEvent feedEvent)
+    {
+        var world = ResolveFaloopWorld(feedEvent.WorldSlug);
+        var creature = FaloopCatalog.DisplayName(feedEvent.MobSlug);
+        var hasTerritory = FaloopCatalog.TryResolveTerritory(feedEvent.ZoneSlug, out var territory);
+
+        if (feedEvent.Action == FaloopEventAction.Death)
+        {
+            if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+                return;
+            InvalidateExternalDeath(world, creature, hasTerritory ? territory : 0,
+                feedEvent.Instance, feedEvent.OccurredAtUtc, "Faloop");
+            return;
+        }
+
+        if (!FaloopCatalog.TryResolve(feedEvent.ZoneSlug, feedEvent.PoiId,
+                out territory, out var mapX, out var mapY))
+        {
+            status = $"Ignored Faloop spawn for {creature}: unknown supported-zone POI " +
+                     $"{feedEvent.ZoneSlug ?? "(missing)"}/{feedEvent.PoiId}";
+            log.Warning("Faloop spawn had no reviewed coordinate mapping: zone {Zone}, POI {Poi}",
+                feedEvent.ZoneSlug ?? "(missing)", feedEvent.PoiId);
+            return;
+        }
+
+        var precursorProfile = HuntCatalog.GetSsProfileForPrecursorName(creature);
+        if (precursorProfile is not null)
+        {
+            if (SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
+                ObserveSsChain(precursorProfile,
+                    $"Faloop reported a {precursorProfile.PrecursorName} precursor");
+            return;
+        }
+
+        var definition = HuntCatalog.ResolveStrict(territory, creature);
+        if (definition is null)
+            return; // Faloop reports many ranks; only the strict ShB/EW/DT S/SS catalog is eligible.
+
+        var isSs = HuntCatalog.IsAnySsName(definition.Name);
+        AcceptSRankAlert(
+            isSs ? "ssrank" : "srank",
+            world,
+            definition.Name,
+            territory,
+            Math.Max(1, feedEvent.Instance),
+            mapX,
+            mapY,
+            "Faloop",
+            feedEvent.OccurredAtUtc);
+    }
+
+    private string ResolveFaloopWorld(string worldId)
+    {
+        if (!uint.TryParse(worldId, out var numericId))
+            return FaloopCatalog.DisplayName(worldId);
+        var world = data.GetExcelSheet<World>().FirstOrDefault(row => row.RowId == numericId);
+        return world.RowId == 0 ? worldId : world.Name.ToString();
+    }
+
     private void OnHuntAlert(HuntTrainMessageDto payload)
     {
-        if (!config.Enabled || payload is null)
+        if (!config.Enabled || !config.EnableHuntAlertsFallback || payload is null)
             return;
 
         var precursorProfile = HuntCatalog.GetSsProfileForPrecursorName(payload.creatureName);
@@ -159,6 +298,9 @@ public sealed class Plugin : IDalamudPlugin
             var text = chatMessage.Message.TextValue;
             var isSonar = chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.Ordinal);
             var mapLink = chatMessage.Message.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
+
+            if (isSonar && !config.EnableSonarFallback)
+                return;
 
             if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) && activeSsProfile is not null)
             {
@@ -253,7 +395,8 @@ public sealed class Plugin : IDalamudPlugin
         int instance,
         float mapX,
         float mapY,
-        string source)
+        string source,
+        DateTime? occurredAtUtc = null)
     {
         var ssProfile = HuntCatalog.GetSsProfileForSsName(creature);
         var isSs = ssProfile is not null;
@@ -287,7 +430,12 @@ public sealed class Plugin : IDalamudPlugin
         var incoming = new HuntAlertSnapshot(
             isSs ? "ssrank" : "srank", world, creature.Trim(), territory,
             definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
-            instance, mapX, mapY, DateTime.UtcNow);
+            instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);
+        if (!IsWithinFreshnessWindow(incoming.ReceivedAtUtc, DateTime.UtcNow))
+        {
+            status = $"Ignored stale {source} alert for {incoming.CreatureName} on {incoming.World}";
+            return;
+        }
         PruneKilledAlerts();
         if (killedAlerts.ContainsKey(incoming.Key) || current?.Key == incoming.Key ||
             pendingAlerts.Any(alert => alert.Key == incoming.Key))
@@ -395,9 +543,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework _)
     {
-        if (!config.Enabled || (current is null && state == SentinelState.Idle))
-            return;
-
         var now = DateTime.UtcNow;
         if ((now - lastTickUtc).TotalMilliseconds < 250)
             return;
@@ -405,6 +550,13 @@ public sealed class Plugin : IDalamudPlugin
 
         try
         {
+            CompleteFaloopLoginIfReady();
+            if (!config.Enabled)
+                return;
+            if (config.EnableFaloop)
+                DrainFaloopEvents();
+            if (current is null && state == SentinelState.Idle)
+                return;
             Tick(now);
         }
         catch (Exception ex)
@@ -1343,6 +1495,46 @@ public sealed class Plugin : IDalamudPlugin
         status = $"Removed {removed.Length} queued hunt(s) already reported killed";
     }
 
+    private void InvalidateExternalDeath(
+        string world,
+        string creature,
+        uint territory,
+        int instance,
+        DateTime deathAtUtc,
+        string source)
+    {
+        bool Matches(HuntAlertSnapshot alert) =>
+            alert.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&
+            HuntCatalog.NamesMatch(alert.CreatureName, creature) &&
+            (territory == 0 || alert.TerritoryId == territory) &&
+            (instance <= 0 || alert.Instance == instance) &&
+            deathAtUtc >= alert.ReceivedAtUtc.AddMinutes(-1);
+
+        var currentMatched = current is not null && Matches(current);
+        var removed = pendingAlerts.Where(Matches).ToArray();
+        if (removed.Length > 0)
+        {
+            var removedKeys = removed.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
+            var survivors = pendingAlerts.Where(alert => !removedKeys.Contains(alert.Key)).ToArray();
+            pendingAlerts.Clear();
+            foreach (var alert in survivors)
+                pendingAlerts.Enqueue(alert);
+            var now = DateTime.UtcNow;
+            foreach (var alert in removed)
+                killedAlerts[alert.Key] = now;
+            PersistQueue();
+        }
+
+        if (currentMatched)
+        {
+            ConfirmKill($"{source} confirmed {current!.CreatureName} was killed");
+            return;
+        }
+
+        if (removed.Length > 0)
+            status = $"{source} removed {removed.Length} killed queued hunt(s)";
+    }
+
     private void RestorePersistentQueue()
     {
         var now = DateTime.UtcNow;
@@ -1499,7 +1691,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!configOpen)
             return;
-        ImGui.SetNextWindowSize(new Vector2(560, 430), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(600, 610), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("S Rank Sentinel###SRankSentinel", ref configOpen))
         {
             ImGui.End();
@@ -1511,13 +1703,20 @@ public sealed class Plugin : IDalamudPlugin
         {
             config.Enabled = enabled;
             if (!enabled)
+            {
                 vnav.StopSafe();
+                faloop.Stop("Sentinel disabled");
+            }
+            else if (config.EnableFaloop)
+            {
+                faloop.Start(config.FaloopSessionId);
+            }
             config.Save();
         }
 
         ImGui.Separator();
         ImGui.TextUnformatted("STANDALONE S-RANK ORCHESTRATOR");
-        ImGui.TextWrapped("HuntAlerts and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, ShB/EW/DT SS watch, and post-kill recovery.");
+        ImGui.TextWrapped("Faloop, HuntAlerts, and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, ShB/EW/DT SS watch, and post-kill recovery.");
         ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
@@ -1525,6 +1724,57 @@ public sealed class Plugin : IDalamudPlugin
             ImGui.TextWrapped($"Current: {current.CreatureName} | {current.World} | territory {current.TerritoryId} | instance {current.Instance}");
         if (pendingAlerts.Count > 0)
             ImGui.TextWrapped($"Queued: {pendingAlerts.Count} | Next: {pendingAlerts.Peek().CreatureName}");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("ALERT SOURCES");
+        var enableFaloop = config.EnableFaloop;
+        if (ImGui.Checkbox("Direct Faloop feed (experimental primary)", ref enableFaloop))
+        {
+            config.EnableFaloop = enableFaloop;
+            if (enableFaloop && config.Enabled)
+                faloop.Start(config.FaloopSessionId);
+            else
+                faloop.Stop("Direct Faloop feed disabled");
+            config.Save();
+        }
+        ImGui.TextWrapped($"Faloop: {faloop.Status}");
+        if (faloop.LastEventUtc != DateTime.MinValue)
+            ImGui.TextWrapped($"Last feed event: {(DateTime.UtcNow - faloop.LastEventUtc).TotalSeconds:0}s ago");
+        ImGui.SetNextItemWidth(250f);
+        ImGui.InputText("Faloop username", ref faloopUsername, 128);
+        ImGui.SetNextItemWidth(250f);
+        ImGui.InputText("Faloop password (never saved)", ref faloopPassword, 256,
+            ImGuiInputTextFlags.Password);
+        if (ImGui.Button(faloopLoginTask is { IsCompleted: false } ? "Authenticating..." : "Authenticate / refresh session") &&
+            faloopLoginTask is not { IsCompleted: false })
+            BeginFaloopLogin();
+        if (!string.IsNullOrWhiteSpace(faloopLoginStatus))
+            ImGui.TextWrapped(faloopLoginStatus);
+        if (!string.IsNullOrWhiteSpace(config.FaloopSessionId))
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Forget saved session"))
+            {
+                config.FaloopSessionId = string.Empty;
+                config.Save();
+                faloop.Stop("Saved Faloop session removed");
+                faloopLoginStatus = "Saved Faloop session removed; authenticate again to reconnect.";
+            }
+        }
+        ImGui.TextWrapped("Only the resulting Faloop session is saved for reconnects; the account password is never stored or logged. ShB/EW/DT are enforced locally regardless of website filters.");
+
+        var huntAlertsFallback = config.EnableHuntAlertsFallback;
+        if (ImGui.Checkbox("HuntAlerts fallback", ref huntAlertsFallback))
+        {
+            config.EnableHuntAlertsFallback = huntAlertsFallback;
+            config.Save();
+        }
+        var sonarFallback = config.EnableSonarFallback;
+        if (ImGui.Checkbox("Sonar fallback", ref sonarFallback))
+        {
+            config.EnableSonarFallback = sonarFallback;
+            config.Save();
+        }
 
         ImGui.Separator();
         config.FlagApproachDistance = DrawFloat("Initial flag stop", config.FlagApproachDistance, 35f, 90f);
