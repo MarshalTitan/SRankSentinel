@@ -55,6 +55,8 @@ public sealed class Plugin : IDalamudPlugin
     private bool flagPrepared;
     private bool killConfirmed;
     private bool tagAttempted;
+    private bool markEverIdentified;
+    private bool markCombatObserved;
     private uint activeTagActionId;
     private bool discardAtUldah;
     private bool ssChainObserved;
@@ -62,6 +64,8 @@ public sealed class Plugin : IDalamudPlugin
     private SsProfile? activeSsProfile;
     private DateTime postKillSsGraceDeadlineUtc = DateTime.MinValue;
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
+    private DateTime playerReadySinceUtc = DateTime.MinValue;
+    private DateTime lastMarkSeenUtc = DateTime.MinValue;
     private Task<FaloopAuthenticationResult>? faloopLoginTask;
     private string faloopUsername = string.Empty;
     private string faloopPassword = string.Empty;
@@ -268,6 +272,18 @@ public sealed class Plugin : IDalamudPlugin
         if (!config.Enabled || !config.EnableHuntAlertsFallback || payload is null)
             return;
 
+        if (IsKillEventType(payload.huntType))
+        {
+            InvalidateExternalDeath(
+                string.IsNullOrWhiteSpace(payload.huntWorld) ? travel.CurrentWorld : payload.huntWorld.Trim(),
+                payload.creatureName,
+                payload.startTerritoryTypeId,
+                payload.instance,
+                DateTime.UtcNow,
+                "HuntAlerts");
+            return;
+        }
+
         var precursorProfile = HuntCatalog.GetSsProfileForPrecursorName(payload.creatureName);
         if (precursorProfile is not null)
         {
@@ -301,6 +317,12 @@ public sealed class Plugin : IDalamudPlugin
 
             if (isSonar && !config.EnableSonarFallback)
                 return;
+
+            if (!isSonar && IsPositiveGameKillMessage(text))
+            {
+                ConfirmKill($"Game hunt message confirmed {current!.CreatureName} was killed");
+                return;
+            }
 
             if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) && activeSsProfile is not null)
             {
@@ -477,6 +499,8 @@ public sealed class Plugin : IDalamudPlugin
         mark = null;
         killConfirmed = false;
         tagAttempted = false;
+        markEverIdentified = false;
+        markCombatObserved = false;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = false;
@@ -484,6 +508,8 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        playerReadySinceUtc = DateTime.MinValue;
+        lastMarkSeenUtc = DateTime.MinValue;
         PrepareCurrentTravel();
         SetState(SentinelState.ResetToUldah,
             $"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}");
@@ -496,6 +522,8 @@ public sealed class Plugin : IDalamudPlugin
         mark = null;
         killConfirmed = false;
         tagAttempted = false;
+        markEverIdentified = false;
+        markCombatObserved = false;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = true;
@@ -504,19 +532,31 @@ public sealed class Plugin : IDalamudPlugin
                           HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        playerReadySinceUtc = DateTime.MinValue;
+        lastMarkSeenUtc = DateTime.MinValue;
         PrepareCurrentTravel();
 
-        var visibleSs = FindMark();
+        // Prefer the alert coordinates whenever they exist. Object resolution starts only near
+        // those coordinates; the local scan fallback is reserved for an in-zone SS that was
+        // discovered directly from the game object table and therefore has no map coordinates.
+        var visibleSs = currentMapLink is null ? FindMark() : null;
         if (visibleSs is not null)
         {
             mark = visibleSs;
-            SetState(SentinelState.ApproachFlag,
-                $"{source}: {alert.CreatureName} visible; prioritizing the SS directly");
+            MarkWasIdentified(visibleSs);
+            SetState(SentinelState.LocateMark,
+                $"{source}: {alert.CreatureName} is already visible; switching to dynamic safe parking");
             return;
         }
 
-        SetState(currentMapLink is null ? SentinelState.ApproachFlag : SentinelState.WaitForFlag,
-            $"{source}: prioritizing {alert.CreatureName} directly without an Ul'dah reset");
+        if (!vnav.IsReadySafe())
+        {
+            BeginMeshWait($"{source}: prioritizing {alert.CreatureName} directly without an Ul'dah reset");
+            return;
+        }
+
+        SetState(SentinelState.WaitForFlag,
+            $"{source}: prioritizing {alert.CreatureName} directly from its alert coordinates");
     }
 
     private void PrepareCurrentTravel()
@@ -575,12 +615,20 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is not null && !killConfirmed && clientState.TerritoryType == current.TerritoryId)
         {
-            var visibleMark = FindMark();
-            mark = visibleMark;
-            if (visibleMark is not null && (visibleMark.IsDead || visibleMark.CurrentHp == 0))
+            IBattleChara? visibleMark = null;
+            if (CanResolveMarkInState())
             {
-                ConfirmKill($"{visibleMark.Name.TextValue} is dead");
-                return;
+                visibleMark = FindMark();
+                mark = visibleMark;
+                if (visibleMark is not null)
+                {
+                    MarkWasIdentified(visibleMark);
+                    if (visibleMark.IsDead || visibleMark.CurrentHp == 0)
+                    {
+                        ConfirmKill($"Previously identified {visibleMark.Name.TextValue} is visibly dead");
+                        return;
+                    }
+                }
             }
 
             if (combat.IsPlayerDead)
@@ -627,6 +675,9 @@ public sealed class Plugin : IDalamudPlugin
             case SentinelState.WaitForInstance:
                 TickWaitForInstance(now);
                 return;
+            case SentinelState.WaitForPlayerReady:
+                TickWaitForPlayerReady(now);
+                return;
             case SentinelState.WaitForMesh:
                 TickWaitForMesh();
                 return;
@@ -635,6 +686,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.ApproachFlag:
                 TickApproachFlag(now);
+                return;
+            case SentinelState.LocateMark:
+                TickLocateMark(now);
                 return;
             case SentinelState.MoveToSafePoint:
                 TickMoveToSafePoint(now);
@@ -667,7 +721,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (travel.IsInUldah(clientState.TerritoryType))
         {
-            if (killConfirmed || discardAtUldah)
+            if (killConfirmed)
             {
                 var finished = current?.CreatureName ?? "alert";
                 ClearCurrent();
@@ -678,6 +732,20 @@ public sealed class Plugin : IDalamudPlugin
                 }
                 SetState(SentinelState.Idle,
                     $"{finished} cleared; standing by in Ul'dah on {travel.CurrentWorld}");
+                return;
+            }
+
+            if (discardAtUldah)
+            {
+                var abandoned = current?.CreatureName ?? "alert";
+                ClearCurrent();
+                if (TryDequeueNextValid(out var next))
+                {
+                    StartAlert(next, $"{abandoned} reset without a confirmed kill; next queued alert");
+                    return;
+                }
+                SetState(SentinelState.Idle,
+                    $"{abandoned} reset without a confirmed kill; standing by in Ul'dah on {travel.CurrentWorld}");
                 return;
             }
 
@@ -896,7 +964,7 @@ public sealed class Plugin : IDalamudPlugin
         var instance = travel.CurrentInstance;
         if (instance == current.Instance || (current.Instance == 1 && instance == 0))
         {
-            BeginMeshWait("Territory and instance ready");
+            BeginPlayerReadyWait("Territory and instance selected");
             return;
         }
         nextActionUtc = DateTime.UtcNow;
@@ -909,7 +977,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (travel.CurrentInstance == current.Instance)
         {
-            BeginMeshWait("Correct instance reached");
+            BeginPlayerReadyWait("Correct instance reached");
             return;
         }
         if (TravelTimedOut(now))
@@ -955,11 +1023,48 @@ public sealed class Plugin : IDalamudPlugin
         if (!travel.IsBusy && clientState.TerritoryType == current.TerritoryId &&
             travel.CurrentInstance == current.Instance)
         {
-            BeginMeshWait("Correct instance reached");
+            BeginPlayerReadyWait("Correct instance reached");
             return;
         }
         if (TravelTimedOut(now))
             FailCurrent($"Arrival in instance {current.Instance} timed out");
+    }
+
+    private void BeginPlayerReadyWait(string reason)
+    {
+        vnav.StopSafe();
+        playerReadySinceUtc = DateTime.MinValue;
+        nextActionUtc = DateTime.MinValue;
+        SetState(SentinelState.WaitForPlayerReady,
+            $"{reason}; waiting at the aetheryte for zoning and player readiness");
+    }
+
+    private void TickWaitForPlayerReady(DateTime now)
+    {
+        if (current is null)
+            return;
+
+        var instance = travel.CurrentInstance;
+        var correctInstance = instance == current.Instance || (current.Instance == 1 && instance == 0);
+        if (travel.IsBusy || objects.LocalPlayer is null || clientState.TerritoryType != current.TerritoryId ||
+            !correctInstance)
+        {
+            playerReadySinceUtc = DateTime.MinValue;
+            status = "Waiting at the aetheryte for zoning, the player object, and the requested instance to become ready";
+            return;
+        }
+
+        if (playerReadySinceUtc == DateTime.MinValue)
+        {
+            playerReadySinceUtc = now;
+            status = "Zoning complete; allowing the local player state to settle at the aetheryte";
+            return;
+        }
+
+        if ((now - playerReadySinceUtc).TotalSeconds < 2)
+            return;
+
+        BeginMeshWait("Zoning and player readiness confirmed");
     }
 
     private void BeginMeshWait(string reason)
@@ -985,8 +1090,15 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (markEverIdentified && currentMapLink is null)
+        {
+            SetState(SentinelState.LocateMark,
+                "vnavmesh mesh is fully ready; resuming entity resolution for the previously identified mark");
+            return;
+        }
+
         SetState(SentinelState.WaitForFlag,
-            "vnavmesh mesh is fully ready; resolving the active hunt's map flag");
+            "vnavmesh mesh is fully ready; resolving the active hunt's stored alert coordinates");
     }
 
     private void TickWaitForFlag(DateTime now)
@@ -998,33 +1110,140 @@ public sealed class Plugin : IDalamudPlugin
             BeginMeshWait("vnavmesh mesh readiness was lost");
             return;
         }
-        if (!flagPrepared && currentMapLink is not null)
+
+        if (currentMapLink is null)
+        {
+            status = $"Waiting for usable alert coordinates for {current.CreatureName}; the hunt remains active";
+            return;
+        }
+
+        if (!flagPrepared)
+        {
+            if (now < nextActionUtc)
+                return;
             flagPrepared = gameGui.OpenMapWithMapLink(currentMapLink);
+            nextActionUtc = now.AddSeconds(2);
+            if (!flagPrepared)
+            {
+                status = $"Could not prepare {current.CreatureName}'s alert coordinates yet; holding and retrying";
+                return;
+            }
+        }
+
         flagPoint = vnav.FlagToPointSafe();
         if (flagPoint is null)
         {
-            if ((now - stateSinceUtc).TotalSeconds > 30)
-                FailCurrent("Map flag could not be projected onto vnavmesh");
+            if (now >= nextActionUtc)
+            {
+                flagPrepared = false;
+                nextActionUtc = now.AddSeconds(2);
+            }
+            status = $"Alert coordinates for {current.CreatureName} are not projected yet; " +
+                     "holding the active hunt and retrying without treating it as dead";
             return;
         }
+
+        if (now < nextActionUtc)
+            return;
         if (!EnsureMounted(now))
             return;
         if (vnav.MoveCloseToSafe(flagPoint.Value, true, config.FlagApproachDistance))
+        {
+            nextActionUtc = now.AddSeconds(3);
             SetState(SentinelState.ApproachFlag,
-                $"Flying toward the flag; initial stop {config.FlagApproachDistance:0}y away");
+                $"Flying toward {current.CreatureName}'s reported coordinates; " +
+                $"entity resolution waits until within about {config.FlagApproachDistance:0}y");
+            return;
+        }
+
+        nextActionUtc = now.AddSeconds(3);
+        status = $"No route to {current.CreatureName}'s alert coordinates is available yet; holding and retrying";
     }
 
     private void TickApproachFlag(DateTime now)
     {
+        if (current is null)
+            return;
+        if (!vnav.IsReadySafe())
+        {
+            vnav.StopSafe();
+            BeginMeshWait("vnavmesh readiness was lost during the coordinate approach");
+            return;
+        }
+        if (flagPoint is null)
+        {
+            SetState(SentinelState.WaitForFlag,
+                "Alert coordinate projection was lost; rebuilding it without abandoning the active hunt");
+            return;
+        }
+
+        var distance = HorizontalDistance(PlayerPosition(), flagPoint.Value);
+        if (distance <= config.FlagApproachDistance + 8f)
+        {
+            vnav.StopSafe();
+            SetState(SentinelState.LocateMark,
+                $"Reached {current.CreatureName}'s reported area; beginning positive entity resolution");
+            return;
+        }
+
+        if (vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe())
+        {
+            status = $"Approaching {current.CreatureName}'s reported coordinates ({distance:0}y remaining); " +
+                     "not scanning for the entity until nearby";
+            return;
+        }
+
+        if (now < nextActionUtc)
+            return;
+        if (!EnsureMounted(now))
+            return;
+
+        if (vnav.MoveCloseToSafe(flagPoint.Value, true, config.FlagApproachDistance))
+            status = $"Coordinate route stopped early; retrying while keeping {current.CreatureName} active";
+        else
+            status = $"Coordinate route is currently unavailable; holding position and retrying {current.CreatureName}";
+        nextActionUtc = now.AddSeconds(3);
+    }
+
+    private void TickLocateMark(DateTime now)
+    {
+        if (current is null)
+            return;
+
         mark = FindMark();
         if (mark is not null)
         {
+            MarkWasIdentified(mark);
+            if (mark.IsDead || mark.CurrentHp == 0)
+            {
+                ConfirmKill($"Positively identified {mark.Name.TextValue} is visibly dead");
+                return;
+            }
+
+            if (now < nextActionUtc)
+            {
+                status = $"{mark.Name.TextValue} positively identified; waiting briefly before retrying safe parking";
+                return;
+            }
+
             vnav.StopSafe();
             BeginSafeParking(mark, true);
             return;
         }
-        if ((now - stateSinceUtc).TotalSeconds > config.LocateTimeoutSeconds)
-            FailCurrent("The named S rank never became visible; refusing to guess its position");
+
+        vnav.StopSafe();
+        var elapsed = (now - stateSinceUtc).TotalSeconds;
+        if (elapsed >= config.LocateTimeoutSeconds)
+        {
+            stateSinceUtc = now;
+            status = $"{current.CreatureName} was not visible during the latest scan window; " +
+                     "remaining near its alert coordinates and continuing to rescan—no kill is inferred";
+            return;
+        }
+
+        var remaining = Math.Max(0, config.LocateTimeoutSeconds - elapsed);
+        status = $"Near {current.CreatureName}'s alert coordinates; rescanning for the actual entity " +
+                 $"({remaining:0}s in this scan window). Missing does not mean dead";
     }
 
     private void TickMoveToSafePoint(DateTime now)
@@ -1032,9 +1251,15 @@ public sealed class Plugin : IDalamudPlugin
         mark = FindMark();
         if (mark is null)
         {
-            FailCurrent("Lost positive identification of the S rank while parking");
+            vnav.StopSafe();
+            safePoint = null;
+            parkingCandidates.Clear();
+            nextActionUtc = now.AddSeconds(1);
+            SetState(SentinelState.LocateMark,
+                "The previously identified mark temporarily left object range while parking; holding and rescanning");
             return;
         }
+        MarkWasIdentified(mark);
         if (safePoint is not null && HorizontalDistance(PlayerPosition(), safePoint.Value) <= 5f)
         {
             vnav.StopSafe();
@@ -1045,7 +1270,10 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (!TryStartNextParkingRoute(true))
             {
-                FailCurrent("All sampled safe parking routes were unreachable");
+                vnav.StopSafe();
+                nextActionUtc = now.AddSeconds(3);
+                SetState(SentinelState.LocateMark,
+                    "All sampled parking routes were temporarily unavailable; keeping the hunt active and retrying");
                 return;
             }
             SetState(SentinelState.MoveToSafePoint,
@@ -1316,12 +1544,20 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
+        if (!vnav.IsReadySafe())
+        {
+            BeginMeshWait("vnavmesh readiness was lost before dynamic safe parking");
+            return;
+        }
         if (fly && !EnsureMounted(DateTime.UtcNow))
             return;
         PrepareParkingCandidates(target, config.WaitingDistance);
         if (!TryStartNextParkingRoute(fly))
         {
-            FailCurrent("No reachable sampled safe parking point was found");
+            vnav.StopSafe();
+            nextActionUtc = DateTime.UtcNow.AddSeconds(3);
+            SetState(SentinelState.LocateMark,
+                "No sampled safe parking route is available yet; keeping the hunt active and retrying near the alert area");
             return;
         }
         SetState(SentinelState.MoveToSafePoint,
@@ -1489,6 +1725,8 @@ public sealed class Plugin : IDalamudPlugin
         flagPrepared = false;
         killConfirmed = false;
         tagAttempted = false;
+        markEverIdentified = false;
+        markCombatObserved = false;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = false;
@@ -1496,7 +1734,72 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        playerReadySinceUtc = DateTime.MinValue;
+        lastMarkSeenUtc = DateTime.MinValue;
         parkingCandidates.Clear();
+    }
+
+    private bool CanResolveMarkInState() => state is
+        SentinelState.LocateMark or
+        SentinelState.MoveToSafePoint or
+        SentinelState.Landing or
+        SentinelState.SafeWait or
+        SentinelState.TagApproach or
+        SentinelState.GroundRetreat;
+
+    private void MarkWasIdentified(IBattleChara target)
+    {
+        mark = target;
+        markEverIdentified = true;
+        lastMarkSeenUtc = DateTime.UtcNow;
+        if (CombatController.IsMarkInCombat(target))
+            markCombatObserved = true;
+    }
+
+    private static bool IsKillEventType(string? huntType)
+    {
+        if (string.IsNullOrWhiteSpace(huntType))
+            return false;
+        var normalized = new string(huntType.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+        return normalized is "kill" or "killed" or "death" or "dead" or
+            "srankkill" or "srankkilled" or "srankdeath" or
+            "ssrankkill" or "ssrankkilled" or "ssrankdeath";
+    }
+
+    private bool IsPositiveGameKillMessage(string text)
+    {
+        if (current is null || killConfirmed || string.IsNullOrWhiteSpace(text) ||
+            clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var mentionsMark = HuntCatalog.TextMentionsMark(text, current.CreatureName);
+        var hasKillWording = text.Contains("was defeated", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("has been defeated", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("was slain", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("has been slain", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("was vanquished", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("has been vanquished", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("was just killed", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("you defeat", StringComparison.OrdinalIgnoreCase);
+        if (mentionsMark && hasKillWording)
+            return true;
+
+        // Hunt reward lines do not always name the mark. Accept them only after this exact mark
+        // was positively resolved and observed in combat very recently. This prevents an unrelated
+        // reward message received while merely traveling from clearing the active hunt.
+        if (!markEverIdentified || !markCombatObserved ||
+            DateTime.UtcNow - lastMarkSeenUtc > TimeSpan.FromSeconds(15))
+            return false;
+
+        var isHuntReward = (text.Contains("Sack of Nuts", StringComparison.OrdinalIgnoreCase) ||
+                            text.Contains("Sacks of Nuts", StringComparison.OrdinalIgnoreCase) ||
+                            text.Contains("Allied Seal", StringComparison.OrdinalIgnoreCase) ||
+                            text.Contains("Centurio Seal", StringComparison.OrdinalIgnoreCase)) &&
+                           (text.Contains("obtain", StringComparison.OrdinalIgnoreCase) ||
+                            text.Contains("receive", StringComparison.OrdinalIgnoreCase) ||
+                            text.Contains("earn", StringComparison.OrdinalIgnoreCase));
+        return isHuntReward;
     }
 
     private bool KillNoticeMatchesWorld(string killedWorld, HuntAlertSnapshot alert)
@@ -1846,7 +2149,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, and never runs a rotation. Forgiven Gossip, Ker Shroud, and Crystal Incarnation precursors are observation-only and are never targeted, approached, or attacked.");
+        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, and never runs a rotation. A missing entity or failed route never means cleared; only a positive death event/message or a visibly dead identified mark can complete the hunt. Forgiven Gossip, Ker Shroud, and Crystal Incarnation precursors are observation-only and are never targeted, approached, or attacked.");
         ImGui.End();
     }
 
@@ -1869,9 +2172,11 @@ public sealed class Plugin : IDalamudPlugin
         ChangeInstance,
         SelectInstance,
         WaitForInstance,
+        WaitForPlayerReady,
         WaitForMesh,
         WaitForFlag,
         ApproachFlag,
+        LocateMark,
         MoveToSafePoint,
         Landing,
         SafeWait,

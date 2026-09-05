@@ -12,16 +12,18 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 6. Reset through Ul'dah before every hunt.
 7. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
 8. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu.
-9. After arriving in the correct territory and instance, wait indefinitely and motionless at the aetheryte until vnavmesh reports the mesh fully ready. Mesh generation/download is a blocking state, never a hunt failure; newer alerts remain queued and cannot replace the active hunt.
-10. Use vnavmesh flight to approach the flag, positively identify the S rank by stable battle-NPC ID (with a localized-name fallback), sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
-11. Maintain a 38-yalm emergency floor as the mark moves.
-12. Engage only after the active S/SS mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, move into range, make exactly one client action attempt, permanently close the attack gate for that mark, then retreat.
-13. Detect the mark's death from the live battle object or a matching same-world Faloop/Sonar kill notice.
-14. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared two-second SS-evidence check. A matching zone message, Faloop/HuntAlerts/Sonar report, or visible precursor enters the five-minute SS watch.
-15. Keep each expansion's chain separate: Forgiven Gossip leads to Forgiven Rebellion, Ker Shroud leads to Ker, and Crystal Incarnation leads to Arch Aethereater. Precursors are observed only and never replace the active target, trigger navigation, or receive attacks.
-16. If the matching SS is announced, reported, queued, or visible, replace the completed S-rank context with that SS, navigate directly to it without an Ul'dah reset, then use the same safe parking and one-tag gates.
-17. If dead while an active mark or SS opportunity is alive, accept a Raise prompt and never use Return. If still dead after the completed opportunity, use the normal Return action.
-18. Once the hunt and any SS opportunity finish, teleport normally to Ul'dah on the **current visited World**. Remove kill-reported or stale queue entries, recheck freshness immediately before departure, and start the next valid queued S rank in arrival order. Sentinel never World Visits back to the character's Home World automatically.
+9. After arriving in the correct territory and instance, first wait for zoning and the local player state to settle, then wait indefinitely and motionless at the aetheryte until vnavmesh reports the mesh fully ready. Mesh generation/download is a blocking state, never a hunt failure; newer alerts remain queued and cannot replace the active hunt.
+10. Use the stored Faloop/HuntAlerts/Sonar coordinates as the initial vnavmesh flight destination. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
+11. If the mark is not visible near the alert coordinates, remain there and rescan in repeated bounded windows. A missing entity, unavailable flag projection, interrupted path, or failed route never means the hunt is dead and never clears it.
+12. Once positively identified by stable battle-NPC ID (with a localized-name fallback), switch from the static alert coordinates to dynamic entity-based parking, sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
+13. Maintain a 38-yalm emergency floor as the mark moves.
+14. Engage only after the active S/SS mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, move into range, make exactly one client action attempt, permanently close the attack gate for that mark, then retreat.
+15. Mark a hunt cleared only from positive evidence: a matching Faloop/HuntAlerts/Sonar death event, a matching game hunt/reward kill message, or a previously identified live battle object becoming visibly dead. Object absence alone is never death evidence.
+16. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared two-second SS-evidence check. A matching zone message, Faloop/HuntAlerts/Sonar report, or visible precursor enters the five-minute SS watch.
+17. Keep each expansion's chain separate: Forgiven Gossip leads to Forgiven Rebellion, Ker Shroud leads to Ker, and Crystal Incarnation leads to Arch Aethereater. Precursors are observed only and never replace the active target, trigger navigation, or receive attacks.
+18. If the matching SS is announced, reported, queued, or visible, replace the completed S-rank context with that SS, navigate directly to it without an Ul'dah reset, then use the same safe parking and one-tag gates.
+19. If dead while an active mark or SS opportunity is alive, accept a Raise prompt and never use Return. If still dead after the completed opportunity, use the normal Return action.
+20. Once the hunt and any SS opportunity finish, teleport normally to Ul'dah on the **current visited World**. Remove kill-reported or stale queue entries, recheck freshness immediately before departure, and start the next valid queued S rank in arrival order. Sentinel never World Visits back to the character's Home World automatically.
 
 ## Safety defaults
 
@@ -37,7 +39,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
 - Faloop transport: native Engine.IO v4 WebSocket with server-ping replies, heartbeat timeout, bounded messages, exponential reconnect backoff, event replay suppression, and no extra NuGet runtime
 - No coordinate writes or coordinate warping
-- Unknown marks, missing flags, and unreachable routes are discarded only after a normal reset through Ul'dah
+- Missing marks, unavailable flags, and unreachable local routes keep the active hunt reserved and are retried; they never produce a cleared/dead result
 
 ## Dependencies
 

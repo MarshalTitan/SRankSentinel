@@ -2,6 +2,6 @@
   "Name": "S Rank Sentinel",
   "Author": "MTitan",
   "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
-  "Description": "Consumes the authenticated Faloop feed with optional HuntAlerts/Sonar fallbacks, filters travel to ShB/EW/DT, blocks safely at the aetheryte for mesh readiness, persists and kill-invalidates queued hunts, parks safely with vnavmesh, performs one gated ranged tag, watches SS chains without touching precursor adds, and resets to Ul'dah on the visited World.",
+  "Description": "Consumes Faloop with optional HuntAlerts/Sonar fallbacks, filters travel to ShB/EW/DT, approaches stored alert coordinates before resolving the mark, retries missing entities/routes without false-clearing, requires positive kill evidence, parks dynamically with vnavmesh, performs one gated ranged tag, watches SS chains safely, and resets to Ul'dah on the visited World.",
   "Tags": ["hunts", "s-rank", "navigation", "automation"]
 }

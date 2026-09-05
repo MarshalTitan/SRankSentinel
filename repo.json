@@ -3,7 +3,7 @@
     "Author": "MTitan",
     "Name": "S Rank Sentinel",
     "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
-    "Description": "Consumes Faloop with optional HuntAlerts/Sonar fallbacks, filters travel to ShB/EW/DT, waits safely at the aetheryte for vnavmesh readiness, queues later hunts, performs one gated ranged tag, and recovers after the kill.",
+    "Description": "Consumes Faloop with optional HuntAlerts/Sonar fallbacks, approaches stored coordinates before resolving the mark, retries missing entities/routes without false-clearing, requires positive kill evidence, queues later hunts, and performs one gated ranged tag.",
     "InternalName": "SRankSentinel",
     "AssemblyVersion": "0.1.0.0",
     "TestingAssemblyVersion": "0.1.0.0",
