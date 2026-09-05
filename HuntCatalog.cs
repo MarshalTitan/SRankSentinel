@@ -6,6 +6,22 @@ internal sealed record SRankDefinition(
     uint PreferredAetheryteId,
     string Name);
 
+internal enum SupportedExpansion
+{
+    None,
+    Shadowbringers,
+    Endwalker,
+    Dawntrail,
+}
+
+internal sealed record SsProfile(
+    SupportedExpansion Expansion,
+    string ExpansionName,
+    IReadOnlySet<uint> TerritoryIds,
+    uint SsDataId,
+    string SsName,
+    string PrecursorName);
+
 /// <summary>
 /// Stable game-data identifiers for open-world S ranks.  Alert plugins remain the source of
 /// spawn coordinates; this catalog is only used to validate the actor and choose the normal
@@ -14,10 +30,29 @@ internal sealed record SRankDefinition(
 internal static class HuntCatalog
 {
     public const uint ForgivenRebellionDataId = 8915;
+    public const uint KerDataId = 10615;
     public const string ForgivenRebellionName = "Forgiven Rebellion";
     public const string ForgivenGossipName = "Forgiven Gossip";
+    public const string KerName = "Ker";
+    public const string KerShroudName = "Ker Shroud";
+    public const string ArchAethereaterName = "Arch Aethereater";
+    public const string CrystalIncarnationName = "Crystal Incarnation";
 
     private static readonly HashSet<uint> ShadowbringersTerritories = [813, 814, 815, 816, 817, 818];
+    private static readonly HashSet<uint> EndwalkerTerritories = [956, 957, 958, 959, 960, 961];
+    private static readonly HashSet<uint> DawntrailTerritories = [1187, 1188, 1189, 1190, 1191, 1192];
+
+    private static readonly SsProfile[] SsProfiles =
+    [
+        new(SupportedExpansion.Shadowbringers, "Shadowbringers", ShadowbringersTerritories,
+            ForgivenRebellionDataId, ForgivenRebellionName, ForgivenGossipName),
+        new(SupportedExpansion.Endwalker, "Endwalker", EndwalkerTerritories,
+            KerDataId, KerName, KerShroudName),
+        // Arch Aethereater is matched by its localized actor name. Alert coordinates remain
+        // authoritative, so an unstable battle-NPC ID is deliberately not required here.
+        new(SupportedExpansion.Dawntrail, "Dawntrail", DawntrailTerritories,
+            0, ArchAethereaterName, CrystalIncarnationName),
+    ];
 
     private static readonly SRankDefinition[] Definitions =
     [
@@ -77,13 +112,14 @@ internal static class HuntCatalog
 
     public static SRankDefinition? Resolve(uint territoryId, string alertName)
     {
-        if (IsForgivenRebellion(alertName) && IsShadowbringersTerritory(territoryId))
+        var ssProfile = GetSsProfileForTerritory(territoryId);
+        if (ssProfile is not null && IsSsName(alertName, ssProfile))
         {
             var zone = Definitions.FirstOrDefault(definition => definition.TerritoryId == territoryId);
             return zone is null
                 ? null
-                : new SRankDefinition(ForgivenRebellionDataId, territoryId, zone.PreferredAetheryteId,
-                    ForgivenRebellionName);
+                : new SRankDefinition(ssProfile.SsDataId, territoryId, zone.PreferredAetheryteId,
+                    ssProfile.SsName);
         }
 
         var normalized = Normalize(alertName);
@@ -95,8 +131,41 @@ internal static class HuntCatalog
     public static bool IsShadowbringersTerritory(uint territoryId) =>
         ShadowbringersTerritories.Contains(territoryId);
 
-    public static bool IsShadowbringersS(uint territoryId, string name) =>
-        IsShadowbringersTerritory(territoryId) && !IsForgivenRebellion(name);
+    public static SsProfile? GetSsProfileForTerritory(uint territoryId) =>
+        SsProfiles.FirstOrDefault(profile => profile.TerritoryIds.Contains(territoryId));
+
+    public static SsProfile? GetSsProfileForSsName(string? name) =>
+        SsProfiles.FirstOrDefault(profile => IsSsName(name, profile));
+
+    public static SsProfile? FindSsProfileInText(string? text) =>
+        SsProfiles.FirstOrDefault(profile =>
+            !ContainsPhrase(text, profile.PrecursorName) && ContainsPhrase(text, profile.SsName));
+
+    public static SsProfile? GetSsProfileForPrecursorName(string? name) =>
+        SsProfiles.FirstOrDefault(profile => IsPrecursorName(name, profile));
+
+    public static bool IsSupportedNormalS(uint territoryId, string name)
+    {
+        var profile = GetSsProfileForTerritory(territoryId);
+        return profile is not null && !IsSsName(name, profile);
+    }
+
+    public static bool IsSsName(string? name, SsProfile profile) =>
+        Normalize(name ?? string.Empty) == Normalize(profile.SsName);
+
+    public static bool IsPrecursorName(string? name, SsProfile profile) =>
+        Normalize(name ?? string.Empty) == Normalize(profile.PrecursorName);
+
+    public static bool IsAnySsName(string? name) => GetSsProfileForSsName(name) is not null;
+
+    public static bool IsAnyPrecursorName(string? name) => GetSsProfileForPrecursorName(name) is not null;
+
+    public static bool TextMentionsMark(string? text, string markName)
+    {
+        var ssProfile = GetSsProfileForSsName(markName);
+        return (ssProfile is null || !ContainsPhrase(text, ssProfile.PrecursorName)) &&
+               ContainsPhrase(text, markName);
+    }
 
     public static bool IsForgivenRebellion(string? name) =>
         Normalize(name ?? string.Empty).EndsWith("FORGIVENREBELLION", StringComparison.Ordinal);
@@ -111,8 +180,26 @@ internal static class HuntCatalog
         text.Contains("minions of an extraordinarily powerful mark have withdrawn", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsSsSpawnMessage(string text) =>
-        text.Contains("presence of an extraordinarily powerful mark", StringComparison.OrdinalIgnoreCase);
+        text.Contains("presence of an extraordinarily powerful mark", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("presence of a powerful mark", StringComparison.OrdinalIgnoreCase);
 
     private static string Normalize(string value) =>
         new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static bool ContainsPhrase(string? text, string phrase)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        var start = 0;
+        while ((start = text.IndexOf(phrase, start, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            var before = start == 0 ? '\0' : text[start - 1];
+            var end = start + phrase.Length;
+            var after = end >= text.Length ? '\0' : text[end];
+            if (!char.IsLetterOrDigit(before) && !char.IsLetterOrDigit(after))
+                return true;
+            start = end;
+        }
+        return false;
+    }
 }
