@@ -6,14 +6,14 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
     public bool Enabled { get; set; } = true;
     public float FlagApproachDistance { get; set; } = 50f;
-    public float WaitingDistance { get; set; } = 40f;
-    public float EmergencyDistance { get; set; } = 30f;
-    public bool ReturnToUldahAfterKill { get; set; } = true;
-    public float EngageHpPercent { get; set; } = 95f; // reserved for v0.2
-    public int ArrivalTimeoutSeconds { get; set; } = 120;
+    public float WaitingDistance { get; set; } = 45f;
+    public float EmergencyDistance { get; set; } = 35f;
+    public float EngageHpPercent { get; set; } = 95f;
+    public uint TagActionId { get; set; } = 46; // Tomahawk; configurable for other jobs.
+    public int TravelTimeoutSeconds { get; set; } = 300;
     public int LocateTimeoutSeconds { get; set; } = 90;
 
     [NonSerialized] private IDalamudPluginInterface? pluginInterface;
@@ -22,18 +22,16 @@ public sealed class Configuration : IPluginConfiguration
     {
         pluginInterface = pi;
 
-        // Carry existing installations onto the safer field-test defaults without
-        // overwriting distances the user already customized.
-        if (Version < 2)
+        if (Version < 3)
         {
-            if (Math.Abs(FlagApproachDistance - 80f) < 0.01f)
-                FlagApproachDistance = 50f;
-            if (Math.Abs(WaitingDistance - 65f) < 0.01f)
-                WaitingDistance = 40f;
-            if (Math.Abs(EmergencyDistance - 55f) < 0.01f)
-                EmergencyDistance = 30f;
+            if (Math.Abs(WaitingDistance - 40f) < 0.01f)
+                WaitingDistance = 45f;
+            if (Math.Abs(EmergencyDistance - 30f) < 0.01f)
+                EmergencyDistance = 35f;
+            if (TagActionId == 0)
+                TagActionId = 46;
 
-            Version = 2;
+            Version = 3;
             Save();
         }
     }

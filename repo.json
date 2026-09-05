@@ -2,8 +2,8 @@
   {
     "Author": "MTitan",
     "Name": "S Rank Sentinel",
-    "Punchline": "Safely approaches S ranks without early-pulling them.",
-    "Description": "Prototype HuntAlerts companion. v0.1 uses vnavmesh to approach and park safely away from an S rank and never attacks.",
+    "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
+    "Description": "Consumes HuntAlerts or Sonar alerts, orchestrates normal travel through Ul'dah, parks safely with vnavmesh, executes one gated ranged tag, and recovers after the kill.",
     "InternalName": "SRankSentinel",
     "AssemblyVersion": "0.1.0.0",
     "TestingAssemblyVersion": "0.1.0.0",

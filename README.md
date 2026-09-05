@@ -1,78 +1,42 @@
 # S Rank Sentinel
 
-A private-use / custom-repository Dalamud plugin prototype for safely approaching FFXIV S-rank hunts without early-pulling them.
+S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sonar are optional alert sources only; Sentinel owns the complete hunt lifecycle.
 
-## v0.1 scope
+## Workflow
 
-**v0.1 never attacks.** It is intentionally limited to validating safe travel/parking behavior.
+1. Accept an S-rank alert from HuntAlerts IPC or a Sonar chat/map-link alert.
+2. Deduplicate it and queue it without interrupting the active hunt.
+3. Reset through Ul'dah before every hunt.
+4. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
+5. Use the game's normal teleport system to reach the hunt territory and select the requested zone instance.
+6. Use vnavmesh flight to approach the flag, positively identify the named S rank, sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
+7. Maintain a 35-yalm emergency floor as the mark moves.
+8. Engage only after the mark itself is in combat and at or below 95% HP. Move into range, execute the configured ranged tag action exactly once, then retreat.
+9. Detect the mark's death from the live battle object or a matching Sonar kill notice.
+10. If dead while the mark is alive, accept a Raise prompt and never use Return. If still dead after the kill is confirmed, use the normal Return action. Otherwise teleport normally to Ul'dah.
+11. Clear the completed alert in Ul'dah and start the next queued S rank, if any.
 
-1. HuntAlerts emits an S-rank event.
-2. HuntAlerts / HuntTrainAssistant / Lifestream handle normal world and zone travel.
-3. S Rank Sentinel waits until the correct territory is loaded and vnavmesh is ready.
-4. It reads the map flag that HuntTrainAssistant opened and flies toward it, but only to a conservative outer radius.
-5. It positively identifies the real S-rank object by creature name.
-6. It samples multiple terrain-valid points around the actual mark and tries alternate vnavmesh routes until it finds reachable parking about 40 yalms away.
-7. It lands/dismounts using the game's normal land/dismount action.
-8. While waiting, if the S rank roams inside the emergency radius, it backs away on the ground.
-9. After a confirmed kill, it clears the completed alert, advances to the next queued S rank, or uses Lifestream's normal teleport to return to Ul'dah.
+## Safety defaults
 
-### Safety defaults
-
-- Flag approach: **50y**
-- Normal waiting radius: **40y**
-- Emergency minimum: **30y**
-- Future engagement threshold: **95% HP** (not active in v0.1)
-- If the map flag or actual S rank cannot be identified, Sentinel **stops instead of guessing**.
-- No coordinate warping / SetPosition / teleport-to-mouse behavior is used.
+- Initial flag stop: **50y**
+- Safe parking clearance: **45y** plus player/mark hitboxes
+- Emergency clearance: **35y** plus player/mark hitboxes
+- Engagement gate: mark reports **in combat** and is **<=95% HP**
+- Ranged tag action: **46 (Tomahawk)** by default; change this in settings if using another job
+- One successful tag action per mark; no combat rotation
+- No coordinate writes or coordinate warping
+- Unknown marks, missing flags, and unreachable routes are discarded only after a normal reset through Ul'dah
 
 ## Dependencies
 
-Installed/running in Dalamud:
+- **vnavmesh** is required for navigation.
+- **HuntAlerts and/or Sonar** may supply alerts.
+- HuntTrainAssistant, Lifestream, Wrath Combo, and BossMod are **not required or used**.
 
-- HuntAlerts
-- HuntTrainAssistant (for the current travel workflow)
-- Lifestream
-- vnavmesh
-
-Wrath Combo and BossMod are **not used by v0.1**. They are planned for the later combat handoff.
+World Visit can only reach worlds exposed by the game's normal World Visit menu. Cross-data-center travel is intentionally not automated.
 
 ## Command
 
-`/sranksentinel`
+`/sranksentinel` opens the status/settings window.
 
-Opens the status/settings window.
-
-## First-time GitHub setup
-
-Create a **public** GitHub repository named `SRankSentinel`, then upload the contents of this folder to its `main` branch.
-
-The custom repository URL will be:
-
-`https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json`
-
-Do not add that URL to Dalamud until a `v0.1.0` GitHub release exists, because `repo.json` deliberately points to the pinned release ZIP.
-
-## First release
-
-After the source is pushed and the Build workflow succeeds:
-
-1. Create/push tag `v0.1.0`.
-2. The Release workflow builds `latest.zip` and publishes it as `SRankSentinel.zip` on the GitHub release.
-3. Add the raw `repo.json` URL to Dalamud Settings -> Experimental -> Custom Plugin Repositories.
-4. Install **S Rank Sentinel** from `/xlplugins`.
-
-## Field-test plan
-
-For the first real S-rank test, keep the plugin window open. Verify:
-
-- Correct HuntAlerts event is accepted.
-- Existing world/zone travel completes normally.
-- Sentinel flies only to the outer approach radius.
-- It identifies the actual mark before moving closer.
-- It lands around the configured waiting distance.
-- It never targets or attacks the S rank.
-- If the mark roams inside the emergency radius, Sentinel moves away instead of toward it.
-- An unreachable parking sample causes Sentinel to try other projected points rather than aborting immediately.
-- A confirmed kill clears automatically; queued S ranks run in arrival order, otherwise Sentinel returns to Ul'dah through Lifestream.
-
-Use **STOP / ABORT** in the plugin window if anything looks wrong.
+The emergency control is **STOP + RESET THROUGH UL'DAH**. It clears the queue, stops vnavmesh, discards the active alert, and performs the same normal Ul'dah reset used by completed hunts.
