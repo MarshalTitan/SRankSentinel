@@ -47,8 +47,12 @@ internal static class FaloopCatalog
             territoryId = zone.TerritoryId;
             return true;
         }
-        return uint.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out territoryId) &&
-               Zones.Values.Any(candidate => candidate.TerritoryId == territoryId);
+        if (!uint.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedTerritoryId) ||
+            !Zones.Values.Any(candidate => candidate.TerritoryId == parsedTerritoryId))
+            return false;
+
+        territoryId = parsedTerritoryId;
+        return true;
     }
 
     public static string DisplayName(string slug)
