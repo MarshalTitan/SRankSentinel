@@ -52,6 +52,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool killConfirmed;
     private bool tagExecuted;
     private bool discardAtUldah;
+    private bool returningHome;
     private string status = "Idle";
 
     public Plugin(
@@ -81,7 +82,7 @@ public sealed class Plugin : IDalamudPlugin
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pi);
         vnav = new VNavmeshIpc(pi);
-        travel = new NativeTravel(gameGui, objectTable, targetManager, condition);
+        travel = new NativeTravel(gameGui, objectTable, targetManager, condition, dataManager);
         combat = new CombatController(gameGui, condition);
 
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
@@ -139,9 +140,12 @@ public sealed class Plugin : IDalamudPlugin
             var text = chatMessage.Message.TextValue;
             if (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase))
             {
-                if (current is not null && text.Contains(current.CreatureName, StringComparison.OrdinalIgnoreCase))
+                var killedWorld = ParseSonarWorld(text);
+                if (current is not null &&
+                    text.Contains(current.CreatureName, StringComparison.OrdinalIgnoreCase) &&
+                    KillNoticeMatchesWorld(killedWorld, current))
                     ConfirmKill($"Sonar confirmed {current.CreatureName} was killed");
-                RemoveKilledQueuedAlerts(text);
+                RemoveKilledQueuedAlerts(text, killedWorld);
                 return;
             }
 
@@ -197,9 +201,18 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         world = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
+        if (!travel.IsSameDataCenter(world))
+        {
+            status = $"Ignored {source} alert for {creature.Trim()} on {world}: normal World Visit cannot cross data centers";
+            return;
+        }
+
         instance = Math.Max(1, instance);
+        var definition = HuntCatalog.Resolve(territory, creature);
         var incoming = new HuntAlertSnapshot(
-            "srank", world, creature.Trim(), territory, instance, mapX, mapY, DateTime.UtcNow);
+            "srank", world, creature.Trim(), territory,
+            definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
+            instance, mapX, mapY, DateTime.UtcNow);
         if (current?.Key == incoming.Key || pendingAlerts.Any(alert => alert.Key == incoming.Key))
             return;
 
@@ -220,6 +233,7 @@ public sealed class Plugin : IDalamudPlugin
         killConfirmed = false;
         tagExecuted = false;
         discardAtUldah = false;
+        returningHome = false;
         PrepareCurrentTravel();
         SetState(SentinelState.ResetToUldah,
             $"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}");
@@ -238,9 +252,14 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null)
             return;
 
-        territoryAetheryteId = data.GetExcelSheet<Aetheryte>()
-            .FirstOrDefault(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
-            .RowId;
+        var attuned = data.GetExcelSheet<Aetheryte>()
+            .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
+            .Select(row => row.RowId)
+            .Where(travel.CanTeleportTo)
+            .ToArray();
+        territoryAetheryteId = attuned.FirstOrDefault(id => id == current.PreferredAetheryteId);
+        if (territoryAetheryteId == 0)
+            territoryAetheryteId = attuned.FirstOrDefault();
         var map = data.GetExcelSheet<Map>()
             .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
         if (map.RowId != 0)
@@ -365,6 +384,8 @@ public sealed class Plugin : IDalamudPlugin
                     return;
                 }
 
+                if (BeginReturnHome(now, $"{finished} cleared"))
+                    return;
                 SetState(SentinelState.Idle, $"{finished} cleared; reset complete in Ul'dah");
                 return;
             }
@@ -376,6 +397,8 @@ public sealed class Plugin : IDalamudPlugin
                     StartAlert(next, "Ul'dah reset complete; next queued alert");
                     return;
                 }
+                if (BeginReturnHome(now, "Ul'dah reset complete"))
+                    return;
                 SetState(SentinelState.Idle, "Reset complete in Ul'dah");
                 return;
             }
@@ -421,22 +444,27 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TickWorldVisit(DateTime now)
     {
-        if (current is null)
-            return;
-        if (travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+        var targetWorld = WorldVisitTarget();
+        if (string.IsNullOrWhiteSpace(targetWorld))
         {
-            SetState(SentinelState.TeleportToTerritory, "World Visit complete; preparing territory teleport");
+            FailWorldVisit("World Visit had no valid destination");
+            return;
+        }
+        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))
+        {
+            CompleteWorldVisit(targetWorld);
             return;
         }
         if (TravelTimedOut(now))
         {
-            FailCurrent($"World Visit to {current.World} timed out");
+            FailWorldVisit($"World Visit to {targetWorld} timed out");
             return;
         }
 
         if (travel.SelectWorldVisitMenu())
         {
-            SetState(SentinelState.SelectWorld, $"Selecting {current.World} from World Visit");
+            vnav.StopSafe();
+            SetState(SentinelState.SelectWorld, $"Selecting {targetWorld} from World Visit");
             return;
         }
 
@@ -444,54 +472,103 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (condition[ConditionFlag.Mounted])
             UseGeneralAction(23);
-        else
-            travel.InteractWithNearbyAetheryte();
+        else if (!travel.InteractWithNearbyAetheryte() && vnav.IsReadySafe() &&
+                 !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
+        {
+            vnav.MoveToSafe(NativeTravel.UldahAetherytePosition, false);
+            status = "Walking normally to the Ul'dah World Visit aetheryte";
+        }
         nextActionUtc = now.AddSeconds(2);
     }
 
     private void TickSelectWorld(DateTime now)
     {
-        if (current is null)
+        var targetWorld = WorldVisitTarget();
+        if (string.IsNullOrWhiteSpace(targetWorld))
             return;
         if (TravelTimedOut(now))
         {
-            FailCurrent($"Could not select {current.World} in World Visit");
+            FailWorldVisit($"Could not select {targetWorld} in World Visit");
             return;
         }
-        if (travel.SelectWorld(current.World))
-            SetState(SentinelState.ConfirmWorldVisit, $"Confirming normal World Visit to {current.World}");
+        if (travel.SelectWorld(targetWorld))
+            SetState(SentinelState.ConfirmWorldVisit, $"Confirming normal World Visit to {targetWorld}");
     }
 
     private void TickConfirmWorldVisit(DateTime now)
     {
-        if (current is null)
+        var targetWorld = WorldVisitTarget();
+        if (string.IsNullOrWhiteSpace(targetWorld))
             return;
-        if (travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))
         {
-            SetState(SentinelState.WaitForWorld, $"Arriving on {current.World}");
+            SetState(SentinelState.WaitForWorld, $"Arriving on {targetWorld}");
             return;
         }
         if (TravelTimedOut(now))
         {
-            FailCurrent($"World Visit confirmation for {current.World} timed out");
+            FailWorldVisit($"World Visit confirmation for {targetWorld} timed out");
             return;
         }
-        if (travel.ConfirmWorldVisit(current.World))
-            SetState(SentinelState.WaitForWorld, $"Queued for World Visit to {current.World}");
+        if (travel.ConfirmWorldVisit(targetWorld))
+            SetState(SentinelState.WaitForWorld, $"Queued for World Visit to {targetWorld}");
     }
 
     private void TickWaitForWorld(DateTime now)
     {
-        if (current is null)
+        var targetWorld = WorldVisitTarget();
+        if (string.IsNullOrWhiteSpace(targetWorld))
             return;
-        if (!travel.IsBusy && travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) &&
+        if (!travel.IsBusy && travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase) &&
             travel.IsInUldah(clientState.TerritoryType))
         {
-            SetState(SentinelState.TeleportToTerritory, $"Arrived on {current.World}; preparing territory teleport");
+            CompleteWorldVisit(targetWorld);
             return;
         }
         if (TravelTimedOut(now))
-            FailCurrent($"Arrival on {current.World} timed out");
+            FailWorldVisit($"Arrival on {targetWorld} timed out");
+    }
+
+    private bool BeginReturnHome(DateTime now, string reason)
+    {
+        var homeWorld = travel.HomeWorld;
+        if (string.IsNullOrWhiteSpace(homeWorld) ||
+            travel.CurrentWorld.Equals(homeWorld, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        returningHome = true;
+        nextActionUtc = now;
+        SetState(SentinelState.WorldVisit, $"{reason}; returning normally to home world {homeWorld}");
+        return true;
+    }
+
+    private string WorldVisitTarget() => returningHome ? travel.HomeWorld : current?.World ?? string.Empty;
+
+    private void CompleteWorldVisit(string targetWorld)
+    {
+        vnav.StopSafe();
+        if (returningHome)
+        {
+            returningHome = false;
+            SetState(SentinelState.Idle, $"Returned home to {targetWorld}; standing by in Ul'dah");
+            return;
+        }
+
+        SetState(SentinelState.TeleportToTerritory,
+            $"Arrived on {targetWorld}; preparing territory teleport");
+    }
+
+    private void FailWorldVisit(string reason)
+    {
+        vnav.StopSafe();
+        if (returningHome)
+        {
+            returningHome = false;
+            SetState(SentinelState.Idle, $"{reason}; remaining safely at the Ul'dah aetheryte");
+            return;
+        }
+
+        FailCurrent(reason);
     }
 
     private void TickTeleportToTerritory(DateTime now)
@@ -570,9 +647,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (condition[ConditionFlag.Mounted])
             UseGeneralAction(23);
-        else
-            travel.InteractWithNearbyAetheryte(15f);
-        nextActionUtc = now.AddSeconds(2);
+        else if (!travel.InteractWithNearbyAetheryte(15f) &&
+                 (now - stateSinceUtc).TotalSeconds > 4 &&
+                 territoryAetheryteId != 0 && travel.Teleport(territoryAetheryteId))
+        {
+            status = "Repositioning normally at the territory aetheryte to change instance";
+        }
+        nextActionUtc = now.AddSeconds(3);
     }
 
     private void TickSelectInstance(DateTime now)
@@ -865,7 +946,8 @@ public sealed class Plugin : IDalamudPlugin
         return objects
             .OfType<IBattleChara>()
             .FirstOrDefault(o => o.ObjectKind == ObjectKind.BattleNpc &&
-                o.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase));
+                ((current.MarkDataId != 0 && o.BaseId == current.MarkDataId) ||
+                 o.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)));
     }
 
     private void ConfirmKill(string reason)
@@ -900,13 +982,27 @@ public sealed class Plugin : IDalamudPlugin
         killConfirmed = false;
         tagExecuted = false;
         discardAtUldah = false;
+        returningHome = false;
         parkingCandidates.Clear();
     }
 
-    private void RemoveKilledQueuedAlerts(string sonarText)
+    private bool KillNoticeMatchesWorld(string killedWorld, HuntAlertSnapshot alert)
     {
+        if (!string.IsNullOrWhiteSpace(killedWorld))
+            return alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase);
+
+        return clientState.TerritoryType == alert.TerritoryId &&
+               travel.CurrentWorld.Equals(alert.World, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void RemoveKilledQueuedAlerts(string sonarText, string killedWorld)
+    {
+        if (string.IsNullOrWhiteSpace(killedWorld))
+            return;
+
         var survivors = pendingAlerts
-            .Where(alert => !sonarText.Contains(alert.CreatureName, StringComparison.OrdinalIgnoreCase))
+            .Where(alert => !alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase) ||
+                            !sonarText.Contains(alert.CreatureName, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         if (survivors.Length == pendingAlerts.Count)
             return;

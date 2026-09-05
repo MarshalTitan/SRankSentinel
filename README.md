@@ -5,16 +5,16 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 ## Workflow
 
 1. Accept an S-rank alert from HuntAlerts IPC or a Sonar chat/map-link alert.
-2. Deduplicate it and queue it without interrupting the active hunt.
+2. Reject cross-data-center alerts, deduplicate same-data-center alerts, and queue them without interrupting the active hunt.
 3. Reset through Ul'dah before every hunt.
 4. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
-5. Use the game's normal teleport system to reach the hunt territory and select the requested zone instance.
-6. Use vnavmesh flight to approach the flag, positively identify the named S rank, sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
+5. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu.
+6. Use vnavmesh flight to approach the flag, positively identify the S rank by stable battle-NPC ID (with a localized-name fallback), sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
 7. Maintain a 35-yalm emergency floor as the mark moves.
 8. Engage only after the mark itself is in combat and at or below 95% HP. Move into range, execute the configured ranged tag action exactly once, then retreat.
-9. Detect the mark's death from the live battle object or a matching Sonar kill notice.
+9. Detect the mark's death from the live battle object or a matching same-world Sonar kill notice.
 10. If dead while the mark is alive, accept a Raise prompt and never use Return. If still dead after the kill is confirmed, use the normal Return action. Otherwise teleport normally to Ul'dah.
-11. Clear the completed alert in Ul'dah and start the next queued S rank, if any.
+11. Clear the completed alert in Ul'dah and start the next queued S rank, if any. When the queue is empty, use normal World Visit to return to the character's home world and remain at the Ul'dah aetheryte.
 
 ## Safety defaults
 
@@ -33,7 +33,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - **HuntAlerts and/or Sonar** may supply alerts.
 - HuntTrainAssistant, Lifestream, Wrath Combo, and BossMod are **not required or used**.
 
-World Visit can only reach worlds exposed by the game's normal World Visit menu. Cross-data-center travel is intentionally not automated.
+World Visit can only reach worlds on the character's current data center. Cross-data-center alerts are ignored and cross-data-center travel is intentionally not automated.
 
 ## Command
 

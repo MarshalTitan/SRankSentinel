@@ -5,6 +5,8 @@ using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Lumina.Excel.Sheets;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
@@ -14,9 +16,11 @@ internal sealed class NativeTravel(
     IGameGui gameGui,
     IObjectTable objects,
     ITargetManager targets,
-    ICondition condition)
+    ICondition condition,
+    IDataManager data)
 {
     public const uint UldahAetheryteId = 9;
+    public static readonly Vector3 UldahAetherytePosition = new(-144.52f, -1.36f, -169.67f);
 
     public bool IsBetweenAreas =>
         condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
@@ -29,6 +33,9 @@ internal sealed class NativeTravel(
     public string CurrentWorld =>
         objects.LocalPlayer?.CurrentWorld.Value.Name.ToString() ?? string.Empty;
 
+    public string HomeWorld =>
+        objects.LocalPlayer?.HomeWorld.Value.Name.ToString() ?? string.Empty;
+
     public unsafe int CurrentInstance
     {
         get
@@ -38,7 +45,33 @@ internal sealed class NativeTravel(
         }
     }
 
-    public bool IsInUldah(uint territory) => territory is 130 or 131;
+    // World Visit is available at the main Steps of Nald aetheryte (territory 130).
+    public bool IsInUldah(uint territory) => territory == 130;
+
+    public bool IsSameDataCenter(string world)
+    {
+        if (objects.LocalPlayer is not { } player || string.IsNullOrWhiteSpace(world))
+            return false;
+
+        var target = data.GetExcelSheet<World>()
+            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));
+        return target.RowId != 0 && player.CurrentWorld.Value.DataCenter.RowId != 0 &&
+               target.DataCenter.RowId == player.CurrentWorld.Value.DataCenter.RowId;
+    }
+
+    public unsafe bool CanTeleportTo(uint aetheryteId)
+    {
+        var telepo = Telepo.Instance();
+        if (telepo is null || aetheryteId == 0)
+            return false;
+
+        telepo->UpdateAetheryteList();
+        foreach (var destination in telepo->TeleportList)
+            if (destination.AetheryteId == aetheryteId && destination.SubIndex == 0)
+                return true;
+
+        return false;
+    }
 
     public unsafe bool Teleport(uint aetheryteId)
     {
@@ -46,17 +79,9 @@ internal sealed class NativeTravel(
             return false;
 
         var telepo = Telepo.Instance();
-        if (telepo is null)
+        if (telepo is null || !CanTeleportTo(aetheryteId))
             return false;
-
-        telepo->UpdateAetheryteList();
-        foreach (var destination in telepo->TeleportList)
-        {
-            if (destination.AetheryteId == aetheryteId && destination.SubIndex == 0)
-                return telepo->Teleport(aetheryteId, 0);
-        }
-
-        return false;
+        return telepo->Teleport(aetheryteId, 0);
     }
 
     public unsafe bool InteractWithNearbyAetheryte(float maximumDistance = 30f)

@@ -2,6 +2,6 @@
   "Name": "S Rank Sentinel",
   "Author": "MTitan",
   "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
-  "Description": "Consumes HuntAlerts or Sonar alerts, resets through Ul'dah, performs normal World Visit and teleport travel, parks safely with vnavmesh, executes one gated ranged tag, and recovers after the kill.",
+  "Description": "Consumes same-data-center HuntAlerts or Sonar alerts, validates S ranks by game-data ID, owns normal World Visit/teleport/instance travel, parks safely with vnavmesh, executes one gated ranged tag, and returns home after the queue clears.",
   "Tags": ["hunts", "s-rank", "navigation", "automation"]
 }
