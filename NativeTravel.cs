@@ -2,10 +2,11 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
-using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using System.Runtime.InteropServices;
+using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace SRankSentinel;
 
@@ -75,7 +76,7 @@ internal sealed class NativeTravel(
         if (targetSystem is null)
             return false;
 
-        targetSystem->InteractWithObject((GameObject*)aetheryte.Address, false);
+        targetSystem->InteractWithObject((CSGameObject*)aetheryte.Address, false);
         return true;
     }
 
@@ -168,7 +169,7 @@ internal sealed class NativeTravel(
             if (!value.HasValue)
                 break;
 
-            var name = value.Value.ToString().Trim();
+            var name = (Marshal.PtrToStringUTF8((nint)value.Value) ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(name))
                 break;
             result.Add(name);

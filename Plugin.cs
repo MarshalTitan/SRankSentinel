@@ -272,8 +272,9 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is not null && !killConfirmed && clientState.TerritoryType == current.TerritoryId)
         {
-            mark = FindMark();
-            if (mark is { } visibleMark && (visibleMark.IsDead || visibleMark.CurrentHp == 0))
+            var visibleMark = FindMark();
+            mark = visibleMark;
+            if (visibleMark is not null && (visibleMark.IsDead || visibleMark.CurrentHp == 0))
             {
                 ConfirmKill($"{visibleMark.Name.TextValue} is dead");
                 return;
