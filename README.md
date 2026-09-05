@@ -11,7 +11,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 5. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu.
 6. Use vnavmesh flight to approach the flag, positively identify the S rank by stable battle-NPC ID (with a localized-name fallback), sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
 7. Maintain a 35-yalm emergency floor as the mark moves.
-8. Engage only after the mark itself is in combat and at or below 95% HP. Move into range, execute the configured ranged tag action exactly once, then retreat.
+8. Engage only after the mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, move into range, make exactly one client action attempt, permanently close the attack gate for that mark, then retreat.
 9. Detect the mark's death from the live battle object or a matching same-world Sonar kill notice.
 10. If dead while the mark is alive, accept a Raise prompt and never use Return. If still dead after the kill is confirmed, use the normal Return action. Otherwise teleport normally to Ul'dah.
 11. Clear the completed alert in Ul'dah and start the next queued S rank, if any. When the queue is empty, use normal World Visit to return to the character's home world and remain at the Ul'dah aetheryte.
@@ -22,8 +22,9 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - Safe parking clearance: **45y** plus player/mark hitboxes
 - Emergency clearance: **35y** plus player/mark hitboxes
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
-- Ranged tag action: **46 (Tomahawk)** by default; change this in settings if using another job
-- One successful tag action per mark; no combat rotation
+- Ranged tag action: selected automatically from the current combat job and adjusted for learned upgrades
+- Exactly one client action attempt per mark, whether the client accepts or rejects it; no retry loop and no combat rotation
+- Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking; a manual action-ID override remains available
 - No coordinate writes or coordinate warping
 - Unknown marks, missing flags, and unreachable routes are discarded only after a normal reset through Ul'dah
 

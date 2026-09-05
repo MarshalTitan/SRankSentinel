@@ -50,7 +50,8 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime nextActionUtc = DateTime.MinValue;
     private bool flagPrepared;
     private bool killConfirmed;
-    private bool tagExecuted;
+    private bool tagAttempted;
+    private uint activeTagActionId;
     private bool discardAtUldah;
     private bool returningHome;
     private string status = "Idle";
@@ -83,7 +84,7 @@ public sealed class Plugin : IDalamudPlugin
         config.Initialize(pi);
         vnav = new VNavmeshIpc(pi);
         travel = new NativeTravel(gameGui, objectTable, targetManager, condition, dataManager);
-        combat = new CombatController(gameGui, condition);
+        combat = new CombatController(gameGui, condition, objectTable, targetManager);
 
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
@@ -231,7 +232,8 @@ public sealed class Plugin : IDalamudPlugin
         current = alert;
         mark = null;
         killConfirmed = false;
-        tagExecuted = false;
+        tagAttempted = false;
+        activeTagActionId = 0;
         discardAtUldah = false;
         returningHome = false;
         PrepareCurrentTravel();
@@ -782,12 +784,20 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!tagExecuted && inCombat && hp <= config.EngageHpPercent)
+        if (!tagAttempted && inCombat && hp <= config.EngageHpPercent)
         {
+            activeTagActionId = combat.ResolveTagActionId(config.AutomaticTagAction, config.TagActionId);
+            if (activeTagActionId == 0)
+            {
+                status = "Combat/HP gate passed, but this job has no supported ranged tag; waiting without attacking";
+                return;
+            }
+
+            combat.TargetMark(mark);
             var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + 18f;
             if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
                 SetState(SentinelState.TagApproach,
-                    $"Combat/HP gate passed ({hp:0.0}%); moving into range for one tag");
+                    $"Combat/HP gate passed ({hp:0.0}%); targeted mark and moving into range for action {activeTagActionId}");
         }
     }
 
@@ -800,6 +810,21 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.SafeWait, "Mark lost during tag approach; holding safely");
             return;
         }
+
+        if (tagAttempted)
+        {
+            if (now >= nextActionUtc)
+            {
+                BeginGroundRetreat(mark);
+                status = $"Attack cutoff active; retreating to {config.WaitingDistance:0}y after the one tag attempt";
+            }
+            else
+            {
+                status = $"One tag attempt sent (action {activeTagActionId}); holding still briefly so casted tags are not cancelled";
+            }
+            return;
+        }
+
         if (!CombatController.IsMarkInCombat(mark) || CombatController.HpPercent(mark) > config.EngageHpPercent)
         {
             vnav.StopSafe();
@@ -807,18 +832,27 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+
+        combat.TargetMark(mark);
+
         if (ClearanceFromMark(mark) <= 20f)
         {
             vnav.StopSafe();
-            if (now >= nextActionUtc && combat.UseSingleTag(config.TagActionId, mark))
+            if (now >= nextActionUtc)
             {
-                tagExecuted = true;
+                var attempt = combat.TrySingleTag(activeTagActionId, mark);
+                if (attempt.Attempted)
+                {
+                    tagAttempted = true;
+                    nextActionUtc = now.AddSeconds(3);
+                    status = $"One tag attempt sent (action {activeTagActionId}); client " +
+                             (attempt.Accepted ? "accepted it" : "did not accept it") +
+                             "; attack cutoff is active and no further attacks will be issued";
+                    return;
+                }
+
                 nextActionUtc = now.AddSeconds(1);
-                BeginGroundRetreat(mark);
-                status = $"Executed one tag action ({config.TagActionId}); retreating to {config.WaitingDistance:0}y";
-                return;
             }
-            nextActionUtc = now.AddSeconds(1);
         }
 
         if ((now - stateSinceUtc).TotalSeconds > 3 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
@@ -840,7 +874,7 @@ public sealed class Plugin : IDalamudPlugin
         if (ClearanceFromMark(mark) >= config.WaitingDistance - 2f)
         {
             vnav.StopSafe();
-            SetState(SentinelState.SafeWait, tagExecuted ? "Tagged once; safe radius restored" : "Safe radius restored");
+            SetState(SentinelState.SafeWait, tagAttempted ? "One tag attempt completed; safe radius restored" : "Safe radius restored");
             return;
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
@@ -980,7 +1014,8 @@ public sealed class Plugin : IDalamudPlugin
         territoryAetheryteId = 0;
         flagPrepared = false;
         killConfirmed = false;
-        tagExecuted = false;
+        tagAttempted = false;
+        activeTagActionId = 0;
         discardAtUldah = false;
         returningHome = false;
         parkingCandidates.Clear();
@@ -1109,9 +1144,15 @@ public sealed class Plugin : IDalamudPlugin
         config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 35f, 70f);
         config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 20f, 50f);
         config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f);
-        var tagAction = (int)config.TagActionId;
-        if (ImGui.InputInt("One ranged tag action ID", ref tagAction))
-            config.TagActionId = (uint)Math.Max(0, tagAction);
+        var automaticTag = config.AutomaticTagAction;
+        if (ImGui.Checkbox("Choose ranged tag from current job", ref automaticTag))
+            config.AutomaticTagAction = automaticTag;
+        if (!config.AutomaticTagAction)
+        {
+            var tagAction = (int)config.TagActionId;
+            if (ImGui.InputInt("Manual ranged tag action ID", ref tagAction))
+                config.TagActionId = (uint)Math.Max(0, tagAction);
+        }
 
         if (ImGui.Button("Save settings"))
             config.Save();
@@ -1126,7 +1167,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        ImGui.TextWrapped("Safety gates: the mark itself must already be in combat and at/below the configured HP threshold. Sentinel executes the configured ranged action once, never runs a rotation, never writes coordinates, and never uses Return until the mark's death is confirmed.");
+        ImGui.TextWrapped("Safety gates: the mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, never runs a rotation, never writes coordinates, and never uses Return until the mark's death is confirmed.");
         ImGui.End();
     }
 
