@@ -2,34 +2,59 @@ name: Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Download Dalamud dev build
+      - name: Download Dalamud development files
         shell: pwsh
         run: |
           $dalamudDir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
-          New-Item -ItemType Directory -Force -Path $dalamudDir | Out-Null
-          Invoke-WebRequest -Uri "https://goatcorp.github.io/dalamud-distrib/latest.zip" -OutFile dalamud.zip
-          Expand-Archive -Path dalamud.zip -DestinationPath $dalamudDir -Force
-          Remove-Item dalamud.zip
+          New-Item -ItemType Directory -Path $dalamudDir -Force | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $dalamudDir -Force
 
-      - run: dotnet restore SRankSentinel.csproj
-      - run: dotnet build SRankSentinel.csproj -c Release --no-restore
+      - name: Restore
+        run: dotnet restore SRankSentinel.csproj
 
-      - uses: actions/upload-artifact@v4
+      - name: Build release package
+        run: dotnet build SRankSentinel.csproj -c Release --no-restore
+
+      - name: Read package version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath 'SRankSentinel.csproj' -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Validate installable ZIP
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Validate-Package.ps1
+          -PackagePath 'bin/Release/SRankSentinel/latest.zip'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: SRankSentinel
+          name: SRankSentinel-${{ steps.version.outputs.value }}
           path: bin/Release/SRankSentinel/latest.zip
           if-no-files-found: error

@@ -1,0 +1,110 @@
+name: Publish Beta
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud development files
+        shell: pwsh
+        run: |
+          $dalamudDir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Path $dalamudDir -Force | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $dalamudDir -Force
+
+      - name: Read and validate version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath 'SRankSentinel.csproj' -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Version must contain four numeric components: $version"
+          }
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore
+        run: dotnet restore SRankSentinel.csproj
+
+      - name: Build release package
+        run: dotnet build SRankSentinel.csproj -c Release --no-restore
+
+      - name: Validate installable ZIP
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Validate-Package.ps1
+          -PackagePath 'bin/Release/SRankSentinel/latest.zip'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Prepare named release asset
+        shell: pwsh
+        run: Copy-Item -LiteralPath 'bin/Release/SRankSentinel/latest.zip' -Destination "$env:RUNNER_TEMP\SRankSentinel.zip" -Force
+
+      - name: Create or repair GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $asset = "$env:RUNNER_TEMP\SRankSentinel.zip"
+          gh release view $tag --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber --repo '${{ github.repository }}'
+          }
+          else {
+            gh release create $tag $asset `
+              --repo '${{ github.repository }}' `
+              --target '${{ github.sha }}' `
+              --title "S Rank Sentinel ${{ steps.version.outputs.value }} beta" `
+              --notes "Installable Dalamud beta package for S Rank Sentinel ${{ steps.version.outputs.value }}." `
+              --prerelease
+          }
+
+      - name: Update custom-repository metadata
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Update-RepoManifest.ps1
+          -ManifestPath 'repo.json'
+          -Version '${{ steps.version.outputs.value }}'
+
+      - name: Commit repository metadata
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- repo.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Publish beta v${{ steps.version.outputs.value }} [skip ci]"
+            git push origin HEAD:main
+          }
+
+      - name: Simulate a fresh public install
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Test-PublicDistribution.ps1
+          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
