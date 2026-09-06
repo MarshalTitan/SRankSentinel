@@ -15,11 +15,16 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadCount": 0,
-    "LastUpdate": 1788737222,
+    "LastUpdate": 1788737821,
     "LoadPriority": 0,
     "DownloadLinkInstall": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.6.3.0/SRankSentinel.zip",
     "DownloadLinkUpdate": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.6.3.0/SRankSentinel.zip",
     "DownloadLinkTesting": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.6.3.0/SRankSentinel.zip",
-    "Tags": ["hunts", "s-rank", "navigation", "automation"]
+    "Tags": [
+      "hunts",
+      "s-rank",
+      "navigation",
+      "automation"
+    ]
   }
 ]
