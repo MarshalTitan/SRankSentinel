@@ -55,3 +55,20 @@ World Visit can only reach worlds on the character's current data center. Cross-
 `/sranksentinel` opens the status/settings window.
 
 The emergency control is **STOP + RESET THROUGH UL'DAH**. It clears the queue, stops vnavmesh, discards the active alert, and performs the same normal Ul'dah reset used by completed hunts.
+
+## Beta installation
+
+Add this custom repository URL under **Dalamud Settings → Experimental → Custom Plugin Repositories**:
+
+`https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json`
+
+Save the setting, open `/xlplugins`, search for **S Rank Sentinel**, and choose **Install**. Published packages are permanent GitHub Release assets named `SRankSentinel.zip`; GitHub Actions build artifacts are for development checks only and are never referenced by `repo.json`.
+
+## Publishing the next beta
+
+1. Change `<Version>` in `SRankSentinel.csproj` to a new four-part version and commit the development changes to `main`.
+2. Wait for the normal **Build** workflow to pass.
+3. Run the **Publish Beta** workflow from the Actions tab.
+4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates `repo.json` with the new version and permanent download URLs.
+
+Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
