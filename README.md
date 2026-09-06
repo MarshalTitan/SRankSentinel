@@ -6,15 +6,15 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 
 1. Connect directly to Faloop's authenticated Socket.IO feed and consume spawn/death events. Faloop credentials are entered in Sentinel's window; the password is never saved or logged. Only the resulting session ID is saved for automatic reconnect.
 2. Apply Sentinel's own expansion gate before any reset, World Visit, or territory teleport. Only Shadowbringers, Endwalker, and Dawntrail S/SS alerts are eligible, even when HuntAlerts or Sonar also announces ARR, Heavensward, or Stormblood marks.
-3. Translate Faloop zone/POI IDs through a reviewed coordinate snapshot from the current web client; the result is an approach flag, not a direct position write.
+3. Translate Faloop zone/POI IDs through a reviewed coordinate snapshot from the current web client, convert the stored map coordinates to a local game-world destination, and retain it across World Visit, teleport, zoning, and instance transitions. This feeds vnavmesh directly without creating or reading the game's global map flag and is never a direct player-position write.
 4. Optionally accept HuntAlerts IPC and Sonar chat/map-link alerts as fallback sources. Either fallback can be disabled independently after the direct feed is proven on the player's data center.
 5. Reject cross-data-center alerts, suppress duplicate feed events, deduplicate same-data-center alerts by world + territory + instance + mark, and persist the ordered queue without interrupting the active hunt. Matching Faloop death events immediately invalidate queued entries; historical deaths older than the freshness window cannot invalidate a newer spawn.
 6. Reset through Ul'dah before every hunt.
 7. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
 8. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu.
 9. After arriving in the correct territory and instance, first wait for zoning and the local player state to settle, then wait indefinitely and motionless at the aetheryte until vnavmesh reports the mesh fully ready. Mesh generation/download is a blocking state, never a hunt failure; newer alerts remain queued and cannot replace the active hunt.
-10. Use the stored Faloop/HuntAlerts/Sonar coordinates as the initial vnavmesh flight destination. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
-11. If the mark is not visible near the alert coordinates, remain there and rescan in repeated bounded windows. A missing entity, unavailable flag projection, interrupted path, or failed route never means the hunt is dead and never clears it.
+10. Use the stored Faloop/HuntAlerts/Sonar coordinates directly as the initial vnavmesh flight destination. Direct Faloop operation does not depend on HuntAlerts, Sonar, or either fallback creating a map flag. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
+11. If the mark is not visible near the alert coordinates, remain there and rescan in repeated bounded windows. A missing entity, unavailable coordinate projection, interrupted path, or failed route never means the hunt is dead and never clears it.
 12. Once positively identified by stable battle-NPC ID (with a localized-name fallback), switch from the static alert coordinates to dynamic entity-based parking, sample multiple reachable parking points, and land 45 yalms clear of both hitboxes.
 13. Maintain a 38-yalm emergency floor as the mark moves.
 14. Engage only after the active S/SS mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, move into range, make exactly one client action attempt, permanently close the attack gate for that mark, then retreat.
@@ -27,7 +27,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 
 ## Safety defaults
 
-- Initial flag stop: **60y**
+- Initial coordinate stop: **60y**
 - Safe parking clearance: **45y** plus player/mark hitboxes
 - Emergency clearance: **38y** plus player/mark hitboxes
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
@@ -39,7 +39,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
 - Faloop transport: native Engine.IO v4 WebSocket with server-ping replies, heartbeat timeout, bounded messages, exponential reconnect backoff, event replay suppression, and no extra NuGet runtime
 - No coordinate writes or coordinate warping
-- Missing marks, unavailable flags, and unreachable local routes keep the active hunt reserved and are retried; they never produce a cleared/dead result
+- Missing marks, unavailable coordinate projections, and unreachable local routes keep the active hunt reserved and are retried; they never produce a cleared/dead result
 
 ## Dependencies
 

@@ -7,7 +7,7 @@ namespace SRankSentinel;
 /// Faloop's zone POIs are private feed identifiers, not game row IDs. These values are a
 /// reviewed snapshot of the ShB/EW/DT mob POIs in Faloop's public web client
 /// (main.a8fa335a5cf92d82.js, verified 2026-09-05). The resulting
-/// map flag is only an approach hint; Sentinel still identifies and measures from the live mark.
+/// local-world destination is only an approach hint; Sentinel still identifies and measures from the live mark.
 /// </summary>
 internal static class FaloopCatalog
 {

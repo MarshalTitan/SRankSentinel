@@ -27,7 +27,6 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IChatGui chat;
     private readonly IObjectTable objects;
     private readonly IDataManager data;
-    private readonly IGameGui gameGui;
     private readonly IFramework framework;
     private readonly IPluginLog log;
     private readonly VNavmeshIpc vnav;
@@ -44,15 +43,14 @@ public sealed class Plugin : IDalamudPlugin
     private bool configOpen;
     private HuntAlertSnapshot? current;
     private IBattleChara? mark;
-    private MapLinkPayload? currentMapLink;
-    private Vector3? flagPoint;
+    private Vector3? alertPoint;
+    private Vector3? approachPoint;
     private Vector3? safePoint;
     private uint territoryAetheryteId;
     private SentinelState state = SentinelState.Idle;
     private DateTime stateSinceUtc = DateTime.UtcNow;
     private DateTime lastTickUtc = DateTime.MinValue;
     private DateTime nextActionUtc = DateTime.MinValue;
-    private bool flagPrepared;
     private bool killConfirmed;
     private bool tagAttempted;
     private bool markEverIdentified;
@@ -92,7 +90,6 @@ public sealed class Plugin : IDalamudPlugin
         chat = chatGui;
         objects = objectTable;
         data = dataManager;
-        this.gameGui = gameGui;
         this.framework = framework;
         log = pluginLog;
 
@@ -539,7 +536,7 @@ public sealed class Plugin : IDalamudPlugin
         // Prefer the alert coordinates whenever they exist. Object resolution starts only near
         // those coordinates; the local scan fallback is reserved for an in-zone SS that was
         // discovered directly from the game object table and therefore has no map coordinates.
-        var visibleSs = currentMapLink is null ? FindMark() : null;
+        var visibleSs = alertPoint is null ? FindMark() : null;
         if (visibleSs is not null)
         {
             mark = visibleSs;
@@ -555,17 +552,16 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        SetState(SentinelState.WaitForFlag,
+        SetState(SentinelState.PrepareApproachDestination,
             $"{source}: prioritizing {alert.CreatureName} directly from its alert coordinates");
     }
 
     private void PrepareCurrentTravel()
     {
         territoryAetheryteId = 0;
-        currentMapLink = null;
-        flagPoint = null;
+        alertPoint = null;
+        approachPoint = null;
         safePoint = null;
-        flagPrepared = false;
         parkingCandidates.Clear();
         nextActionUtc = DateTime.MinValue;
 
@@ -583,7 +579,17 @@ public sealed class Plugin : IDalamudPlugin
         var map = data.GetExcelSheet<Map>()
             .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
         if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
-            currentMapLink = new MapLinkPayload(current.TerritoryId, map.RowId, current.MapX, current.MapY);
+        {
+            // MapLinkPayload performs Dalamud's canonical map-coordinate conversion. Its RawX/RawY
+            // values are local game-world X/Z positions scaled by 1000. Preserve that destination
+            // independently of the game's global map flag so direct Faloop navigation survives
+            // World Visit, teleport, zoning, and instance transitions without a fallback plugin.
+            var mapped = new MapLinkPayload(current.TerritoryId, map.RowId, current.MapX, current.MapY);
+            alertPoint = new Vector3(mapped.RawX / 1000f, 1024f, mapped.RawY / 1000f);
+            log.Information(
+                "Preserved alert destination for {Mark}: map ({MapX:0.0}, {MapY:0.0}) -> local ({LocalX:0.0}, {LocalZ:0.0})",
+                current.CreatureName, current.MapX, current.MapY, alertPoint.Value.X, alertPoint.Value.Z);
+        }
     }
 
     private void OnFrameworkUpdate(IFramework _)
@@ -681,11 +687,11 @@ public sealed class Plugin : IDalamudPlugin
             case SentinelState.WaitForMesh:
                 TickWaitForMesh();
                 return;
-            case SentinelState.WaitForFlag:
-                TickWaitForFlag(now);
+            case SentinelState.PrepareApproachDestination:
+                TickPrepareApproachDestination(now);
                 return;
-            case SentinelState.ApproachFlag:
-                TickApproachFlag(now);
+            case SentinelState.ApproachAlertCoordinates:
+                TickApproachAlertCoordinates(now);
                 return;
             case SentinelState.LocateMark:
                 TickLocateMark(now);
@@ -1090,18 +1096,18 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (markEverIdentified && currentMapLink is null)
+        if (markEverIdentified && alertPoint is null)
         {
             SetState(SentinelState.LocateMark,
                 "vnavmesh mesh is fully ready; resuming entity resolution for the previously identified mark");
             return;
         }
 
-        SetState(SentinelState.WaitForFlag,
+        SetState(SentinelState.PrepareApproachDestination,
             "vnavmesh mesh is fully ready; resolving the active hunt's stored alert coordinates");
     }
 
-    private void TickWaitForFlag(DateTime now)
+    private void TickPrepareApproachDestination(DateTime now)
     {
         if (current is null)
             return;
@@ -1111,46 +1117,35 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (currentMapLink is null)
+        if (alertPoint is null)
         {
-            status = $"Waiting for usable alert coordinates for {current.CreatureName}; the hunt remains active";
+            status = $"Waiting for a usable mapped local destination for {current.CreatureName}; the hunt remains active";
             return;
         }
 
-        if (!flagPrepared)
+        if (approachPoint is null)
         {
             if (now < nextActionUtc)
                 return;
-            flagPrepared = gameGui.OpenMapWithMapLink(currentMapLink);
+            approachPoint = vnav.PointOnFloorSafe(alertPoint.Value, 20f);
             nextActionUtc = now.AddSeconds(2);
-            if (!flagPrepared)
+            if (approachPoint is null)
             {
-                status = $"Could not prepare {current.CreatureName}'s alert coordinates yet; holding and retrying";
+                status = $"Could not project {current.CreatureName}'s mapped local destination onto vnavmesh yet; " +
+                         "holding the active hunt and retrying";
                 return;
             }
-        }
-
-        flagPoint = vnav.FlagToPointSafe();
-        if (flagPoint is null)
-        {
-            if (now >= nextActionUtc)
-            {
-                flagPrepared = false;
-                nextActionUtc = now.AddSeconds(2);
-            }
-            status = $"Alert coordinates for {current.CreatureName} are not projected yet; " +
-                     "holding the active hunt and retrying without treating it as dead";
-            return;
+            status = $"Direct local destination ready for {current.CreatureName}; preparing normal flight";
         }
 
         if (now < nextActionUtc)
             return;
         if (!EnsureMounted(now))
             return;
-        if (vnav.MoveCloseToSafe(flagPoint.Value, true, config.FlagApproachDistance))
+        if (vnav.MoveCloseToSafe(approachPoint.Value, true, config.FlagApproachDistance))
         {
             nextActionUtc = now.AddSeconds(3);
-            SetState(SentinelState.ApproachFlag,
+            SetState(SentinelState.ApproachAlertCoordinates,
                 $"Flying toward {current.CreatureName}'s reported coordinates; " +
                 $"entity resolution waits until within about {config.FlagApproachDistance:0}y");
             return;
@@ -1160,7 +1155,7 @@ public sealed class Plugin : IDalamudPlugin
         status = $"No route to {current.CreatureName}'s alert coordinates is available yet; holding and retrying";
     }
 
-    private void TickApproachFlag(DateTime now)
+    private void TickApproachAlertCoordinates(DateTime now)
     {
         if (current is null)
             return;
@@ -1170,14 +1165,14 @@ public sealed class Plugin : IDalamudPlugin
             BeginMeshWait("vnavmesh readiness was lost during the coordinate approach");
             return;
         }
-        if (flagPoint is null)
+        if (approachPoint is null)
         {
-            SetState(SentinelState.WaitForFlag,
-                "Alert coordinate projection was lost; rebuilding it without abandoning the active hunt");
+            SetState(SentinelState.PrepareApproachDestination,
+                "Direct alert-coordinate projection was lost; rebuilding it without abandoning the active hunt");
             return;
         }
 
-        var distance = HorizontalDistance(PlayerPosition(), flagPoint.Value);
+        var distance = HorizontalDistance(PlayerPosition(), approachPoint.Value);
         if (distance <= config.FlagApproachDistance + 8f)
         {
             vnav.StopSafe();
@@ -1198,7 +1193,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!EnsureMounted(now))
             return;
 
-        if (vnav.MoveCloseToSafe(flagPoint.Value, true, config.FlagApproachDistance))
+        if (vnav.MoveCloseToSafe(approachPoint.Value, true, config.FlagApproachDistance))
             status = $"Coordinate route stopped early; retrying while keeping {current.CreatureName} active";
         else
             status = $"Coordinate route is currently unavailable; holding position and retrying {current.CreatureName}";
@@ -1718,11 +1713,10 @@ public sealed class Plugin : IDalamudPlugin
         vnav.StopSafe();
         current = null;
         mark = null;
-        currentMapLink = null;
-        flagPoint = null;
+        alertPoint = null;
+        approachPoint = null;
         safePoint = null;
         territoryAetheryteId = 0;
-        flagPrepared = false;
         killConfirmed = false;
         tagAttempted = false;
         markEverIdentified = false;
@@ -2116,7 +2110,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        config.FlagApproachDistance = DrawFloat("Initial flag stop", config.FlagApproachDistance, 35f, 90f);
+        config.FlagApproachDistance = DrawFloat("Initial coordinate stop", config.FlagApproachDistance, 35f, 90f);
         config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 35f, 70f);
         config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 20f, 50f);
         config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f);
@@ -2174,8 +2168,8 @@ public sealed class Plugin : IDalamudPlugin
         WaitForInstance,
         WaitForPlayerReady,
         WaitForMesh,
-        WaitForFlag,
-        ApproachFlag,
+        PrepareApproachDestination,
+        ApproachAlertCoordinates,
         LocateMark,
         MoveToSafePoint,
         Landing,

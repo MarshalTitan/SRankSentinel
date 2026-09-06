@@ -7,7 +7,6 @@ namespace SRankSentinel;
 internal sealed class VNavmeshIpc
 {
     private readonly ICallGateSubscriber<bool> navReady;
-    private readonly ICallGateSubscriber<Vector3?> flagToPoint;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveCloseTo;
     private readonly ICallGateSubscriber<Vector3, bool, bool> moveTo;
     private readonly ICallGateSubscriber<bool> pathIsRunning;
@@ -18,7 +17,6 @@ internal sealed class VNavmeshIpc
     public VNavmeshIpc(IDalamudPluginInterface pi)
     {
         navReady = pi.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
-        flagToPoint = pi.GetIpcSubscriber<Vector3?>("vnavmesh.Query.Mesh.FlagToPoint");
         moveCloseTo = pi.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
         moveTo = pi.GetIpcSubscriber<Vector3, bool, bool>("vnavmesh.SimpleMove.PathfindAndMoveTo");
         pathIsRunning = pi.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
@@ -31,12 +29,6 @@ internal sealed class VNavmeshIpc
     {
         try { return navReady.InvokeFunc(); }
         catch { return false; }
-    }
-
-    public Vector3? FlagToPointSafe()
-    {
-        try { return flagToPoint.InvokeFunc(); }
-        catch { return null; }
     }
 
     public bool MoveCloseToSafe(Vector3 destination, bool fly, float range)
