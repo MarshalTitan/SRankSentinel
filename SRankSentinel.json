@@ -3,5 +3,6 @@
   "Author": "MTitan",
   "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
   "Description": "Consumes Faloop with optional HuntAlerts/Sonar fallbacks, maps stored POIs directly to local vnavmesh destinations without relying on a game map flag, retries missing entities/routes without false-clearing, requires positive kill evidence, parks dynamically, performs one gated ranged tag, watches SS chains safely, and resets to Ul'dah on the visited World.",
+  "IconUrl": "https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/assets/icon.png",
   "Tags": ["hunts", "s-rank", "navigation", "automation"]
 }
