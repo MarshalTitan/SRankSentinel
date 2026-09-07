@@ -3,6 +3,8 @@ using System.Numerics;
 
 namespace SRankSentinel;
 
+internal sealed record FaloopCoverageAudit(int TerritoryCount, int PoiCount, IReadOnlyList<string> Issues);
+
 /// <summary>
 /// Faloop's zone POIs are private feed identifiers, not game row IDs. These values are a
 /// reviewed snapshot of the ARR/HW/SB/ShB/EW/DT mob POIs in Faloop's public web client
@@ -11,7 +13,10 @@ namespace SRankSentinel;
 /// </summary>
 internal static class FaloopCatalog
 {
-    private sealed record ZoneDefinition(uint TerritoryId, IReadOnlyDictionary<int, Vector2> MobPois);
+    private sealed record ZoneDefinition(
+        uint TerritoryId,
+        float SizeFactor,
+        IReadOnlyDictionary<int, Vector2> MobPois);
 
     private static readonly IReadOnlyDictionary<string, ZoneDefinition> Zones = BuildZones();
 
@@ -36,23 +41,77 @@ internal static class FaloopCatalog
         return true;
     }
 
-    public static bool TryResolveTerritory(string? zoneId, out uint territoryId)
+    public static bool TryResolveEventCoordinates(
+        string? zoneId,
+        int poiId,
+        float directMapX,
+        float directMapY,
+        string? rawLocation,
+        out uint territoryId,
+        out float mapX,
+        out float mapY,
+        out string coordinateSource)
     {
         territoryId = 0;
-        if (string.IsNullOrWhiteSpace(zoneId))
+        mapX = 0;
+        mapY = 0;
+        coordinateSource = string.Empty;
+        var zone = FindZone(zoneId);
+        if (zone is null)
             return false;
-        var key = NormalizeSlug(zoneId);
-        if (Zones.TryGetValue(key, out var zone))
+        territoryId = zone.TerritoryId;
+
+        // Prefer explicit map coordinates carried by the event. This keeps direct Faloop
+        // navigation working even if Faloop adds a new POI before the reviewed table is refreshed.
+        if (IsUsableMapCoordinate(directMapX, directMapY))
         {
-            territoryId = zone.TerritoryId;
+            mapX = directMapX;
+            mapY = directMapY;
+            coordinateSource = "direct event map coordinates";
             return true;
         }
-        if (!uint.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedTerritoryId) ||
-            !Zones.Values.Any(candidate => candidate.TerritoryId == parsedTerritoryId))
+        if (TryParseLocation(rawLocation, zone.SizeFactor, out mapX, out mapY, out coordinateSource))
+            return true;
+        if (!zone.MobPois.TryGetValue(poiId, out var point))
             return false;
 
-        territoryId = parsedTerritoryId;
+        mapX = point.X;
+        mapY = point.Y;
+        coordinateSource = $"reviewed POI {poiId}";
         return true;
+    }
+
+    public static bool TryResolveTerritory(string? zoneId, out uint territoryId)
+    {
+        var zone = FindZone(zoneId);
+        territoryId = zone?.TerritoryId ?? 0;
+        return zone is not null;
+    }
+
+    public static FaloopCoverageAudit Audit(IEnumerable<uint> supportedTerritoryIds)
+    {
+        var issues = new List<string>();
+        var zones = supportedTerritoryIds.Distinct().Order().Select(territoryId =>
+        {
+            var matches = Zones.Values.Where(zone => zone.TerritoryId == territoryId).Distinct().ToArray();
+            if (matches.Length == 0)
+                issues.Add($"territory {territoryId} has no Faloop zone mapping");
+            else if (matches.Length > 1)
+                issues.Add($"territory {territoryId} has {matches.Length} conflicting Faloop zone mappings");
+            return matches.FirstOrDefault();
+        }).Where(zone => zone is not null).Cast<ZoneDefinition>().ToArray();
+
+        foreach (var zone in zones)
+        {
+            if (zone.MobPois.Count == 0)
+                issues.Add($"territory {zone.TerritoryId} has no Faloop mob POIs");
+            foreach (var (poiId, point) in zone.MobPois)
+                if (poiId <= 0 || !IsUsableMapCoordinate(point.X, point.Y))
+                    issues.Add($"territory {zone.TerritoryId} POI {poiId} has unusable coordinates " +
+                               $"({point.X.ToString(CultureInfo.InvariantCulture)}, {point.Y.ToString(CultureInfo.InvariantCulture)})");
+        }
+
+        return new FaloopCoverageAudit(zones.Length, zones.Sum(zone => zone.MobPois.Count), issues);
     }
 
     public static string DisplayName(string slug)
@@ -80,12 +139,12 @@ internal static class FaloopCatalog
         ["northernthanalan"] = Zone(147, "293:16,14.6;294:17.2,15.7;295:16,15.9;296:19,16.7;297:16.8,16.9;298:18.2,17.5;299:18.7,18;300:15.4,18.5;301:16.3,19.4;302:23.9,22.8;303:24.3,23.2;304:23.6,24.1;305:21,25;306:23.6,25.3;307:23.4,26.3;308:22.2,27;309:20.6,27.8"),
         ["coerthascentralhighlands"] = Zone(155, "453:32,7.1;454:28.8,7.7;455:22.9,8;456:24.6,9.1;457:30.1,10.6;458:25.3,11.2;459:28.1,11.4;460:8.9,11.8;461:30.1,12.6;462:10.8,12.8;463:27,13.4;464:24.8,13.4;465:8.9,13.5;466:11.7,14.2;467:31.4,14.3;468:8.8,14.8;469:28.4,14.8;470:35,15.2;471:4.4,15.5;472:5.2,16;473:20.5,16.2;474:4.1,16.6;475:31.9,16.9;476:14.3,18;477:5.6,18.1;478:10.5,18.2;479:15.4,18.5;480:19.5,18.6;481:21.5,18.8;482:17.5,18.8;483:11.5,19.6;484:14.3,19.7;485:6.4,19.8;486:24.6,20;487:16.8,20.5;488:27,20.6;489:8.3,21;490:24.1,21.7;491:6.3,22.1;492:27.4,22.1;493:34.8,22.7;494:35.8,23;495:32.8,23.6;496:24.6,23.7;497:13.4,25.2;498:14.9,25.5;499:28.1,25.6;500:25.6,25.6;501:23.4,26.8;502:9,27.2;503:11,27.3;504:15.8,27.4;505:29.3,27.6;506:12.6,28;507:21.4,28.2;508:6.6,28.7;509:15.5,28.7;510:11,28.9;511:19.7,29.2;512:17.7,29.3;513:30.3,29.8;514:30.7,31"),
         ["mordhona"] = Zone(156, "518:29.1,6.5;519:30.6,6.4;520:32.2,6.9;521:19.1,8.1;522:29.1,7.7;523:26.8,8.5;524:27.1,8.9;525:32.5,8.6;526:14,10.5;527:16,10.4;528:23.2,10.7;529:24.8,10.7;530:27.4,10.6;531:32.3,10.2;532:11.9,11.8;533:15.7,11.8;534:31.4,11.3;535:13.6,12.2;536:23.4,12.2;537:25.2,12.7;538:26.8,12.7;539:33.6,12.1;540:9.8,13.9;541:12.7,13.7;542:14.1,13.8;543:28.2,13.6;544:28.3,14.8;545:32.4,14.4;546:10.6,15.2;547:12.6,16;548:16.4,15.6;549:30.1,15;550:12.2,16.8;551:16.8,17.4"),
-        ["coerthaswesternhighlands"] = Zone(397, "583:28,7.8;584:35.6,9.6;585:26.1,11.6;586:15.1,12.1;587:6.6,12.4;588:36.2,12.5;589:29.3,13;590:18,13.1;591:10,13.2;592:27.5,15.9;593:11.6,17.3;594:32.5,17.6;595:21.9,17.7;596:18.1,18.9;597:22.1,20.7;598:34,20.8;599:28.1,21.5;600:33.8,22.5;601:17.3,25.7;602:29.9,26.8;603:23.5,28.1;604:16.7,29.7;605:18.7,31.2;606:24.9,32.4"),
-        ["thedravanianforelands"] = Zone(398, "612:31.4,5.6;613:26.4,7.5;614:33.9,8.6;615:12.6,10.1;616:16.9,11.3;617:34.8,13.5;618:13.6,15.1;619:32.5,18.2;620:21.4,19.8;621:27.6,21.2;622:28.9,21.8;623:25.7,24.8;624:35.9,24.8;625:38.6,25.6;626:12.3,27.6;627:37.1,27.6;628:34.6,28.7;629:20,30.2;630:27.7,30.8;631:14.3,31.3;632:24.9,32.4;633:21.1,33.8;634:10.2,35.2;635:8.5,36.9;636:27.4,37.3;637:17.9,38.7"),
-        ["thedravanianhinterlands"] = Zone(399, "642:13.1,16.4;643:26.7,16.6;644:26.8,20;645:31.8,20.2;646:9.4,21.3;647:15,21.6;648:35.9,21.8;649:5.4,22.1;650:23.9,23.5;651:33.9,24.1;652:15.1,25.4;653:26.8,25.4;654:34.2,26.8;655:8.6,28.1;656:38,28.4;657:12.6,29.2;658:26.6,29.4;659:15.5,32.1;660:8.5,34;661:14.5,35.7;662:26.3,36.9;663:16.1,37.7"),
-        ["thechurningmists"] = Zone(400, "667:25.8,7.9;668:9.5,8.5;669:28.2,10.6;670:7.4,11.7;671:15.2,14.5;672:7.9,15.7;673:11.9,20.3;674:6.9,20.3;675:28.5,20.3;676:24.9,20.5;677:33.5,20.8;678:14,23.5;679:18.2,24.4;680:37.2,26.2;681:26.4,27.6;682:16.9,28;683:36,29.1;684:15.8,30.3;685:22.4,31.1;686:31.9,32.7;687:6.4,35.7;688:10,38.7"),
-        ["theseaofclouds"] = Zone(401, "696:29.3,6.6;697:15.5,7.5;698:21.8,7.6;699:7.5,8.3;700:36.9,8.6;701:19.3,9.5;702:23.2,10;703:25,13.1;704:15.4,14.6;705:37.4,14.6;706:21.5,16;707:9,16.7;708:31.4,19.1;709:6.5,19.3;710:36.5,21.1;711:20.8,21.5;712:14.6,23.5;713:24.5,25.3;714:26.1,29.1;715:13.8,29.2;716:17.9,29.8;717:34,31.6;718:18.3,31.7;719:26.6,33.7;720:31.7,36.2;721:36.2,38.5"),
-        ["azyslla"] = Zone(402, "724:32.7,5.7;725:28,5.9;726:37.7,7.1;727:17.3,8.5;728:27.7,11.1;729:33.8,12.9;730:18.5,13.2;731:27.4,15.7;732:13.9,16.9;733:38.8,18.4;734:6.2,20;735:9.5,26.5;736:34.3,26.6;737:38.9,27.6;738:29.8,28.7;739:16.1,29.4;740:11.2,30.3;741:35.9,30.8;742:8.2,34;743:36.2,34.2;744:29.6,35.1;745:36.4,37.2;746:12.8,38.2"),
+        ["coerthaswesternhighlands"] = Zone(397, "583:28,7.8;584:35.6,9.6;585:26.1,11.6;586:15.1,12.1;587:6.6,12.4;588:36.2,12.5;589:29.3,13;590:18,13.1;591:10,13.2;592:27.5,15.9;593:11.6,17.3;594:32.5,17.6;595:21.9,17.7;596:18.1,18.9;597:22.1,20.7;598:34,20.8;599:28.1,21.5;600:33.8,22.5;601:17.3,25.7;602:29.9,26.8;603:23.5,28.1;604:16.7,29.7;605:18.7,31.2;606:24.9,32.4", 95),
+        ["thedravanianforelands"] = Zone(398, "612:31.4,5.6;613:26.4,7.5;614:33.9,8.6;615:12.6,10.1;616:16.9,11.3;617:34.8,13.5;618:13.6,15.1;619:32.5,18.2;620:21.4,19.8;621:27.6,21.2;622:28.9,21.8;623:25.7,24.8;624:35.9,24.8;625:38.6,25.6;626:12.3,27.6;627:37.1,27.6;628:34.6,28.7;629:20,30.2;630:27.7,30.8;631:14.3,31.3;632:24.9,32.4;633:21.1,33.8;634:10.2,35.2;635:8.5,36.9;636:27.4,37.3;637:17.9,38.7", 95),
+        ["thedravanianhinterlands"] = Zone(399, "642:13.1,16.4;643:26.7,16.6;644:26.8,20;645:31.8,20.2;646:9.4,21.3;647:15,21.6;648:35.9,21.8;649:5.4,22.1;650:23.9,23.5;651:33.9,24.1;652:15.1,25.4;653:26.8,25.4;654:34.2,26.8;655:8.6,28.1;656:38,28.4;657:12.6,29.2;658:26.6,29.4;659:15.5,32.1;660:8.5,34;661:14.5,35.7;662:26.3,36.9;663:16.1,37.7", 95),
+        ["thechurningmists"] = Zone(400, "667:25.8,7.9;668:9.5,8.5;669:28.2,10.6;670:7.4,11.7;671:15.2,14.5;672:7.9,15.7;673:11.9,20.3;674:6.9,20.3;675:28.5,20.3;676:24.9,20.5;677:33.5,20.8;678:14,23.5;679:18.2,24.4;680:37.2,26.2;681:26.4,27.6;682:16.9,28;683:36,29.1;684:15.8,30.3;685:22.4,31.1;686:31.9,32.7;687:6.4,35.7;688:10,38.7", 95),
+        ["theseaofclouds"] = Zone(401, "696:29.3,6.6;697:15.5,7.5;698:21.8,7.6;699:7.5,8.3;700:36.9,8.6;701:19.3,9.5;702:23.2,10;703:25,13.1;704:15.4,14.6;705:37.4,14.6;706:21.5,16;707:9,16.7;708:31.4,19.1;709:6.5,19.3;710:36.5,21.1;711:20.8,21.5;712:14.6,23.5;713:24.5,25.3;714:26.1,29.1;715:13.8,29.2;716:17.9,29.8;717:34,31.6;718:18.3,31.7;719:26.6,33.7;720:31.7,36.2;721:36.2,38.5", 95),
+        ["azyslla"] = Zone(402, "724:32.7,5.7;725:28,5.9;726:37.7,7.1;727:17.3,8.5;728:27.7,11.1;729:33.8,12.9;730:18.5,13.2;731:27.4,15.7;732:13.9,16.9;733:38.8,18.4;734:6.2,20;735:9.5,26.5;736:34.3,26.6;737:38.9,27.6;738:29.8,28.7;739:16.1,29.4;740:11.2,30.3;741:35.9,30.8;742:8.2,34;743:36.2,34.2;744:29.6,35.1;745:36.4,37.2;746:12.8,38.2", 95),
         ["thefringes"] = Zone(612, "752:18.2,8.4;753:21.2,10.5;754:25.3,11.8;755:14.4,12.4;756:17.7,12.7;757:10.4,14.5;758:34.6,17.4;759:12.2,18;760:24.1,18.2;761:33.7,20.8;762:17.5,21.7;763:27.7,23.5;764:16.7,24.3;765:8.7,25.2;766:15.4,26.2;767:25.2,28.4;768:8.3,30.5;769:28.9,30.8;770:25.8,31.8;771:33.3,33.4"),
         ["thepeaks"] = Zone(620, "820:26.9,7.9;821:11.2,8.2;822:32,8.3;823:26.2,12;824:8.7,12.2;825:36.3,12.4;826:5.6,14.8;827:23.3,14.9;828:25.3,20.1;829:16.6,23.1;830:23.7,24.2;831:7.8,25.8;832:18.1,26.6;833:12.6,28.3;834:26.6,29.8;835:11.7,32.8;836:5.8,34.7;837:23.6,36.6"),
         ["thelochs"] = Zone(621, "841:18.3,7.5;842:28.9,7.9;843:6.4,8.2;844:29,9.9;845:22.5,10.3;846:34.9,11.2;847:7.7,14.1;848:4.6,15.8;849:25,16.5;850:13.9,20.5;851:16.1,22;852:18.8,25.6;853:23.4,25.8;854:7.4,26.3;855:4.6,29.3;856:6.9,31.1;857:19,31.8;858:24.5,32.8;859:10.4,33.7;860:3.1,34.9;861:26.4,34.4;862:30.1,36.3"),
@@ -96,7 +155,7 @@ internal static class FaloopCatalog
         ["kholusia"] = Zone(814, "921:16.8,6.9;922:34.3,10.5;923:19.7,10.6;924:24.9,11.4;925:22,14.1;926:12.2,15.1;927:24,15.3;928:15,15.8;929:22.8,17.4;930:11.6,18.6;931:26.6,19.2;932:31.2,19.6;933:33.4,21.4;934:21.3,22.8;935:26.8,24.1;936:15.1,24.2;937:34.5,24.5;938:9.4,25.4;939:8.8,28.9;940:29.9,29.8;941:24.5,30.2;942:21,31.1;943:33.8,32.3"),
         ["amharaeng"] = Zone(815, "951:30.4,9.8;952:22.6,10;953:16.7,10.1;954:10.3,11.7;955:13.6,11.8;956:28.5,12.5;957:30.8,13.8;958:19.2,16.1;959:11.6,19.3;960:28.8,20.3;961:33.5,21.6;962:16.5,24;963:19.2,24.7;964:30.1,24.7;965:28.5,26.1;966:19.7,28.9;967:23.3,29.8;968:14.1,31.9;969:17,31.7;970:32.8,33.8;971:30.5,35.1;972:27.5,35.1;973:19.9,36.4"),
         ["ilmheg"] = Zone(816, "978:29.2,5.3;979:25.5,6.8;980:34.2,7.3;981:20,8.5;982:32.1,11.2;983:31.5,13.7;984:11.1,15.8;985:27.1,18.9;986:10.5,20.1;987:25,22.1;988:7.5,22.8;989:13.4,22.9;990:8.1,27.1;991:19.3,27.4;992:23.1,28.7;993:5.7,29.6;994:9.7,30.6;995:24.2,32.7;996:13.8,34.2;997:19.8,34.8;998:23.5,35.6;999:24.9,37.3"),
-        ["theraktikagreatwood"] = Zone(817, "1007:9.5,18.5;1008:14.4,22.2;1009:18.9,22.3;1011:7.4,22.8;1012:9.7,24.1;1014:17,24.3;1016:15,30.2;1017:25,30.3;1018:8.4,34.5;1019:17.7,34.9;1020:12.2,35.7;1021:14.5,36.6;1022:24.4,37.2"),
+        ["theraktikagreatwood"] = Zone(817, "1003:22.4,10.7;1004:29.8,13;1005:21.8,13.5;1006:26.2,15;1007:9.5,18.5;1008:14.4,22.2;1009:18.9,22.3;1010:33.4,22.7;1011:7.4,22.8;1012:9.7,24.1;1013:26.1,24.1;1014:17,24.3;1015:29.4,25.8;1016:15,30.2;1017:25,30.3;1018:8.4,34.5;1019:17.7,34.9;1020:12.2,35.7;1021:14.5,36.6;1022:24.4,37.2"),
         ["thetempest"] = Zone(818, "1026:31,4;1027:11.2,4.8;1028:8.4,7.2;1029:21.3,7.3;1030:28.8,8.4;1031:8.9,8.8;1032:25.8,9.6;1033:15.6,10.6;1034:30.9,11.1;1035:36.7,11.5;1036:25.2,12.6;1037:18,13.4;1038:37.7,14;1039:37.6,16.4;1040:13.5,17.3;1041:36,19.7;1042:15.6,19.9;1043:33.8,21.7;1044:12.9,22.2;1045:29.1,23;1046:26.8,24.7;1047:24.7,25;1048:27,26.4;1049:33.5,29.9"),
         ["labyrinthos"] = Zone(956, "1054:25.1,8.5;1277:21.6,8.5;1055:29.9,8.2;1056:16.9,9.6;1057:34.2,13.5;1058:24.9,16;1059:16.7,16.8;1060:35,17.9;1061:10.7,19.2;1062:9.3,22.1;1063:25.4,24.9;1064:32.3,25.9;1065:26.3,32.8;1066:5.9,33.5;1067:12.1,35.2;1068:19.6,38.5"),
         ["thavnair"] = Zone(957, "1073:22.9,10.4;1074:18.5,11.5;1075:14.5,12.2;1280:6.7,12.9;1076:29.5,13.7;1077:12.1,16.2;1078:17.9,16.4;1079:24.2,16.8;1080:32.5,20.1;1081:26.7,20.9;1082:18.4,23.6;1083:33.2,24.9;1084:27.7,25.5;1085:16.5,29.4;1086:20.5,31.3;1087:9.3,37.7"),
@@ -112,7 +171,7 @@ internal static class FaloopCatalog
         ["livingmemory"] = Zone(1192, "1258:5.2,12.8;1259:37.2,18.7;1260:19,20.1;1261:32.8,20.9;1262:12.9,27.7;1263:4.3,28.9;1264:38.9,30.1;1265:26.9,31.2;1283:4.3,33.1;1266:12.4,37.7;1267:37.3,33.4;1268:27.3,7.1;1269:11.5,18.1;1270:19.7,30.7;1271:28.5,36.4;1272:34.4,26.3"),
     };
 
-    private static ZoneDefinition Zone(uint territoryId, string points)
+    private static ZoneDefinition Zone(uint territoryId, string points, float sizeFactor = 100f)
     {
         var result = new Dictionary<int, Vector2>();
         foreach (var item in points.Split(';', StringSplitOptions.RemoveEmptyEntries))
@@ -123,8 +182,60 @@ internal static class FaloopCatalog
                 float.Parse(coordinates[0], CultureInfo.InvariantCulture),
                 float.Parse(coordinates[1], CultureInfo.InvariantCulture));
         }
-        return new ZoneDefinition(territoryId, result);
+        return new ZoneDefinition(territoryId, sizeFactor, result);
     }
+
+    private static ZoneDefinition? FindZone(string? zoneId)
+    {
+        if (string.IsNullOrWhiteSpace(zoneId))
+            return null;
+        var key = NormalizeSlug(zoneId);
+        if (Zones.TryGetValue(key, out var bySlug))
+            return bySlug;
+        return uint.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var territoryId)
+            ? Zones.Values.FirstOrDefault(candidate => candidate.TerritoryId == territoryId)
+            : null;
+    }
+
+    private static bool TryParseLocation(
+        string? rawLocation,
+        float sizeFactor,
+        out float mapX,
+        out float mapY,
+        out string source)
+    {
+        mapX = 0;
+        mapY = 0;
+        source = string.Empty;
+        if (string.IsNullOrWhiteSpace(rawLocation))
+            return false;
+        var values = rawLocation.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (values.Length < 2 ||
+            !float.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x) ||
+            !float.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y))
+            return false;
+        if (IsUsableMapCoordinate(x, y))
+        {
+            mapX = x;
+            mapY = y;
+            source = "direct event location";
+            return true;
+        }
+
+        // Faloop's free placement uses map-image pixels. The same conversion is used by its
+        // web client for POIs; sizeFactor is 95 for Heavensward field maps and 100 elsewhere.
+        if (x < 0 || y < 0 || x > 2048 || y > 2048)
+            return false;
+        mapX = x / (sizeFactor / 2f) + 1f;
+        mapY = y / (sizeFactor / 2f) + 1f;
+        if (!IsUsableMapCoordinate(mapX, mapY))
+            return false;
+        source = "direct event pixel location";
+        return true;
+    }
+
+    private static bool IsUsableMapCoordinate(float x, float y) =>
+        float.IsFinite(x) && float.IsFinite(y) && x >= 1f && x <= 50f && y >= 1f && y <= 50f;
 
     private static string NormalizeSlug(string value) =>
         new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
