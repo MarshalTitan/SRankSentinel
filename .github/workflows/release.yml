@@ -108,3 +108,82 @@ jobs:
           ./.github/scripts/Test-PublicDistribution.ps1
           -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json'
           -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Detect central catalog authorization
+        id: catalog-auth
+        shell: pwsh
+        env:
+          CATALOG_TOKEN: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CATALOG_TOKEN)) {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "::notice::DALAMUD_CATALOG_TOKEN is not configured. The SRankSentinel release is complete; run the DalamudPlugins 'Update Plugin Entry' workflow manually for SRankSentinel ${{ steps.version.outputs.value }}."
+          }
+          else {
+            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Check out the central catalog
+        if: steps.catalog-auth.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: MarshalTitan/DalamudPlugins
+          ref: main
+          token: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
+          path: central-catalog
+
+      - name: Update only the SRankSentinel central-catalog entry
+        if: steps.catalog-auth.outputs.enabled == 'true'
+        shell: pwsh
+        run: >-
+          ./central-catalog/.github/scripts/Update-PluginEntry.ps1
+          -ManifestPath 'central-catalog/repo.json'
+          -InternalName 'SRankSentinel'
+          -Version '${{ steps.version.outputs.value }}'
+
+      - name: Validate the central catalog before publishing
+        if: steps.catalog-auth.outputs.enabled == 'true'
+        shell: pwsh
+        run: >-
+          ./central-catalog/.github/scripts/Test-Catalog.ps1
+          -CatalogPath 'central-catalog/repo.json'
+          -VerifyRemoteAssets
+          -ExpectedInternalName 'SRankSentinel'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Commit the central-catalog update
+        if: steps.catalog-auth.outputs.enabled == 'true'
+        shell: pwsh
+        working-directory: central-catalog
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- repo.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Update SRankSentinel to ${{ steps.version.outputs.value }}"
+            git push origin HEAD:main
+          }
+
+      - name: Verify the public central catalog
+        if: steps.catalog-auth.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $expectedVersion = '${{ steps.version.outputs.value }}'
+          $publicPath = Join-Path $env:RUNNER_TEMP 'central-repo.json'
+          $published = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            $cacheBuster = [Uri]::EscapeDataString("${{ github.run_id }}-$attempt-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())")
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MarshalTitan/DalamudPlugins/main/repo.json?catalog=$cacheBuster" -OutFile $publicPath
+            $entries = @(Get-Content -LiteralPath $publicPath -Raw | ConvertFrom-Json)
+            $entry = $entries | Where-Object { $_.InternalName -eq 'SRankSentinel' } | Select-Object -First 1
+            if ($null -ne $entry -and $entry.AssemblyVersion -eq $expectedVersion) {
+              $published = $true
+              break
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $published) {
+            throw "The public central catalog did not publish SRankSentinel $expectedVersion before the retry limit."
+          }
+          ./central-catalog/.github/scripts/Test-Catalog.ps1 -CatalogPath $publicPath -VerifyRemoteAssets -ExpectedInternalName 'SRankSentinel' -ExpectedVersion $expectedVersion
