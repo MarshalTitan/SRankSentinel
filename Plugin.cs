@@ -36,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICallGateSubscriber<HuntTrainMessageDto, object> huntAlerts;
     private readonly Configuration config;
     private readonly ConcurrentQueue<FaloopFeedEvent> faloopEvents = new();
+    private readonly ConcurrentQueue<byte> faloopSessionRejections = new();
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Queue<Vector3> parkingCandidates = new();
@@ -65,6 +66,11 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime playerReadySinceUtc = DateTime.MinValue;
     private DateTime lastMarkSeenUtc = DateTime.MinValue;
     private Task<FaloopAuthenticationResult>? faloopLoginTask;
+    private bool faloopLoginWasAutomatic;
+    private bool automaticFaloopReauthenticationAttempted;
+    private int faloopCredentialGeneration;
+    private int faloopLoginStartedGeneration;
+    private string pendingProtectedFaloopPassword = string.Empty;
     private string faloopUsername = string.Empty;
     private string faloopPassword = string.Empty;
     private string faloopLoginStatus = string.Empty;
@@ -100,6 +106,7 @@ public sealed class Plugin : IDalamudPlugin
         combat = new CombatController(gameGui, condition, objectTable, targetManager);
         faloop = new FaloopClient(pluginLog);
         faloop.EventReceived += OnFaloopEvent;
+        faloop.SessionRejected += OnFaloopSessionRejected;
         faloopUsername = config.FaloopUsername;
 
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
@@ -118,8 +125,7 @@ public sealed class Plugin : IDalamudPlugin
         if (TryDequeueNextValid(out var restored))
             StartAlert(restored, "restored persistent queue");
 
-        if (config.Enabled && config.EnableFaloop)
-            faloop.Start(config.FaloopSessionId);
+        StartFaloopWithSavedAuthentication();
 
         log.Information("S Rank Sentinel standalone orchestrator loaded.");
     }
@@ -128,6 +134,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
+        faloop.SessionRejected -= OnFaloopSessionRejected;
         faloop.Dispose();
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
@@ -146,6 +153,25 @@ public sealed class Plugin : IDalamudPlugin
             faloopEvents.Enqueue(feedEvent);
     }
 
+    private void OnFaloopSessionRejected() => faloopSessionRejections.Enqueue(0);
+
+    private void StartFaloopWithSavedAuthentication()
+    {
+        if (!config.Enabled || !config.EnableFaloop)
+            return;
+        if (!string.IsNullOrWhiteSpace(config.FaloopSessionId))
+        {
+            faloop.Start(config.FaloopSessionId);
+            return;
+        }
+        if (config.RememberFaloopLogin && !string.IsNullOrWhiteSpace(config.FaloopProtectedPassword))
+        {
+            BeginRememberedFaloopLogin("No saved Faloop session remains");
+            return;
+        }
+        faloop.Start(string.Empty);
+    }
+
     private void BeginFaloopLogin()
     {
         if (faloopLoginTask is { IsCompleted: false })
@@ -156,12 +182,74 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        var protectedPassword = string.Empty;
+        if (config.RememberFaloopLogin &&
+            !FaloopCredentialProtection.TryProtect(
+                faloopPassword, out protectedPassword, out var protectionError))
+        {
+            faloopLoginStatus = protectionError;
+            return;
+        }
+
         config.FaloopUsername = faloopUsername.Trim();
         config.EnableFaloop = true;
         config.Save();
         faloopLoginStatus = "Authenticating with Faloop...";
+        faloopLoginWasAutomatic = false;
+        automaticFaloopReauthenticationAttempted = false;
+        pendingProtectedFaloopPassword = protectedPassword;
+        faloopLoginStartedGeneration = faloopCredentialGeneration;
         faloopLoginTask = faloop.AuthenticateAsync(config.FaloopUsername, faloopPassword);
         faloopPassword = string.Empty;
+    }
+
+    private void BeginRememberedFaloopLogin(string reason)
+    {
+        if (faloopLoginTask is { IsCompleted: false } || automaticFaloopReauthenticationAttempted)
+            return;
+        automaticFaloopReauthenticationAttempted = true;
+
+        if (!config.RememberFaloopLogin || string.IsNullOrWhiteSpace(config.FaloopUsername) ||
+            string.IsNullOrWhiteSpace(config.FaloopProtectedPassword))
+        {
+            faloop.Stop("Faloop login required; enter credentials in S Rank Sentinel");
+            faloopLoginStatus = "The Faloop session expired. Re-enter the username and password.";
+            return;
+        }
+        if (!FaloopCredentialProtection.TryUnprotect(
+                config.FaloopProtectedPassword, out var password, out var unlockError))
+        {
+            faloop.Stop("Remembered Faloop login could not be unlocked");
+            faloopLoginStatus = unlockError;
+            return;
+        }
+
+        faloopLoginWasAutomatic = true;
+        pendingProtectedFaloopPassword = string.Empty;
+        faloopLoginStatus = $"{reason}; securely re-authenticating once...";
+        faloopLoginStartedGeneration = faloopCredentialGeneration;
+        faloopLoginTask = faloop.AuthenticateAsync(config.FaloopUsername, password);
+        password = string.Empty;
+    }
+
+    private void DrainFaloopSessionRejections()
+    {
+        var rejected = false;
+        while (faloopSessionRejections.TryDequeue(out _))
+            rejected = true;
+        if (!rejected)
+            return;
+
+        config.FaloopSessionId = string.Empty;
+        config.Save();
+        if (config.RememberFaloopLogin && !string.IsNullOrWhiteSpace(config.FaloopProtectedPassword))
+        {
+            BeginRememberedFaloopLogin("The saved Faloop session expired");
+            return;
+        }
+
+        faloop.Stop("Faloop session expired; login required");
+        faloopLoginStatus = "The saved Faloop session expired. Re-enter the Faloop credentials.";
     }
 
     private void CompleteFaloopLoginIfReady()
@@ -169,19 +257,50 @@ public sealed class Plugin : IDalamudPlugin
         if (faloopLoginTask is not { IsCompleted: true } completed)
             return;
         faloopLoginTask = null;
+        if (faloopLoginStartedGeneration != faloopCredentialGeneration)
+        {
+            pendingProtectedFaloopPassword = string.Empty;
+            faloopLoginWasAutomatic = false;
+            return;
+        }
         try
         {
             var result = completed.GetAwaiter().GetResult();
             if (!result.Success)
             {
-                faloopLoginStatus = result.Error;
+                pendingProtectedFaloopPassword = string.Empty;
+                if (faloopLoginWasAutomatic)
+                {
+                    faloop.Stop("Automatic Faloop login failed; re-enter credentials");
+                    config.FaloopSessionId = string.Empty;
+                    config.Save();
+                    faloopLoginStatus = $"{result.Error} Automatic login stopped; re-enter the Faloop credentials.";
+                }
+                else
+                {
+                    faloopLoginStatus = result.Error;
+                }
+                faloopLoginWasAutomatic = false;
                 return;
             }
 
             config.FaloopSessionId = result.SessionId;
             config.EnableFaloop = true;
+            var wasAutomatic = faloopLoginWasAutomatic;
+            if (!wasAutomatic)
+            {
+                config.FaloopProtectedPassword = config.RememberFaloopLogin
+                    ? pendingProtectedFaloopPassword
+                    : string.Empty;
+            }
             config.Save();
-            if (config.Enabled)
+            faloopLoginWasAutomatic = false;
+            // An automatic refresh is not considered healthy until the feed accepts its new
+            // session. This prevents a login-success/feed-rejection cycle from retrying forever.
+            if (!wasAutomatic)
+                automaticFaloopReauthenticationAttempted = false;
+            pendingProtectedFaloopPassword = string.Empty;
+            if (config.Enabled && config.EnableFaloop)
             {
                 faloop.Start(result.SessionId);
                 faloopLoginStatus = "Authenticated; connecting to the live feed.";
@@ -194,9 +313,36 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            faloopLoginStatus = "Faloop login failed; see the plugin log.";
+            pendingProtectedFaloopPassword = string.Empty;
+            if (faloopLoginWasAutomatic)
+            {
+                faloop.Stop("Automatic Faloop login failed; re-enter credentials");
+                faloopLoginStatus = "Automatic Faloop login failed and was stopped; re-enter the credentials.";
+            }
+            else
+            {
+                faloopLoginStatus = "Faloop login failed; see the plugin log.";
+            }
+            faloopLoginWasAutomatic = false;
             log.Warning("Could not complete Faloop login: {Error}", ex.Message);
         }
+    }
+
+    private void ForgetFaloopLogin()
+    {
+        config.FaloopSessionId = string.Empty;
+        config.FaloopUsername = string.Empty;
+        config.RememberFaloopLogin = false;
+        config.FaloopProtectedPassword = string.Empty;
+        config.Save();
+        faloopUsername = string.Empty;
+        faloopPassword = string.Empty;
+        pendingProtectedFaloopPassword = string.Empty;
+        faloopLoginWasAutomatic = false;
+        automaticFaloopReauthenticationAttempted = false;
+        faloopCredentialGeneration++;
+        faloop.Stop("Saved Faloop session and remembered login removed");
+        faloopLoginStatus = "Saved Faloop session, username, and remembered login were removed.";
     }
 
     private void DrainFaloopEvents()
@@ -622,7 +768,12 @@ public sealed class Plugin : IDalamudPlugin
             if (!config.Enabled)
                 return;
             if (config.EnableFaloop)
+            {
+                DrainFaloopSessionRejections();
                 DrainFaloopEvents();
+                if (faloop.IsConnected)
+                    automaticFaloopReauthenticationAttempted = false;
+            }
             if (current is null && state == SentinelState.Idle)
                 return;
             Tick(now);
@@ -2194,7 +2345,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!configOpen)
             return;
-        ImGui.SetNextWindowSize(new Vector2(640, 820), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(680, 880), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("S Rank Sentinel###SRankSentinel", ref configOpen))
         {
             ImGui.End();
@@ -2212,7 +2363,7 @@ public sealed class Plugin : IDalamudPlugin
             }
             else if (config.EnableFaloop)
             {
-                faloop.Start(config.FaloopSessionId);
+                StartFaloopWithSavedAuthentication();
             }
             config.Save();
         }
@@ -2235,7 +2386,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             config.EnableFaloop = enableFaloop;
             if (enableFaloop && config.Enabled)
-                faloop.Start(config.FaloopSessionId);
+                StartFaloopWithSavedAuthentication();
             else
                 faloop.Stop("Direct Faloop feed disabled");
             config.Save();
@@ -2246,25 +2397,36 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.SetNextItemWidth(250f);
         ImGui.InputText("Faloop username", ref faloopUsername, 128);
         ImGui.SetNextItemWidth(250f);
-        ImGui.InputText("Faloop password (never saved)", ref faloopPassword, 256,
+        ImGui.InputText("Faloop password (never stored as plaintext)", ref faloopPassword, 256,
             ImGuiInputTextFlags.Password);
+        var rememberFaloopLogin = config.RememberFaloopLogin;
+        if (ImGui.Checkbox("Remember Faloop login on this PC", ref rememberFaloopLogin))
+        {
+            config.RememberFaloopLogin = rememberFaloopLogin;
+            if (!rememberFaloopLogin)
+                config.FaloopProtectedPassword = string.Empty;
+            config.Save();
+        }
+        if (config.RememberFaloopLogin)
+        {
+            ImGui.TextWrapped(string.IsNullOrWhiteSpace(config.FaloopProtectedPassword)
+                ? "Authenticate once to save a Windows-protected login."
+                : "Remembered login is protected by Windows for this user on this PC.");
+        }
         if (ImGui.Button(faloopLoginTask is { IsCompleted: false } ? "Authenticating..." : "Authenticate / refresh session") &&
             faloopLoginTask is not { IsCompleted: false })
             BeginFaloopLogin();
         if (!string.IsNullOrWhiteSpace(faloopLoginStatus))
             ImGui.TextWrapped(faloopLoginStatus);
-        if (!string.IsNullOrWhiteSpace(config.FaloopSessionId))
+        if (!string.IsNullOrWhiteSpace(config.FaloopSessionId) ||
+            !string.IsNullOrWhiteSpace(config.FaloopUsername) ||
+            !string.IsNullOrWhiteSpace(config.FaloopProtectedPassword))
         {
             ImGui.SameLine();
-            if (ImGui.Button("Forget saved session"))
-            {
-                config.FaloopSessionId = string.Empty;
-                config.Save();
-                faloop.Stop("Saved Faloop session removed");
-                faloopLoginStatus = "Saved Faloop session removed; authenticate again to reconnect.";
-            }
+            if (ImGui.Button("Forget saved session/login"))
+                ForgetFaloopLogin();
         }
-        ImGui.TextWrapped("Only the resulting Faloop session is saved for reconnects; the account password is never stored or logged. Expansion eligibility is enforced locally before queueing or travel, regardless of website filters.");
+        ImGui.TextWrapped("The session and username remain in the normal plugin configuration. Optional remembered passwords are stored only as Windows CurrentUser DPAPI ciphertext and are never logged or serialized as plaintext. Expansion eligibility is enforced locally before queueing or travel, regardless of website filters.");
 
         var huntAlertsFallback = config.EnableHuntAlertsFallback;
         if (ImGui.Checkbox("HuntAlerts fallback", ref huntAlertsFallback))

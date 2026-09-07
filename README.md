@@ -4,7 +4,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 
 ## Workflow
 
-1. Connect directly to Faloop's authenticated Socket.IO feed and consume spawn/death events. Faloop credentials are entered in Sentinel's window; the password is never saved or logged. Only the resulting session ID is saved for automatic reconnect.
+1. Connect directly to Faloop's authenticated Socket.IO feed and consume spawn/death events. The username and resulting session ID are retained for automatic reconnect. Passwords are never logged or serialized as plaintext; the optional **Remember Faloop login on this PC** setting stores only Windows CurrentUser DPAPI ciphertext.
 2. Apply Sentinel's configurable expansion gate before queueing, reset, World Visit, or territory teleport. Centurio (ARR/HW/SB), Shadowbringers, Endwalker, and Dawntrail can be enabled independently; disabled-expansion alerts are ignored locally regardless of the source's website/UI filters. Evercold is reserved as a disabled future placeholder until hunt data exists.
 3. Translate Faloop zone/POI IDs through a reviewed coordinate snapshot from the current web client, convert the stored map coordinates to a local game-world destination, and retain it across World Visit, teleport, zoning, and instance transitions. This feeds vnavmesh directly without creating or reading the game's global map flag and is never a direct player-position write.
 4. Optionally accept HuntAlerts IPC and Sonar chat/map-link alerts as fallback sources. Either fallback can be disabled independently after the direct feed is proven on the player's data center.
@@ -42,6 +42,9 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - Forgiven Gossip, Ker Shroud, and Crystal Incarnation: observation-only; never navigation or combat targets
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
 - Faloop transport: native Engine.IO v4 WebSocket with server-ping replies, heartbeat timeout, bounded messages, exponential reconnect backoff, event replay suppression, and no extra NuGet runtime
+- Faloop authentication: reconnect with the saved session first; if Faloop rejects it and remembered login is enabled, decrypt the local DPAPI credential and make one automatic re-authentication attempt. A failed automatic login stops and asks for credentials instead of looping.
+- **Forget saved session/login** clears the session, username, DPAPI ciphertext, and remembered-login setting together.
+- Dalamud repository updates preserve the plugin configuration file, including the session and user-bound ciphertext. The ciphertext intentionally cannot be decrypted after copying it to another Windows user or PC.
 - No coordinate writes or coordinate warping
 - Missing marks, unavailable coordinate projections, and unreachable local routes keep the active hunt reserved and are retried; they never produce a cleared/dead result
 

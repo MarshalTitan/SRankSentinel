@@ -50,6 +50,7 @@ internal sealed class FaloopClient : IDisposable
     public FaloopClient(IPluginLog pluginLog) => log = pluginLog;
 
     public event Action<FaloopFeedEvent>? EventReceived;
+    public event Action? SessionRejected;
 
     public bool IsConnected
     {
@@ -192,6 +193,14 @@ internal sealed class FaloopClient : IDisposable
                 {
                     SetStatus(false, "Faloop session expired; authenticate again");
                     log.Warning("Faloop rejected the saved authenticated session.");
+                    try
+                    {
+                        SessionRejected?.Invoke();
+                    }
+                    catch (Exception callbackError)
+                    {
+                        log.Warning("Faloop session-rejection callback failed: {Error}", callbackError.Message);
+                    }
                     break;
                 }
                 attempt++;

@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 9;
+    public int Version { get; set; } = 10;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; } = true;
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -18,6 +18,9 @@ public sealed class Configuration : IPluginConfiguration
     public bool EnableEvercold { get; set; }
     public string FaloopUsername { get; set; } = string.Empty;
     public string FaloopSessionId { get; set; } = string.Empty;
+    public bool RememberFaloopLogin { get; set; }
+    // Windows DPAPI ciphertext only. A plaintext Faloop password is never serialized.
+    public string FaloopProtectedPassword { get; set; } = string.Empty;
     // Retained so version-7 repository installs can migrate their exact saved global values.
     public float FlagApproachDistance { get; set; } = 60f;
     public float WaitingDistance { get; set; } = 45f;
@@ -141,6 +144,16 @@ public sealed class Configuration : IPluginConfiguration
             Save();
         }
 
+        if (Version < 10)
+        {
+            // Preserve the existing username and authenticated session exactly. Remembering the
+            // password remains opt-in and begins only after the user authenticates with it.
+            RememberFaloopLogin = false;
+            FaloopProtectedPassword = string.Empty;
+            Version = 10;
+            Save();
+        }
+
         LegacyShadowbringersProfile ??= new HuntDistanceProfile();
         EndwalkerProfile ??= new HuntDistanceProfile();
         DawntrailProfile ??= new HuntDistanceProfile();
@@ -148,6 +161,9 @@ public sealed class Configuration : IPluginConfiguration
         CloseSafeProfile ??= LegacyShadowbringersProfile.Clone();
         ProximitySensitiveProfile ??= HuntDistanceProfile.ConservativeMerge(
             EndwalkerProfile, DawntrailProfile);
+        FaloopUsername ??= string.Empty;
+        FaloopSessionId ??= string.Empty;
+        FaloopProtectedPassword ??= string.Empty;
         CloseSafeProfile.EnforceClearanceInvariant();
         ProximitySensitiveProfile.EnforceClearanceInvariant();
     }
