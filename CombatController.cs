@@ -108,9 +108,20 @@ internal sealed class CombatController(
             return false;
 
         var manager = ActionManager.Instance();
-        if (manager is null || manager->GetActionStatus(ActionType.Action, 6) != 0)
+        if (manager is null || GetReturnActionStatus() != 0)
             return false;
 
         return manager->UseAction(ActionType.Action, 6);
+    }
+
+    public unsafe uint GetReturnActionStatus()
+    {
+        if (!IsPlayerDead)
+            return uint.MaxValue;
+
+        var manager = ActionManager.Instance();
+        return manager is null
+            ? uint.MaxValue
+            : manager->GetActionStatus(ActionType.Action, 6);
     }
 }

@@ -20,6 +20,11 @@ public sealed class Plugin : IDalamudPlugin
     public string Name => "S Rank Sentinel";
 
     private const string Command = "/sranksentinel";
+    private const double ReturnDialogTimeoutSeconds = 6;
+    private const double ReturnConfirmationRetrySeconds = 2;
+    private const double ReturnActionRetrySeconds = 10;
+    private const double ReturnTransitionTimeoutSeconds = 45;
+    private const double ReturnRecoveryWatchdogSeconds = 120;
     private readonly IDalamudPluginInterface pi;
     private readonly ICommandManager commands;
     private readonly IClientState clientState;
@@ -66,6 +71,17 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
     private DateTime playerReadySinceUtc = DateTime.MinValue;
     private DateTime lastMarkSeenUtc = DateTime.MinValue;
+    private DateTime returnRecoveryStartedUtc = DateTime.MinValue;
+    private DateTime returnActionIssuedUtc = DateTime.MinValue;
+    private DateTime returnConfirmedUtc = DateTime.MinValue;
+    private DateTime nextReturnConfirmationAttemptUtc = DateTime.MinValue;
+    private string returnExpectedWorld = string.Empty;
+    private bool returnInitiatedBySentinel;
+    private bool returnConfirmationObserved;
+    private bool returnConfirmed;
+    private bool returnWatchdogWarning;
+    private int returnActionAttempts;
+    private int returnConfirmationAttempts;
     private Task<FaloopAuthenticationResult>? faloopLoginTask;
     private bool faloopLoginWasAutomatic;
     private bool automaticFaloopReauthenticationAttempted;
@@ -698,6 +714,7 @@ public sealed class Plugin : IDalamudPlugin
         ssWatchDeadlineUtc = DateTime.MinValue;
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
+        ResetReturnRecoveryTracking();
         PrepareCurrentTravel();
         SetState(SentinelState.ResetToUldah,
             $"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}");
@@ -722,6 +739,7 @@ public sealed class Plugin : IDalamudPlugin
         ssWatchDeadlineUtc = DateTime.MinValue;
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
+        ResetReturnRecoveryTracking();
         PrepareCurrentTravel();
 
         // Prefer the alert coordinates whenever they exist. Object resolution starts only near
@@ -940,11 +958,71 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TickResetToUldah(DateTime now)
     {
-        if (travel.IsBusy)
+        UpdateReturnRecoveryWatchdog(now);
+
+        // Return uses SelectYesno, but only touch that dialog after Sentinel itself has
+        // requested Return while this state is active. This must never become a generic
+        // Yes/No-dialog accepter.
+        if (returnInitiatedBySentinel && travel.ReturnConfirmationIsOpen(out var returnPrompt))
+        {
+            if (!returnConfirmationObserved)
+            {
+                returnConfirmationObserved = true;
+                log.Information("Return confirmation detected: {Prompt}", returnPrompt);
+                status = "Return confirmation detected";
+            }
+
+            if (now < nextReturnConfirmationAttemptUtc)
+                return;
+
+            returnConfirmationAttempts++;
+            if (travel.ConfirmReturnToUldah())
+            {
+                if (!returnConfirmed)
+                    returnConfirmedUtc = now;
+                returnConfirmed = true;
+                nextReturnConfirmationAttemptUtc = now.AddSeconds(3);
+                status = returnWatchdogWarning
+                    ? $"Return recovery failure: confirmation remains open after {returnConfirmationAttempts} attempts; retrying"
+                    : "Return confirmed; waiting for zone transition";
+                log.Information("Return confirmed; waiting for zone transition to Ul'dah on {World}",
+                    returnExpectedWorld);
+            }
+            else
+            {
+                nextReturnConfirmationAttemptUtc = now.AddSeconds(ReturnConfirmationRetrySeconds);
+                status = $"Return confirmation is visible but confirmation attempt {returnConfirmationAttempts} failed; retrying";
+                log.Warning("Return confirmation attempt {Attempt} failed; retrying", returnConfirmationAttempts);
+            }
             return;
+        }
+
+        if (travel.IsBusy)
+        {
+            if (returnInitiatedBySentinel)
+                status = "Return confirmed; waiting for zone transition";
+            return;
+        }
 
         if (travel.IsInUldah(clientState.TerritoryType))
         {
+            var completingReturnRecovery = returnRecoveryStartedUtc != DateTime.MinValue;
+            if (completingReturnRecovery &&
+                !string.IsNullOrWhiteSpace(returnExpectedWorld) &&
+                !travel.CurrentWorld.Equals(returnExpectedWorld, StringComparison.OrdinalIgnoreCase))
+            {
+                ReportReturnRecoveryFailure(
+                    $"Return reached Ul'dah on {travel.CurrentWorld}, but recovery must remain on {returnExpectedWorld}");
+                return;
+            }
+
+            if (completingReturnRecovery)
+            {
+                status = $"Arrived in Ul'dah on {travel.CurrentWorld}";
+                log.Information("Arrived in Ul'dah on {World}; Return recovery is complete", travel.CurrentWorld);
+                ResetReturnRecoveryTracking();
+            }
+
             if (killConfirmed)
             {
                 var finished = current?.CreatureName ?? "alert";
@@ -1022,12 +1100,36 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            if (now >= nextActionUtc && combat.UseReturn())
-            {
-                status = "S rank dead and player still dead; using normal Return";
-                nextActionUtc = now.AddSeconds(10);
-            }
+            TickDeadReturnRecovery(now);
             return;
+        }
+
+        if (returnInitiatedBySentinel)
+        {
+            // The character can become conscious just before the loading flag is observable.
+            // Give the confirmed Return a bounded window to begin before falling back to the
+            // normal same-world Ul'dah teleport path.
+            if (returnConfirmed && (now - returnConfirmedUtc).TotalSeconds < ReturnTransitionTimeoutSeconds)
+            {
+                status = "Return confirmed; waiting for zone transition";
+                return;
+            }
+
+            if (!returnConfirmed && (now - returnActionIssuedUtc).TotalSeconds >= ReturnDialogTimeoutSeconds)
+            {
+                returnInitiatedBySentinel = false;
+                returnConfirmationObserved = false;
+                nextActionUtc = now;
+                status = "Return confirmation did not appear; retrying recovery without clearing the hunt";
+                log.Warning("Return confirmation did not appear after attempt {Attempt}; retrying", returnActionAttempts);
+            }
+            else if (returnConfirmed)
+            {
+                ReportReturnRecoveryFailure(
+                    "Return was confirmed but no Ul'dah transition completed; falling back to normal same-world teleport");
+                returnInitiatedBySentinel = false;
+                nextActionUtc = now;
+            }
         }
 
         if (now >= nextActionUtc)
@@ -1038,6 +1140,116 @@ public sealed class Plugin : IDalamudPlugin
                 status = "Teleporting normally to Ul'dah for the mandatory reset";
             nextActionUtc = now.AddSeconds(8);
         }
+    }
+
+    private void TickDeadReturnRecovery(DateTime now)
+    {
+        if (returnRecoveryStartedUtc == DateTime.MinValue)
+        {
+            returnRecoveryStartedUtc = now;
+            returnExpectedWorld = travel.CurrentWorld;
+        }
+
+        if (returnInitiatedBySentinel)
+        {
+            if (returnConfirmed)
+            {
+                if ((now - returnConfirmedUtc).TotalSeconds < ReturnTransitionTimeoutSeconds)
+                {
+                    status = "Return confirmed; waiting for zone transition";
+                    return;
+                }
+
+                ReportReturnRecoveryFailure(
+                    "Return confirmation was accepted but the zone transition timed out; retrying Return");
+                returnInitiatedBySentinel = false;
+                returnConfirmed = false;
+                nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
+                return;
+            }
+
+            if ((now - returnActionIssuedUtc).TotalSeconds < ReturnDialogTimeoutSeconds)
+            {
+                status = "Initiating Return to Ul'dah; waiting for its confirmation dialog";
+                return;
+            }
+
+            ReportReturnRecoveryFailure("Return confirmation did not appear; retrying Return");
+            returnInitiatedBySentinel = false;
+            returnConfirmationObserved = false;
+            nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
+            return;
+        }
+
+        if (now < nextActionUtc)
+        {
+            if (returnWatchdogWarning)
+                status = $"Return recovery has not completed after repeated attempts; retrying in " +
+                         $"{Math.Max(0, Math.Ceiling((nextActionUtc - now).TotalSeconds)):0}s";
+            return;
+        }
+
+        var returnStatus = combat.GetReturnActionStatus();
+        if (returnStatus != 0)
+        {
+            status = returnStatus == uint.MaxValue
+                ? "Return is unavailable because the game action manager is not ready; retrying later"
+                : $"Return is unavailable or on cooldown (game status {returnStatus}); retrying later";
+            log.Warning("Could not initiate Return on {World}; action status {Status}", returnExpectedWorld, returnStatus);
+            nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
+            return;
+        }
+
+        returnActionAttempts++;
+        status = "Initiating Return to Ul'dah";
+        log.Information("Initiating Return to Ul'dah on {World}; attempt {Attempt}",
+            returnExpectedWorld, returnActionAttempts);
+
+        if (!combat.UseReturn())
+        {
+            ReportReturnRecoveryFailure("The game rejected the Return action; retrying later");
+            nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
+            return;
+        }
+
+        returnInitiatedBySentinel = true;
+        returnConfirmationObserved = false;
+        returnConfirmed = false;
+        returnActionIssuedUtc = now;
+        nextReturnConfirmationAttemptUtc = now;
+        nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
+    }
+
+    private void ReportReturnRecoveryFailure(string message)
+    {
+        status = $"Return recovery failure: {message}";
+        log.Error("Return recovery failure: {Message}", message);
+    }
+
+    private void UpdateReturnRecoveryWatchdog(DateTime now)
+    {
+        if (returnRecoveryStartedUtc == DateTime.MinValue || returnWatchdogWarning ||
+            (now - returnRecoveryStartedUtc).TotalSeconds < ReturnRecoveryWatchdogSeconds)
+            return;
+
+        returnWatchdogWarning = true;
+        log.Error("Return recovery watchdog expired after {Seconds}s on {World}; retries will continue with backoff",
+            ReturnRecoveryWatchdogSeconds, returnExpectedWorld);
+    }
+
+    private void ResetReturnRecoveryTracking()
+    {
+        returnRecoveryStartedUtc = DateTime.MinValue;
+        returnActionIssuedUtc = DateTime.MinValue;
+        returnConfirmedUtc = DateTime.MinValue;
+        nextReturnConfirmationAttemptUtc = DateTime.MinValue;
+        returnExpectedWorld = string.Empty;
+        returnInitiatedBySentinel = false;
+        returnConfirmationObserved = false;
+        returnConfirmed = false;
+        returnWatchdogWarning = false;
+        returnActionAttempts = 0;
+        returnConfirmationAttempts = 0;
     }
 
     private void TickWorldVisit(DateTime now)
@@ -2069,6 +2281,7 @@ public sealed class Plugin : IDalamudPlugin
         ssWatchDeadlineUtc = DateTime.MinValue;
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
+        ResetReturnRecoveryTracking();
         parkingCandidates.Clear();
     }
 

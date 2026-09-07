@@ -159,6 +159,32 @@ internal sealed class NativeTravel(
         return true;
     }
 
+    public unsafe bool ReturnConfirmationIsOpen(out string prompt)
+    {
+        prompt = string.Empty;
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon is null || !IsReady((AtkUnitBase*)addon) || addon->PromptText is null)
+            return false;
+
+        prompt = addon->PromptText->NodeText.ToString();
+        return IsReturnToUldahPrompt(prompt);
+    }
+
+    public unsafe bool ConfirmReturnToUldah()
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon is null || !IsReady((AtkUnitBase*)addon) || addon->PromptText is null ||
+            addon->YesButton is null || !addon->YesButton->IsEnabled)
+            return false;
+
+        var prompt = addon->PromptText->NodeText.ToString();
+        if (!IsReturnToUldahPrompt(prompt))
+            return false;
+
+        FireCallback((AtkUnitBase*)addon, 0);
+        return true;
+    }
+
     public unsafe bool WorldSelectionIsOpen() => IsReady(gameGui.GetAddonByName<AtkUnitBase>("WorldTravelSelect"));
 
     private unsafe bool TrySelectStringEntry(Func<string, bool> predicate)
@@ -223,6 +249,14 @@ internal sealed class NativeTravel(
 
     private static unsafe bool IsReady(AtkUnitBase* addon) =>
         addon is not null && addon->IsReady && addon->IsVisible;
+
+    private static bool IsReturnToUldahPrompt(string prompt)
+    {
+        var normalized = prompt.Replace('’', '\'').Replace('‘', '\'');
+        return normalized.Contains("Return to", StringComparison.OrdinalIgnoreCase) &&
+               (normalized.Contains("Ul'dah", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Contains("Steps of Nald", StringComparison.OrdinalIgnoreCase));
+    }
 
     private static unsafe void FireCallback(AtkUnitBase* addon, params int[] arguments)
     {
