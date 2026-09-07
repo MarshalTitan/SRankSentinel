@@ -2949,40 +2949,70 @@ public sealed class Plugin : IDalamudPlugin
                 pendingAlerts.Enqueue(alert);
         }
 
+        ReorderPendingQueue();
         PersistQueue();
     }
 
     private void EnqueuePersistent(HuntAlertSnapshot alert)
     {
         pendingAlerts.Enqueue(alert);
+        ReorderPendingQueue();
         PersistQueue();
+        log.Information("Queued {Mark} ({Expansion}); pending order is {Order}",
+            alert.CreatureName,
+            HuntCatalog.ExpansionName(HuntCatalog.GetExpansion(alert.TerritoryId)),
+            string.Join(" -> ", pendingAlerts.Select(candidate => candidate.CreatureName)));
     }
 
     private bool TryDequeueNextValid(out HuntAlertSnapshot alert)
     {
         var now = DateTime.UtcNow;
-        var skipped = 0;
-        while (pendingAlerts.TryDequeue(out var candidate))
+        var queued = pendingAlerts.ToArray();
+        var valid = queued.Where(candidate => IsAlertFresh(candidate, now))
+            .OrderByDescending(candidate => ExpansionQueuePriority(HuntCatalog.GetExpansion(candidate.TerritoryId)))
+            .ThenBy(candidate => candidate.ReceivedAtUtc)
+            .ToArray();
+        var skipped = queued.Length - valid.Length;
+        pendingAlerts.Clear();
+        alert = valid.FirstOrDefault()!;
+        foreach (var remaining in valid.Skip(1))
+            pendingAlerts.Enqueue(remaining);
+        PersistQueue();
+        if (skipped > 0)
+            log.Information("Skipped {Count} killed, stale, or no-longer-eligible queued alerts", skipped);
+        if (alert is not null)
         {
-            if (!IsAlertFresh(candidate, now))
-            {
-                skipped++;
-                continue;
-            }
-
-            alert = candidate;
-            PersistQueue();
-            if (skipped > 0)
-                log.Information("Skipped {Count} killed, stale, or no-longer-eligible queued alerts", skipped);
+            log.Information("Selected queued {Mark} by expansion priority ({Expansion}); {Remaining} remain",
+                alert.CreatureName,
+                HuntCatalog.ExpansionName(HuntCatalog.GetExpansion(alert.TerritoryId)),
+                pendingAlerts.Count);
             return true;
         }
-
-        alert = null!;
-        PersistQueue();
         if (skipped > 0)
             status = $"Skipped {skipped} killed, stale, or no-longer-eligible queued alert(s)";
         return false;
     }
+
+    private void ReorderPendingQueue()
+    {
+        var ordered = pendingAlerts
+            .OrderByDescending(alert => ExpansionQueuePriority(HuntCatalog.GetExpansion(alert.TerritoryId)))
+            .ThenBy(alert => alert.ReceivedAtUtc)
+            .ToArray();
+        pendingAlerts.Clear();
+        foreach (var alert in ordered)
+            pendingAlerts.Enqueue(alert);
+    }
+
+    private static int ExpansionQueuePriority(SupportedExpansion expansion) => expansion switch
+    {
+        SupportedExpansion.Evercold => 5,
+        SupportedExpansion.Dawntrail => 4,
+        SupportedExpansion.Endwalker => 3,
+        SupportedExpansion.Shadowbringers => 2,
+        SupportedExpansion.Centurio => 1,
+        _ => 0,
+    };
 
     private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>
         IsWithinFreshnessWindow(alert.ReceivedAtUtc, now) &&
