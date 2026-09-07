@@ -2111,8 +2111,8 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         config.FlagApproachDistance = DrawFloat("Initial coordinate stop", config.FlagApproachDistance, 35f, 90f);
-        config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 30f, 70f);
-        config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 20f, 50f);
+        config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 20f, 70f);
+        config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 15f, 50f);
         config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f, "%.0f%%");
         ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
                           $"{config.SsChainTimeoutSeconds}s after a precursor is detected.");
