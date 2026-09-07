@@ -32,6 +32,9 @@ public sealed class Plugin : IDalamudPlugin
     private const float CrowdMovementTolerance = 10f;
     private const int CrowdMinimumPlayers = 3;
     private const double CrowdPathQueryTimeoutSeconds = 20;
+    private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
+    private const double FaloopLocationEnrichmentInitialRetrySeconds = 5;
+    private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
     private readonly IDalamudPluginInterface pi;
     private readonly ICommandManager commands;
     private readonly IClientState clientState;
@@ -50,7 +53,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ConcurrentQueue<FaloopFeedEvent> faloopEvents = new();
     private readonly ConcurrentQueue<byte> faloopSessionRejections = new();
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
-    private readonly Dictionary<string, HuntAlertSnapshot> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PendingFaloopLocation> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Queue<ParkingCandidate> parkingCandidates = new();
 
@@ -433,23 +436,48 @@ public sealed class Plugin : IDalamudPlugin
                 world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
                 Math.Max(1, feedEvent.Instance), 0, 0, feedEvent.OccurredAtUtc);
             if (current?.Key != unresolved.Key && pendingAlerts.All(alert => alert.Key != unresolved.Key))
-                unresolvedFaloopAlerts[unresolved.Key] = unresolved;
+            {
+                if (unresolvedFaloopAlerts.TryGetValue(unresolved.Key, out var existing))
+                {
+                    existing.FeedEvent = feedEvent;
+                    existing.NextAttemptUtc = DateTime.UtcNow;
+                }
+                else
+                {
+                    unresolvedFaloopAlerts[unresolved.Key] = new PendingFaloopLocation(
+                        unresolved,
+                        feedEvent,
+                        travel.GetDataCenterSlug(world),
+                        DateTime.UtcNow);
+                }
+            }
 
             var rawPoi = string.IsNullOrWhiteSpace(feedEvent.RawPoiKey)
                 ? $"POI id {feedEvent.PoiId}"
                 : feedEvent.RawPoiKey;
-            var detail = $"mark={definition.Name}, world={world}, territory={feedEvent.ZoneSlug ?? "(missing)"} " +
-                         $"({territory}), raw POI={rawPoi}, event coordinates={feedEvent.RawCoordinateData}";
-            status = config.EnableHuntAlertsFallback || config.EnableSonarFallback
-                ? $"Faloop {definition.Name} is waiting for fallback coordinates ({rawPoi})"
-                : $"Faloop {definition.Name} has an unresolved coordinate/POI ({rawPoi})";
-            log.Warning("Faloop eligible spawn has no usable local-coordinate mapping: {Detail}", detail);
+            status = $"Waiting for Faloop location enrichment: {definition.Name} on {world} ({rawPoi})";
+            log.Warning(
+                "Faloop spawn is waiting for location enrichment: eventType={EventType}, subType={SubType}, eventId={EventId}, mark={Mark}, markId={MarkId}, world={World}, territory={Zone} ({TerritoryId}), map={MapId}, rawPoi={RawPoi}, directXY={DirectX},{DirectY}, location={Location}, coordinateData={CoordinateData}",
+                feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
+                string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId,
+                definition.Name, feedEvent.MobSlug, world, feedEvent.ZoneSlug ?? "(missing)", territory,
+                feedEvent.RawMapId, rawPoi,
+                feedEvent.DirectMapX, feedEvent.DirectMapY, feedEvent.RawLocation ?? "(missing)",
+                feedEvent.RawCoordinateData);
             return;
         }
 
+        unresolvedFaloopAlerts.Remove(new HuntAlertSnapshot(
+            HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
+            world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
+            Math.Max(1, feedEvent.Instance), mapX, mapY, feedEvent.OccurredAtUtc).Key);
+        var resolutionKind = coordinateSource.StartsWith("direct", StringComparison.OrdinalIgnoreCase)
+            ? "Direct coordinates received"
+            : "POI mapped successfully";
         log.Information(
-            "Resolved Faloop destination for {Mark} on {World}: {Zone}/{RawPoi} -> ({MapX:0.0}, {MapY:0.0}) via {CoordinateSource}; event coordinates {EventCoordinates}",
-            definition.Name, world, feedEvent.ZoneSlug ?? "(missing)", feedEvent.RawPoiKey,
+            "{ResolutionKind} for Faloop {Mark} on {World}: eventType={EventType}/{SubType}, eventId={EventId}, zone={Zone}, map={MapId}, rawPoi={RawPoi} -> ({MapX:0.0}, {MapY:0.0}) via {CoordinateSource}; event coordinates {EventCoordinates}",
+            resolutionKind, definition.Name, world, feedEvent.EventType, feedEvent.EventSubType,
+            feedEvent.EventId, feedEvent.ZoneSlug ?? "(missing)", feedEvent.RawMapId, feedEvent.RawPoiKey,
             mapX, mapY, coordinateSource, feedEvent.RawCoordinateData);
 
         var isSs = HuntCatalog.IsAnySsName(definition.Name);
@@ -471,6 +499,76 @@ public sealed class Plugin : IDalamudPlugin
             return FaloopCatalog.DisplayName(worldId);
         var world = data.GetExcelSheet<World>().FirstOrDefault(row => row.RowId == numericId);
         return world.RowId == 0 ? worldId : world.Name.ToString();
+    }
+
+    private void TickFaloopLocationEnrichment(DateTime now)
+    {
+        PruneUnresolvedFaloopAlerts();
+        var resolvedEvents = new List<FaloopFeedEvent>();
+        foreach (var (key, pending) in unresolvedFaloopAlerts.ToArray())
+        {
+            if (now - pending.FirstObservedUtc >= TimeSpan.FromSeconds(FaloopLocationEnrichmentTimeoutSeconds))
+            {
+                unresolvedFaloopAlerts.Remove(key);
+                var rawPoi = pending.FeedEvent.PoiId > 0
+                    ? pending.FeedEvent.PoiId.ToString()
+                    : "(missing)";
+                status = pending.FeedEvent.PoiId > 0
+                    ? $"Rejected: unknown POI {rawPoi} for {pending.Alert.CreatureName} after enrichment timeout"
+                    : $"Rejected: no usable location after timeout for {pending.Alert.CreatureName} on {pending.Alert.World}";
+                log.Warning("{Status}; last enrichment result: {Detail}", status, pending.LastDetail);
+                continue;
+            }
+
+            if (pending.ActiveTask is { IsCompleted: true } task)
+            {
+                pending.ActiveTask = null;
+                FaloopLocationEnrichmentResult result;
+                try
+                {
+                    result = task.GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    result = FaloopLocationEnrichmentResult.Pending(pending.FeedEvent,
+                        $"enrichment task failed: {ex.Message}");
+                }
+
+                pending.LastDetail = result.Detail;
+                pending.Attempts++;
+                if (result.Success)
+                {
+                    pending.FeedEvent = result.Event;
+                    if (FaloopCatalog.TryResolveEventCoordinates(
+                            result.Event.ZoneSlug, result.Event.PoiId,
+                            result.Event.DirectMapX, result.Event.DirectMapY, result.Event.RawLocation,
+                            out _, out var mapX, out var mapY, out var coordinateSource))
+                    {
+                        unresolvedFaloopAlerts.Remove(key);
+                        log.Information(
+                            "POI mapped successfully after Faloop state enrichment: {Mark} on {World}, {Detail}, map ({MapX:0.0}, {MapY:0.0}) via {Source}",
+                            pending.Alert.CreatureName, pending.Alert.World, result.Detail, mapX, mapY, coordinateSource);
+                        resolvedEvents.Add(result.Event);
+                        continue;
+                    }
+                    pending.LastDetail = $"state returned unknown POI {result.Event.PoiId}";
+                }
+
+                var retrySeconds = Math.Min(FaloopLocationEnrichmentMaximumRetrySeconds,
+                    FaloopLocationEnrichmentInitialRetrySeconds * Math.Pow(2, Math.Min(3, pending.Attempts)));
+                pending.NextAttemptUtc = now.AddSeconds(retrySeconds);
+                status = $"Waiting for Faloop location enrichment: {pending.Alert.CreatureName} on {pending.Alert.World}";
+            }
+
+            if (pending.ActiveTask is null && now >= pending.NextAttemptUtc)
+            {
+                pending.ActiveTask = faloop.TryEnrichLocationAsync(pending.FeedEvent, pending.DataCenterSlug);
+                pending.NextAttemptUtc = now.AddSeconds(FaloopLocationEnrichmentMaximumRetrySeconds);
+            }
+        }
+
+        foreach (var feedEvent in resolvedEvents)
+            HandleFaloopEvent(feedEvent);
     }
 
     private void OnHuntAlert(HuntTrainMessageDto payload)
@@ -844,6 +942,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 DrainFaloopSessionRejections();
                 DrainFaloopEvents();
+                TickFaloopLocationEnrichment(now);
                 if (faloop.IsConnected)
                     automaticFaloopReauthenticationAttempted = false;
             }
@@ -2766,10 +2865,10 @@ public sealed class Plugin : IDalamudPlugin
                 ? alert.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
                 : alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase))).ToArray();
         var unresolvedRemoved = unresolvedFaloopAlerts
-            .Where(pair => HuntCatalog.TextMentionsMark(sonarText, pair.Value.CreatureName) &&
+            .Where(pair => HuntCatalog.TextMentionsMark(sonarText, pair.Value.Alert.CreatureName) &&
                            (string.IsNullOrWhiteSpace(killedWorld)
-                               ? pair.Value.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
-                               : pair.Value.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase)))
+                               ? pair.Value.Alert.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
+                               : pair.Value.Alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase)))
             .Select(pair => pair.Key).ToArray();
         if (removed.Length == 0 && unresolvedRemoved.Length == 0)
             return;
@@ -2808,7 +2907,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var currentMatched = current is not null && Matches(current);
         var removed = pendingAlerts.Where(Matches).ToArray();
-        var unresolvedRemoved = unresolvedFaloopAlerts.Where(pair => Matches(pair.Value)).Select(pair => pair.Key).ToArray();
+        var unresolvedRemoved = unresolvedFaloopAlerts.Where(pair => Matches(pair.Value.Alert)).Select(pair => pair.Key).ToArray();
         foreach (var key in unresolvedRemoved)
             unresolvedFaloopAlerts.Remove(key);
         if (removed.Length > 0)
@@ -2920,8 +3019,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         var now = DateTime.UtcNow;
         foreach (var key in unresolvedFaloopAlerts
-                     .Where(pair => !IsWithinFreshnessWindow(pair.Value.ReceivedAtUtc, now) ||
-                                    !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.TerritoryId)))
+                     .Where(pair => !IsWithinFreshnessWindow(pair.Value.Alert.ReceivedAtUtc, now) ||
+                                    !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))
                      .Select(pair => pair.Key).ToArray())
             unresolvedFaloopAlerts.Remove(key);
     }
@@ -3277,6 +3376,22 @@ internal sealed record PlayerCluster(
     Vector3 Center,
     int Population,
     float Tightness);
+
+internal sealed class PendingFaloopLocation(
+    HuntAlertSnapshot alert,
+    FaloopFeedEvent feedEvent,
+    string dataCenterSlug,
+    DateTime firstObservedUtc)
+{
+    public HuntAlertSnapshot Alert { get; } = alert;
+    public FaloopFeedEvent FeedEvent { get; set; } = feedEvent;
+    public string DataCenterSlug { get; } = dataCenterSlug;
+    public DateTime FirstObservedUtc { get; } = firstObservedUtc;
+    public DateTime NextAttemptUtc { get; set; } = firstObservedUtc;
+    public int Attempts { get; set; }
+    public string LastDetail { get; set; } = "not attempted yet";
+    public Task<FaloopLocationEnrichmentResult>? ActiveTask { get; set; }
+}
 
 internal sealed class HuntTrainMessageDto
 {
