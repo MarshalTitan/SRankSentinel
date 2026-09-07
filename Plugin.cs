@@ -2111,9 +2111,9 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         config.FlagApproachDistance = DrawFloat("Initial coordinate stop", config.FlagApproachDistance, 35f, 90f);
-        config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 35f, 70f);
+        config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 30f, 70f);
         config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 20f, 50f);
-        config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f);
+        config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f, "%.0f%%");
         ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
                           $"{config.SsChainTimeoutSeconds}s after a precursor is detected.");
         var freshnessMinutes = config.AlertFreshnessMinutes;
@@ -2147,9 +2147,9 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.End();
     }
 
-    private static float DrawFloat(string label, float value, float min, float max)
+    private static float DrawFloat(string label, float value, float min, float max, string format = "%.0f y")
     {
-        ImGui.SliderFloat(label, ref value, min, max, "%.0f y");
+        ImGui.SliderFloat(label, ref value, min, max, format);
         return value;
     }
 
