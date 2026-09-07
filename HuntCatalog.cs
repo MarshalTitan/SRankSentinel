@@ -171,6 +171,9 @@ internal static class HuntCatalog
     public static bool IsSupportedTerritory(uint territoryId) =>
         GetExpansion(territoryId) is not SupportedExpansion.None;
 
+    public static IReadOnlyCollection<uint> SupportedTerritoryIds { get; } =
+        Definitions.Select(definition => definition.TerritoryId).Distinct().Order().ToArray();
+
     public static SupportedExpansion GetExpansion(uint territoryId)
     {
         if (CenturioTerritories.Contains(territoryId))
