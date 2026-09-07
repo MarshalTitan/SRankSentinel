@@ -117,7 +117,7 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:CATALOG_TOKEN)) {
             "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "::notice::DALAMUD_CATALOG_TOKEN is not configured. The SRankSentinel release is complete; run the DalamudPlugins 'Update Plugin Entry' workflow manually for SRankSentinel ${{ steps.version.outputs.value }}."
+            Write-Host "::notice::DALAMUD_CATALOG_TOKEN is not configured. The SRankSentinel release is complete; run the Sentinel 'Update Plugin Entry' workflow manually for SRankSentinel ${{ steps.version.outputs.value }}."
           }
           else {
             "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -127,7 +127,7 @@ jobs:
         if: steps.catalog-auth.outputs.enabled == 'true'
         uses: actions/checkout@v4
         with:
-          repository: MarshalTitan/DalamudPlugins
+          repository: MarshalTitan/Sentinel
           ref: main
           token: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
           path: central-catalog
@@ -174,7 +174,7 @@ jobs:
           $published = $false
           for ($attempt = 1; $attempt -le 12; $attempt++) {
             $cacheBuster = [Uri]::EscapeDataString("${{ github.run_id }}-$attempt-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())")
-            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MarshalTitan/DalamudPlugins/main/repo.json?catalog=$cacheBuster" -OutFile $publicPath
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json?catalog=$cacheBuster" -OutFile $publicPath
             $entries = @(Get-Content -LiteralPath $publicPath -Raw | ConvertFrom-Json)
             $entry = $entries | Where-Object { $_.InternalName -eq 'SRankSentinel' } | Select-Object -First 1
             if ($null -ne $entry -and $entry.AssemblyVersion -eq $expectedVersion) {
