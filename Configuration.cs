@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 8;
+    public int Version { get; set; } = 9;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; } = true;
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -23,10 +23,14 @@ public sealed class Configuration : IPluginConfiguration
     public float WaitingDistance { get; set; } = 45f;
     public float EmergencyDistance { get; set; } = 38f;
     public float EngageHpPercent { get; set; } = 95f;
+    // Version-8 expansion-named profiles are retained so existing repository installs can
+    // migrate without losing their saved values. Runtime behavior uses the shared profiles.
     public HuntDistanceProfile LegacyShadowbringersProfile { get; set; } = new();
     public HuntDistanceProfile EndwalkerProfile { get; set; } = new();
     public HuntDistanceProfile DawntrailProfile { get; set; } = new();
     public HuntDistanceProfile EvercoldProfile { get; set; } = new();
+    public HuntDistanceProfile CloseSafeProfile { get; set; } = new();
+    public HuntDistanceProfile ProximitySensitiveProfile { get; set; } = new();
     public bool AutomaticTagAction { get; set; } = true;
     public uint TagActionId { get; set; } = 46; // Manual override when automatic selection is disabled.
     public int TravelTimeoutSeconds { get; set; } = 300;
@@ -122,10 +126,30 @@ public sealed class Configuration : IPluginConfiguration
             Save();
         }
 
+        if (Version < 9)
+        {
+            CloseSafeProfile = (LegacyShadowbringersProfile ?? new HuntDistanceProfile()).Clone();
+
+            // EW and DT were separately configurable in version 8. Consolidate them without
+            // lowering either expansion's saved numeric clearances. In normal upgrades these
+            // profiles are identical because version 8 cloned the same global settings.
+            var endwalker = EndwalkerProfile ?? new HuntDistanceProfile();
+            var dawntrail = DawntrailProfile ?? new HuntDistanceProfile();
+            ProximitySensitiveProfile = HuntDistanceProfile.ConservativeMerge(endwalker, dawntrail);
+
+            Version = 9;
+            Save();
+        }
+
         LegacyShadowbringersProfile ??= new HuntDistanceProfile();
         EndwalkerProfile ??= new HuntDistanceProfile();
         DawntrailProfile ??= new HuntDistanceProfile();
         EvercoldProfile ??= new HuntDistanceProfile();
+        CloseSafeProfile ??= LegacyShadowbringersProfile.Clone();
+        ProximitySensitiveProfile ??= HuntDistanceProfile.ConservativeMerge(
+            EndwalkerProfile, DawntrailProfile);
+        CloseSafeProfile.EnforceClearanceInvariant();
+        ProximitySensitiveProfile.EnforceClearanceInvariant();
     }
 
     internal bool IsExpansionEnabled(SupportedExpansion expansion) => expansion switch
@@ -139,15 +163,37 @@ public sealed class Configuration : IPluginConfiguration
         _ => false,
     };
 
-    internal HuntDistanceProfile GetDistanceProfile(SupportedExpansion expansion) => expansion switch
+    internal HuntBehaviorProfile GetBehaviorProfile(SupportedExpansion expansion) => expansion switch
     {
-        SupportedExpansion.Endwalker => EndwalkerProfile,
-        SupportedExpansion.Dawntrail => DawntrailProfile,
-        SupportedExpansion.Evercold => EvercoldProfile,
-        _ => LegacyShadowbringersProfile,
+        SupportedExpansion.Endwalker => HuntBehaviorProfile.ProximitySensitive,
+        SupportedExpansion.Dawntrail => HuntBehaviorProfile.ProximitySensitive,
+        SupportedExpansion.Evercold => HuntBehaviorProfile.ProximitySensitive,
+        _ => HuntBehaviorProfile.CloseSafe,
     };
 
-    public void Save() => pluginInterface?.SavePluginConfig(this);
+    internal HuntDistanceProfile GetDistanceProfile(SupportedExpansion expansion)
+    {
+        var profile = GetBehaviorProfile(expansion) switch
+        {
+            HuntBehaviorProfile.ProximitySensitive => ProximitySensitiveProfile,
+            _ => CloseSafeProfile,
+        };
+        profile.EnforceClearanceInvariant();
+        return profile;
+    }
+
+    public void Save()
+    {
+        CloseSafeProfile?.EnforceClearanceInvariant();
+        ProximitySensitiveProfile?.EnforceClearanceInvariant();
+        pluginInterface?.SavePluginConfig(this);
+    }
+}
+
+internal enum HuntBehaviorProfile
+{
+    CloseSafe,
+    ProximitySensitive,
 }
 
 [Serializable]
@@ -165,4 +211,22 @@ public sealed class HuntDistanceProfile
         EmergencyDistance = EmergencyDistance,
         EngageHpPercent = EngageHpPercent,
     };
+
+    public void EnforceClearanceInvariant() =>
+        EmergencyDistance = Math.Min(EmergencyDistance, WaitingDistance);
+
+    public static HuntDistanceProfile ConservativeMerge(
+        HuntDistanceProfile first,
+        HuntDistanceProfile second)
+    {
+        var merged = new HuntDistanceProfile
+        {
+            FlagApproachDistance = Math.Max(first.FlagApproachDistance, second.FlagApproachDistance),
+            WaitingDistance = Math.Max(first.WaitingDistance, second.WaitingDistance),
+            EmergencyDistance = Math.Max(first.EmergencyDistance, second.EmergencyDistance),
+            EngageHpPercent = Math.Min(first.EngageHpPercent, second.EngageHpPercent),
+        };
+        merged.EnforceClearanceInvariant();
+        return merged;
+    }
 }

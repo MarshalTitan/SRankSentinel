@@ -31,9 +31,10 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - Safe parking clearance: **45y** plus player/mark hitboxes
 - Emergency clearance: **38y** plus player/mark hitboxes
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
-- Centurio and Shadowbringers share a **Legacy / Shadowbringers** distance profile; Endwalker and Dawntrail have independent profiles
-- Each usable profile stores its own initial stop, safe clearance, emergency clearance, and HP gate; existing installs migrate their exact global values into every profile
-- Safe-clearance sliders allow **20–70y**, emergency-clearance sliders allow **15–50y**, and HP gates are displayed as percentages
+- Expansion checkboxes and distance-profile assignment are independent. Centurio and Shadowbringers currently share the **Close-safe** behavior profile; Endwalker and Dawntrail share the **Proximity-sensitive** profile. Evercold remains disabled but is reserved for the proximity-sensitive profile when support arrives.
+- Each behavior profile stores its own initial stop, safe clearance, emergency clearance, and HP gate. Existing settings migrate into the corresponding shared profiles without lowering valid saved clearances.
+- Close-safe ranges are **25–90y** initial stop, **5–70y** safe clearance, and **5–50y** emergency clearance. Proximity-sensitive ranges remain **35–90y**, **20–70y**, and **15–50y** respectively. Yard values use one-yard increments and HP gates are displayed as percentages.
+- Emergency clearance is constrained to the selected profile's safe parking clearance, so it cannot be configured to exceed the normal waiting radius.
 - Ranged tag action: selected automatically from the current combat job and adjusted for learned upgrades
 - Exactly one client action attempt per mark, whether the client accepts or rejects it; no retry loop and no combat rotation
 - Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking; a manual action-ID override remains available

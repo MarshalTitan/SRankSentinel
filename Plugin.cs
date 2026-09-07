@@ -2320,9 +2320,21 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         ImGui.TextUnformatted("DISTANCE PROFILES");
-        DrawDistanceProfile("Legacy / Shadowbringers profile", "legacy", config.LegacyShadowbringersProfile);
-        DrawDistanceProfile("Endwalker profile", "endwalker", config.EndwalkerProfile);
-        DrawDistanceProfile("Dawntrail profile", "dawntrail", config.DawntrailProfile);
+        ImGui.TextWrapped("Behavior profiles are independent from the expansion hunting checkboxes.");
+        DrawDistanceProfile(
+            "Close-safe profile — Centurio + Shadowbringers",
+            "close-safe",
+            config.CloseSafeProfile,
+            25f,
+            5f,
+            5f);
+        DrawDistanceProfile(
+            "Proximity-sensitive profile — Endwalker + Dawntrail (Evercold future)",
+            "proximity-sensitive",
+            config.ProximitySensitiveProfile,
+            35f,
+            20f,
+            15f);
         ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
                           $"{config.SsChainTimeoutSeconds}s after a precursor is detected.");
         var freshnessMinutes = config.AlertFreshnessMinutes;
@@ -2358,22 +2370,31 @@ public sealed class Plugin : IDalamudPlugin
 
     private static float DrawFloat(string label, float value, float min, float max, string format = "%.0f y")
     {
-        ImGui.SliderFloat(label, ref value, min, max, format);
-        return value;
+        return ImGui.SliderFloat(label, ref value, min, max, format)
+            ? MathF.Round(value)
+            : value;
     }
 
-    private static void DrawDistanceProfile(string heading, string id, HuntDistanceProfile profile)
+    private static void DrawDistanceProfile(
+        string heading,
+        string id,
+        HuntDistanceProfile profile,
+        float flagMinimum,
+        float safeMinimum,
+        float emergencyMinimum)
     {
         ImGui.Spacing();
         ImGui.TextUnformatted(heading);
         profile.FlagApproachDistance = DrawFloat($"Initial coordinate stop##{id}",
-            profile.FlagApproachDistance, 35f, 90f);
+            profile.FlagApproachDistance, flagMinimum, 90f);
         profile.WaitingDistance = DrawFloat($"Safe parking clearance##{id}",
-            profile.WaitingDistance, 20f, 70f);
+            profile.WaitingDistance, safeMinimum, 70f);
+        var emergencyMaximum = Math.Min(50f, profile.WaitingDistance);
         profile.EmergencyDistance = DrawFloat($"Emergency clearance##{id}",
-            profile.EmergencyDistance, 15f, 50f);
+            Math.Min(profile.EmergencyDistance, emergencyMaximum), emergencyMinimum, emergencyMaximum);
         profile.EngageHpPercent = DrawFloat($"Engage only at/below HP %##{id}",
             profile.EngageHpPercent, 1f, 99f, "%.0f%%");
+        profile.EnforceClearanceInvariant();
     }
 
     private enum SentinelState
