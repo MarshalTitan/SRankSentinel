@@ -65,17 +65,28 @@ The emergency control is **STOP + RESET THROUGH UL'DAH**. It clears the queue, s
 
 ## Beta installation
 
-Add this custom repository URL under **Dalamud Settings → Experimental → Custom Plugin Repositories**:
+The permanent multi-plugin catalog URL is:
+
+`https://raw.githubusercontent.com/MarshalTitan/DalamudPlugins/main/repo.json`
+
+Add it under **Dalamud Settings → Experimental → Custom Plugin Repositories**, save the setting, open `/xlplugins`, search for **S Rank Sentinel**, and choose **Install**.
+
+The former SRankSentinel-specific URL remains supported during migration so existing installations are not disrupted:
 
 `https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json`
 
-Save the setting, open `/xlplugins`, search for **S Rank Sentinel**, and choose **Install**. Published packages are permanent GitHub Release assets named `SRankSentinel.zip`; GitHub Actions build artifacts are for development checks only and are never referenced by `repo.json`.
+If both URLs are enabled temporarily, Dalamud may show a duplicate listing. Confirm the new central listing works, then remove only the old custom-repository URL without uninstalling the plugin. The unchanged `InternalName` preserves the existing installation and configuration.
+
+Published packages remain permanent GitHub Release assets named `SRankSentinel.zip` in this repository. GitHub Actions build artifacts are for development checks only and neither catalog points to them.
 
 ## Publishing the next beta
 
 1. Change `<Version>` in `SRankSentinel.csproj` to a new four-part version and commit the development changes to `main`.
 2. Wait for the normal **Build** workflow to pass.
 3. Run the **Publish Beta** workflow from the Actions tab.
-4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates `repo.json` with the new version and permanent download URLs.
+4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
+5. If the `DALAMUD_CATALOG_TOKEN` repository secret is configured, the workflow also updates only the `SRankSentinel` object in `MarshalTitan/DalamudPlugins/repo.json` and validates a fresh public install. Otherwise it emits a notice and the central repository's **Update Plugin Entry** workflow is the manual fallback.
 
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
+
+For automatic central-catalog updates, use a fine-grained GitHub token limited to `MarshalTitan/DalamudPlugins` with **Contents: Read and write** permission. Save it only as the `DALAMUD_CATALOG_TOKEN` Actions repository secret in `MarshalTitan/SRankSentinel`; never commit or log it.
