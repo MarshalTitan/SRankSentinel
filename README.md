@@ -67,7 +67,7 @@ The emergency control is **STOP + RESET THROUGH UL'DAH**. It clears the queue, s
 
 The permanent multi-plugin catalog URL is:
 
-`https://raw.githubusercontent.com/MarshalTitan/DalamudPlugins/main/repo.json`
+`https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json`
 
 Add it under **Dalamud Settings → Experimental → Custom Plugin Repositories**, save the setting, open `/xlplugins`, search for **S Rank Sentinel**, and choose **Install**.
 
@@ -85,8 +85,8 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 2. Wait for the normal **Build** workflow to pass.
 3. Run the **Publish Beta** workflow from the Actions tab.
 4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
-5. If the `DALAMUD_CATALOG_TOKEN` repository secret is configured, the workflow also updates only the `SRankSentinel` object in `MarshalTitan/DalamudPlugins/repo.json` and validates a fresh public install. Otherwise it emits a notice and the central repository's **Update Plugin Entry** workflow is the manual fallback.
+5. If the `DALAMUD_CATALOG_TOKEN` repository secret is configured, the workflow also updates only the `SRankSentinel` object in `MarshalTitan/Sentinel/repo.json` and validates a fresh public install. Otherwise it emits a notice and the central repository's **Update Plugin Entry** workflow is the manual fallback.
 
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
 
-For automatic central-catalog updates, use a fine-grained GitHub token limited to `MarshalTitan/DalamudPlugins` with **Contents: Read and write** permission. Save it only as the `DALAMUD_CATALOG_TOKEN` Actions repository secret in `MarshalTitan/SRankSentinel`; never commit or log it.
+For automatic central-catalog updates, use a fine-grained GitHub token limited to `MarshalTitan/Sentinel` with **Contents: Read and write** permission. Save it only as the `DALAMUD_CATALOG_TOKEN` Actions repository secret in `MarshalTitan/SRankSentinel`; never commit or log it.
