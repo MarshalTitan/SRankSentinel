@@ -1,4 +1,5 @@
 using Dalamud.Plugin.Services;
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
 using System.Text;
@@ -18,6 +19,11 @@ internal sealed record FaloopFeedEvent(
     string WorldSlug,
     string? ZoneSlug,
     int PoiId,
+    string RawPoiKey,
+    float DirectMapX,
+    float DirectMapY,
+    string? RawLocation,
+    string RawCoordinateData,
     int Instance,
     DateTime OccurredAtUtc);
 
@@ -369,6 +375,11 @@ internal sealed class FaloopClient : IDisposable
             {
                 ZoneSlug = spawn.ZoneSlug,
                 PoiId = spawn.PoiId,
+                RawPoiKey = spawn.RawPoiKey,
+                DirectMapX = spawn.DirectMapX,
+                DirectMapY = spawn.DirectMapY,
+                RawLocation = spawn.RawLocation,
+                RawCoordinateData = spawn.RawCoordinateData,
                 Instance = feedEvent.Instance > 0 ? feedEvent.Instance : spawn.Instance,
             };
         }
@@ -420,20 +431,38 @@ internal sealed class FaloopClient : IDisposable
         var zone = inner.ValueKind == JsonValueKind.Object ? FirstString(inner, "zoneId2", "zoneId") : string.Empty;
         if (string.IsNullOrWhiteSpace(zone))
             zone = FirstString(eventData, "zoneId2", "zoneId");
+        if (string.IsNullOrWhiteSpace(zone) &&
+            TryFindNamedProperty(eventData, ["zoneId2", "zoneId"], out var nestedZone, out _))
+            zone = ElementText(nestedZone);
 
+        // Faloop currently emits both zonePoiIds:[id] and zonePoiId:id depending on the
+        // report/recent-event path. Search the complete event data so a wrapper such as
+        // spawn/data does not silently turn a valid POI into zero.
         var poiId = 0;
-        if (inner.ValueKind == JsonValueKind.Object && inner.TryGetProperty("zonePoiIds", out var poiIds) &&
-            poiIds.ValueKind == JsonValueKind.Array && poiIds.GetArrayLength() > 0)
-            TryInt(poiIds[0], out poiId);
-        if (poiId == 0 && eventData.TryGetProperty("zonePoiIds", out poiIds) &&
-            poiIds.ValueKind == JsonValueKind.Array && poiIds.GetArrayLength() > 0)
-            TryInt(poiIds[0], out poiId);
+        var rawPoiKey = "(missing)";
+        TryFindPoi(eventData, out poiId, out rawPoiKey);
+
+        var directMapX = 0f;
+        var directMapY = 0f;
+        var coordinateEvidence = new List<string>();
+        if (TryFindDirectMapCoordinates(eventData, out directMapX, out directMapY, out var mapCoordinatePath))
+            coordinateEvidence.Add($"{mapCoordinatePath}=({directMapX.ToString("0.###", CultureInfo.InvariantCulture)}," +
+                                   $"{directMapY.ToString("0.###", CultureInfo.InvariantCulture)})");
+        string? rawLocation = null;
+        if (TryFindLocation(eventData, out var location, out var locationPath))
+        {
+            rawLocation = location;
+            coordinateEvidence.Add($"{locationPath}={location}");
+        }
 
         var instance = 0;
         if (eventData.TryGetProperty("zoneInstance", out var instanceElement))
             TryInt(instanceElement, out instance);
         if (instance <= 0 && inner.ValueKind == JsonValueKind.Object &&
             inner.TryGetProperty("zoneInstance", out instanceElement))
+            TryInt(instanceElement, out instance);
+        if (instance <= 0 &&
+            TryFindNamedProperty(eventData, ["zoneInstance", "instance"], out instanceElement, out _))
             TryInt(instanceElement, out instance);
 
         var occurred = DateTime.UtcNow;
@@ -448,9 +477,229 @@ internal sealed class FaloopClient : IDisposable
             occurred = timestamp.UtcDateTime;
 
         feedEvent = new FaloopFeedEvent(action.Value, mob.Trim(), world.Trim(),
-            string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), poiId, Math.Max(0, instance), occurred);
+            string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), poiId, rawPoiKey,
+            directMapX, directMapY, rawLocation,
+            coordinateEvidence.Count == 0 ? "(none)" : string.Join("; ", coordinateEvidence),
+            Math.Max(0, instance), occurred);
         return true;
     }
+
+    private static bool TryFindPoi(JsonElement root, out int poiId, out string rawPoiKey)
+    {
+        poiId = 0;
+        rawPoiKey = "(missing)";
+        if (TryFindNamedProperty(root, ["zonePoiIds"], out var plural, out var pluralPath) &&
+            plural.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var value in plural.EnumerateArray())
+            {
+                if (TryReadPoiValue(value, out poiId, out var raw))
+                {
+                    rawPoiKey = $"{pluralPath}[{index}]={raw}";
+                    return true;
+                }
+                index++;
+            }
+        }
+        else if (plural.ValueKind != JsonValueKind.Undefined &&
+                 TryReadPoiValue(plural, out poiId, out var pluralRaw))
+        {
+            rawPoiKey = $"{pluralPath}={pluralRaw}";
+            return true;
+        }
+
+        if (TryFindNamedProperty(root, ["zonePoiId", "poiId"], out var singular, out var singularPath) &&
+            TryReadPoiValue(singular, out poiId, out var singularRaw))
+        {
+            rawPoiKey = $"{singularPath}={singularRaw}";
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryReadPoiValue(JsonElement element, out int poiId, out string raw)
+    {
+        poiId = 0;
+        raw = element.ValueKind == JsonValueKind.String
+            ? element.GetString() ?? string.Empty
+            : element.GetRawText();
+        if (TryInt(element, out poiId) && poiId > 0)
+            return true;
+        if (element.ValueKind == JsonValueKind.Object &&
+            TryFindNamedProperty(element, ["id", "key"], out var nested, out _) &&
+            TryReadPoiValue(nested, out poiId, out var nestedRaw))
+        {
+            raw = nestedRaw;
+            return true;
+        }
+
+        var digits = new string(raw.Reverse().TakeWhile(char.IsDigit).Reverse().ToArray());
+        return digits.Length > 0 && int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out poiId) &&
+               poiId > 0;
+    }
+
+    private static bool TryFindDirectMapCoordinates(
+        JsonElement root,
+        out float mapX,
+        out float mapY,
+        out string path)
+    {
+        string[][] pairs =
+        [
+            ["mapLocationX", "mapLocationY"],
+            ["mapX", "mapY"],
+            ["xCoord", "yCoord"],
+            ["coordinateX", "coordinateY"],
+        ];
+        foreach (var pair in pairs)
+            if (TryFindNumberPair(root, pair[0], pair[1], out mapX, out mapY, out path) &&
+                IsUsableMapCoordinate(mapX, mapY))
+                return true;
+        mapX = 0;
+        mapY = 0;
+        path = string.Empty;
+        return false;
+    }
+
+    private static bool TryFindNumberPair(
+        JsonElement element,
+        string xName,
+        string yName,
+        out float x,
+        out float y,
+        out string path,
+        string currentPath = "data",
+        int depth = 0)
+    {
+        x = 0;
+        y = 0;
+        path = string.Empty;
+        if (depth > 8 || element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (TryGetPropertyIgnoreCase(element, xName, out var xElement) &&
+            TryGetPropertyIgnoreCase(element, yName, out var yElement) &&
+            TryFloat(xElement, out x) && TryFloat(yElement, out y))
+        {
+            path = $"{currentPath}.{xName}/{yName}";
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object &&
+                TryFindNumberPair(property.Value, xName, yName, out x, out y, out path,
+                    $"{currentPath}.{property.Name}", depth + 1))
+                return true;
+            if (property.Value.ValueKind != JsonValueKind.Array)
+                continue;
+            var index = 0;
+            foreach (var item in property.Value.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object &&
+                    TryFindNumberPair(item, xName, yName, out x, out y, out path,
+                        $"{currentPath}.{property.Name}[{index}]", depth + 1))
+                    return true;
+                index++;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryFindLocation(JsonElement root, out string location, out string path)
+    {
+        location = string.Empty;
+        path = string.Empty;
+        if (!TryFindNamedProperty(root, ["location"], out var element, out path))
+            return false;
+        if (element.ValueKind == JsonValueKind.String)
+            location = element.GetString() ?? string.Empty;
+        else if (element.ValueKind == JsonValueKind.Array && element.GetArrayLength() >= 2 &&
+                 TryFloat(element[0], out var arrayX) && TryFloat(element[1], out var arrayY))
+            location = $"{arrayX.ToString(CultureInfo.InvariantCulture)},{arrayY.ToString(CultureInfo.InvariantCulture)}";
+        else if (element.ValueKind == JsonValueKind.Object &&
+                 TryGetPropertyIgnoreCase(element, "x", out var xElement) &&
+                 TryGetPropertyIgnoreCase(element, "y", out var yElement) &&
+                 TryFloat(xElement, out var objectX) && TryFloat(yElement, out var objectY))
+            location = $"{objectX.ToString(CultureInfo.InvariantCulture)},{objectY.ToString(CultureInfo.InvariantCulture)}";
+        return !string.IsNullOrWhiteSpace(location);
+    }
+
+    private static bool TryFindNamedProperty(
+        JsonElement element,
+        string[] names,
+        out JsonElement value,
+        out string path,
+        string currentPath = "data",
+        int depth = 0)
+    {
+        value = default;
+        path = string.Empty;
+        if (depth > 8 || element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (names.Contains(property.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                path = $"{currentPath}.{property.Name}";
+                return true;
+            }
+        }
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object &&
+                TryFindNamedProperty(property.Value, names, out value, out path,
+                    $"{currentPath}.{property.Name}", depth + 1))
+                return true;
+            if (property.Value.ValueKind != JsonValueKind.Array)
+                continue;
+            var index = 0;
+            foreach (var item in property.Value.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object &&
+                    TryFindNamedProperty(item, names, out value, out path,
+                        $"{currentPath}.{property.Name}[{index}]", depth + 1))
+                    return true;
+                index++;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        value = default;
+        return false;
+    }
+
+    private static string ElementText(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.String => element.GetString() ?? string.Empty,
+        JsonValueKind.Number => element.GetRawText(),
+        _ => string.Empty,
+    };
+
+    private static bool TryFloat(JsonElement element, out float value)
+    {
+        if (element.ValueKind == JsonValueKind.Number)
+            return element.TryGetSingle(out value);
+        if (element.ValueKind == JsonValueKind.String)
+            return float.TryParse(element.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        value = 0;
+        return false;
+    }
+
+    private static bool IsUsableMapCoordinate(float x, float y) =>
+        float.IsFinite(x) && float.IsFinite(y) && x >= 1f && x <= 50f && y >= 1f && y <= 50f;
 
     private static bool TryReadAuthData(JsonElement root, out string sessionId, out string token)
     {
@@ -489,7 +738,10 @@ internal sealed class FaloopClient : IDisposable
     {
         if (element.ValueKind == JsonValueKind.Number)
             return element.TryGetInt32(out value);
-        return int.TryParse(element.GetString(), out value);
+        if (element.ValueKind == JsonValueKind.String)
+            return int.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        value = 0;
+        return false;
     }
 
     private static TimeSpan ParseHeartbeatTimeout(string openPacket)
