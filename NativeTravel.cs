@@ -56,6 +56,18 @@ internal sealed class NativeTravel(
                target.DataCenter.RowId == player.CurrentWorld.Value.DataCenter.RowId;
     }
 
+    public string GetDataCenterSlug(string world)
+    {
+        if (string.IsNullOrWhiteSpace(world))
+            return string.Empty;
+        var target = data.GetExcelSheet<World>()
+            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (target.RowId == 0 || target.DataCenter.RowId == 0)
+            return string.Empty;
+        var name = target.DataCenter.Value.Name.ToString();
+        return new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+    }
+
     public unsafe bool CanTeleportTo(uint aetheryteId)
     {
         var telepo = Telepo.Instance();
