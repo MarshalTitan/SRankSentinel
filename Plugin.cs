@@ -2306,20 +2306,24 @@ public sealed class Plugin : IDalamudPlugin
                 if (towardCrowd.LengthSquared() < 0.01f)
                     continue;
                 towardCrowd = Vector3.Normalize(towardCrowd);
+                var tangent = new Vector3(-towardCrowd.Z, 0f, towardCrowd.X);
+                var crowdCenterRadius = HorizontalDistance(cluster.Center, target.Position);
 
-                ReadOnlySpan<float> offsets = [0f, 12f, -12f];
-                foreach (var offset in offsets)
+                // Park beside the crowd instead of on its centroid. Safe parking is a minimum,
+                // so retain the crowd's natural radius whenever it is already farther out.
+                ReadOnlySpan<float> lateralOffsets = [6f, -6f, 10f, -10f];
+                ReadOnlySpan<float> radialOffsets = [2f, 2f, 5f, 5f];
+                for (var offsetIndex = 0; offsetIndex < lateralOffsets.Length; offsetIndex++)
                 {
-                    var radians = offset * MathF.PI / 180f;
-                    var direction = new Vector3(
-                        towardCrowd.X * MathF.Cos(radians) - towardCrowd.Z * MathF.Sin(radians),
-                        0f,
-                        towardCrowd.X * MathF.Sin(radians) + towardCrowd.Z * MathF.Cos(radians));
-                    var candidate = target.Position + direction * centerRadius;
+                    var radialDistance = MathF.Max(centerRadius + 1f,
+                        crowdCenterRadius + radialOffsets[offsetIndex]);
+                    var candidate = target.Position + towardCrowd * radialDistance +
+                                    tangent * lateralOffsets[offsetIndex];
                     candidate.Y = 1024f;
                     var projected = vnav.PointOnFloorSafe(candidate, 12f);
                     if (projected is null ||
                         ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
+                        HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
                         crowdCandidates.Any(existing => HorizontalDistance(existing.Candidate.Position, projected.Value) < 2f))
                         continue;
 
@@ -2327,7 +2331,7 @@ public sealed class Plugin : IDalamudPlugin
                                 cluster.Tightness * 25f -
                                 HorizontalDistance(projected.Value, cluster.Center) * 3f -
                                 HorizontalDistance(player, projected.Value) * 0.25f -
-                                MathF.Abs(offset);
+                                MathF.Abs(lateralOffsets[offsetIndex]);
                     crowdCandidates.Add((
                         new ParkingCandidate(projected.Value, true, cluster.Population, cluster.Center), score));
                 }
@@ -2544,7 +2548,7 @@ public sealed class Plugin : IDalamudPlugin
             .FirstOrDefault();
         if (liveCluster is null ||
             HorizontalDistance(liveCluster.Center, candidate.CrowdCenter) > CrowdMovementTolerance ||
-            HorizontalDistance(liveCluster.Center, candidate.Position) > CrowdRevalidationRadius + ActiveDistanceProfile.WaitingDistance)
+            HorizontalDistance(liveCluster.Center, candidate.Position) > CrowdRevalidationRadius)
         {
             reason = "Crowd positions changed before landing; resampling safely";
             return false;
