@@ -38,6 +38,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ConcurrentQueue<FaloopFeedEvent> faloopEvents = new();
     private readonly ConcurrentQueue<byte> faloopSessionRejections = new();
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
+    private readonly Dictionary<string, HuntAlertSnapshot> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Queue<Vector3> parkingCandidates = new();
 
@@ -120,6 +121,14 @@ public sealed class Plugin : IDalamudPlugin
         {
             HelpMessage = "Open S Rank Sentinel settings/status."
         });
+
+        var coverageAudit = FaloopCatalog.Audit(HuntCatalog.SupportedTerritoryIds);
+        if (coverageAudit.Issues.Count == 0)
+            log.Information("Faloop coordinate coverage audit passed: {Territories} supported territories, {Pois} POIs",
+                coverageAudit.TerritoryCount, coverageAudit.PoiCount);
+        else
+            foreach (var issue in coverageAudit.Issues)
+                log.Error("Faloop coordinate coverage audit: {Issue}", issue);
 
         RestorePersistentQueue();
         if (TryDequeueNextValid(out var restored))
@@ -353,6 +362,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void HandleFaloopEvent(FaloopFeedEvent feedEvent)
     {
+        PruneUnresolvedFaloopAlerts();
         var world = ResolveFaloopWorld(feedEvent.WorldSlug);
         var creature = FaloopCatalog.DisplayName(feedEvent.MobSlug);
         var hasTerritory = FaloopCatalog.TryResolveTerritory(feedEvent.ZoneSlug, out var territory);
@@ -366,28 +376,53 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!FaloopCatalog.TryResolve(feedEvent.ZoneSlug, feedEvent.PoiId,
-                out territory, out var mapX, out var mapY))
-        {
-            status = $"Ignored Faloop spawn for {creature}: unknown supported-zone POI " +
-                     $"{feedEvent.ZoneSlug ?? "(missing)"}/{feedEvent.PoiId}";
-            log.Warning("Faloop spawn had no reviewed coordinate mapping: zone {Zone}, POI {Poi}",
-                feedEvent.ZoneSlug ?? "(missing)", feedEvent.PoiId);
-            return;
-        }
-
         var precursorProfile = HuntCatalog.GetSsProfileForPrecursorName(creature);
         if (precursorProfile is not null)
         {
-            if (SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
+            if (hasTerritory && SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
                 ObserveSsChain(precursorProfile,
                     $"Faloop reported a {precursorProfile.PrecursorName} precursor");
             return;
         }
 
+        if (!hasTerritory)
+            return;
         var definition = HuntCatalog.ResolveStrict(territory, creature);
         if (definition is null)
             return; // Faloop reports many ranks; only the strict configured S/SS catalog is eligible.
+        var expansion = HuntCatalog.GetExpansion(territory);
+        if (!config.IsExpansionEnabled(expansion) || !travel.IsSameDataCenter(world) ||
+            !IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+            return;
+
+        if (!FaloopCatalog.TryResolveEventCoordinates(
+                feedEvent.ZoneSlug, feedEvent.PoiId,
+                feedEvent.DirectMapX, feedEvent.DirectMapY, feedEvent.RawLocation,
+                out territory, out var mapX, out var mapY, out var coordinateSource))
+        {
+            var unresolved = new HuntAlertSnapshot(
+                HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
+                world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
+                Math.Max(1, feedEvent.Instance), 0, 0, feedEvent.OccurredAtUtc);
+            if (current?.Key != unresolved.Key && pendingAlerts.All(alert => alert.Key != unresolved.Key))
+                unresolvedFaloopAlerts[unresolved.Key] = unresolved;
+
+            var rawPoi = string.IsNullOrWhiteSpace(feedEvent.RawPoiKey)
+                ? $"POI id {feedEvent.PoiId}"
+                : feedEvent.RawPoiKey;
+            var detail = $"mark={definition.Name}, world={world}, territory={feedEvent.ZoneSlug ?? "(missing)"} " +
+                         $"({territory}), raw POI={rawPoi}, event coordinates={feedEvent.RawCoordinateData}";
+            status = config.EnableHuntAlertsFallback || config.EnableSonarFallback
+                ? $"Faloop {definition.Name} is waiting for fallback coordinates ({rawPoi})"
+                : $"Faloop {definition.Name} has an unresolved coordinate/POI ({rawPoi})";
+            log.Warning("Faloop eligible spawn has no usable local-coordinate mapping: {Detail}", detail);
+            return;
+        }
+
+        log.Information(
+            "Resolved Faloop destination for {Mark} on {World}: {Zone}/{RawPoi} -> ({MapX:0.0}, {MapY:0.0}) via {CoordinateSource}; event coordinates {EventCoordinates}",
+            definition.Name, world, feedEvent.ZoneSlug ?? "(missing)", feedEvent.RawPoiKey,
+            mapX, mapY, coordinateSource, feedEvent.RawCoordinateData);
 
         var isSs = HuntCatalog.IsAnySsName(definition.Name);
         AcceptSRankAlert(
@@ -608,6 +643,9 @@ public sealed class Plugin : IDalamudPlugin
             isSs ? "ssrank" : "srank", world, creature.Trim(), territory,
             definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
             instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);
+        if (mapX > 0f && mapY > 0f && unresolvedFaloopAlerts.Remove(incoming.Key))
+            log.Information("{Source} enriched unresolved Faloop alert for {Mark} on {World} with coordinates ({MapX:0.0}, {MapY:0.0})",
+                source, incoming.CreatureName, incoming.World, mapX, mapY);
         if (!IsWithinFreshnessWindow(incoming.ReceivedAtUtc, DateTime.UtcNow))
         {
             status = $"Ignored stale {source} alert for {incoming.CreatureName} on {incoming.World}";
@@ -2113,19 +2151,30 @@ public sealed class Plugin : IDalamudPlugin
             (string.IsNullOrWhiteSpace(killedWorld)
                 ? alert.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
                 : alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase))).ToArray();
-        if (removed.Length == 0)
+        var unresolvedRemoved = unresolvedFaloopAlerts
+            .Where(pair => HuntCatalog.TextMentionsMark(sonarText, pair.Value.CreatureName) &&
+                           (string.IsNullOrWhiteSpace(killedWorld)
+                               ? pair.Value.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
+                               : pair.Value.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase)))
+            .Select(pair => pair.Key).ToArray();
+        if (removed.Length == 0 && unresolvedRemoved.Length == 0)
             return;
 
-        var removedKeys = removed.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
-        var survivors = pendingAlerts.Where(alert => !removedKeys.Contains(alert.Key)).ToArray();
-        pendingAlerts.Clear();
-        foreach (var alert in survivors)
-            pendingAlerts.Enqueue(alert);
+        if (removed.Length > 0)
+        {
+            var removedKeys = removed.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
+            var survivors = pendingAlerts.Where(alert => !removedKeys.Contains(alert.Key)).ToArray();
+            pendingAlerts.Clear();
+            foreach (var alert in survivors)
+                pendingAlerts.Enqueue(alert);
+        }
         var now = DateTime.UtcNow;
         foreach (var alert in removed)
             killedAlerts[alert.Key] = now;
+        foreach (var key in unresolvedRemoved)
+            unresolvedFaloopAlerts.Remove(key);
         PersistQueue();
-        status = $"Removed {removed.Length} queued hunt(s) already reported killed";
+        status = $"Removed {removed.Length + unresolvedRemoved.Length} queued/pending hunt(s) already reported killed";
     }
 
     private void InvalidateExternalDeath(
@@ -2145,6 +2194,9 @@ public sealed class Plugin : IDalamudPlugin
 
         var currentMatched = current is not null && Matches(current);
         var removed = pendingAlerts.Where(Matches).ToArray();
+        var unresolvedRemoved = unresolvedFaloopAlerts.Where(pair => Matches(pair.Value)).Select(pair => pair.Key).ToArray();
+        foreach (var key in unresolvedRemoved)
+            unresolvedFaloopAlerts.Remove(key);
         if (removed.Length > 0)
         {
             var removedKeys = removed.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
@@ -2164,8 +2216,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (removed.Length > 0)
-            status = $"{source} removed {removed.Length} killed queued hunt(s)";
+        if (removed.Length > 0 || unresolvedRemoved.Length > 0)
+            status = $"{source} removed {removed.Length + unresolvedRemoved.Length} killed queued/pending hunt(s)";
     }
 
     private void RestorePersistentQueue()
@@ -2248,6 +2300,16 @@ public sealed class Plugin : IDalamudPlugin
             .ToArray();
         foreach (var key in expired)
             killedAlerts.Remove(key);
+    }
+
+    private void PruneUnresolvedFaloopAlerts()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var key in unresolvedFaloopAlerts
+                     .Where(pair => !IsWithinFreshnessWindow(pair.Value.ReceivedAtUtc, now) ||
+                                    !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.TerritoryId)))
+                     .Select(pair => pair.Key).ToArray())
+            unresolvedFaloopAlerts.Remove(key);
     }
 
     private void PersistQueue()
