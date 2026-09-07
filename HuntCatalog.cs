@@ -9,9 +9,11 @@ internal sealed record SRankDefinition(
 internal enum SupportedExpansion
 {
     None,
+    Centurio,
     Shadowbringers,
     Endwalker,
     Dawntrail,
+    Evercold,
 }
 
 internal sealed record SsProfile(
@@ -29,6 +31,9 @@ internal sealed record SsProfile(
 /// </summary>
 internal static class HuntCatalog
 {
+    public const uint DravanianHinterlandsTerritoryId = 399;
+    public const uint IdyllshireTerritoryId = 478;
+    public const uint IdyllshireAetheryteId = 75;
     public const uint ForgivenRebellionDataId = 8915;
     public const uint KerDataId = 10615;
     public const string ForgivenRebellionName = "Forgiven Rebellion";
@@ -38,6 +43,14 @@ internal static class HuntCatalog
     public const string ArchAethereaterName = "Arch Aethereater";
     public const string CrystalIncarnationName = "Crystal Incarnation";
 
+    private static readonly HashSet<uint> CenturioTerritories =
+    [
+        134, 135, 137, 138, 139, 180,
+        140, 141, 145, 146, 147,
+        148, 152, 153, 154, 155, 156,
+        397, 398, 399, 400, 401, 402,
+        612, 613, 614, 620, 621, 622,
+    ];
     private static readonly HashSet<uint> ShadowbringersTerritories = [813, 814, 815, 816, 817, 818];
     private static readonly HashSet<uint> EndwalkerTerritories = [956, 957, 958, 959, 960, 961];
     private static readonly HashSet<uint> DawntrailTerritories = [1187, 1188, 1189, 1190, 1191, 1192];
@@ -156,9 +169,30 @@ internal static class HuntCatalog
         ShadowbringersTerritories.Contains(territoryId);
 
     public static bool IsSupportedTerritory(uint territoryId) =>
-        ShadowbringersTerritories.Contains(territoryId) ||
-        EndwalkerTerritories.Contains(territoryId) ||
-        DawntrailTerritories.Contains(territoryId);
+        GetExpansion(territoryId) is not SupportedExpansion.None;
+
+    public static SupportedExpansion GetExpansion(uint territoryId)
+    {
+        if (CenturioTerritories.Contains(territoryId))
+            return SupportedExpansion.Centurio;
+        if (ShadowbringersTerritories.Contains(territoryId))
+            return SupportedExpansion.Shadowbringers;
+        if (EndwalkerTerritories.Contains(territoryId))
+            return SupportedExpansion.Endwalker;
+        if (DawntrailTerritories.Contains(territoryId))
+            return SupportedExpansion.Dawntrail;
+        return SupportedExpansion.None;
+    }
+
+    public static string ExpansionName(SupportedExpansion expansion) => expansion switch
+    {
+        SupportedExpansion.Centurio => "Centurio (ARR / HW / SB)",
+        SupportedExpansion.Shadowbringers => "Shadowbringers",
+        SupportedExpansion.Endwalker => "Endwalker",
+        SupportedExpansion.Dawntrail => "Dawntrail",
+        SupportedExpansion.Evercold => "Evercold",
+        _ => "Unknown expansion",
+    };
 
     public static SsProfile? GetSsProfileForTerritory(uint territoryId) =>
         SsProfiles.FirstOrDefault(profile => profile.TerritoryIds.Contains(territoryId));

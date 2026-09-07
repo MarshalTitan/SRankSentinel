@@ -241,7 +241,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var definition = HuntCatalog.ResolveStrict(territory, creature);
         if (definition is null)
-            return; // Faloop reports many ranks; only the strict ShB/EW/DT S/SS catalog is eligible.
+            return; // Faloop reports many ranks; only the strict configured S/SS catalog is eligible.
 
         var isSs = HuntCatalog.IsAnySsName(definition.Name);
         AcceptSRankAlert(
@@ -436,9 +436,16 @@ public sealed class Plugin : IDalamudPlugin
             status = $"Ignored {source} alert for {creature.Trim()}: territory does not match its expansion";
             return;
         }
-        if (!HuntCatalog.IsSupportedTerritory(territory))
+        var expansion = HuntCatalog.GetExpansion(territory);
+        if (expansion is SupportedExpansion.None)
         {
-            status = $"Ignored {source} alert for {creature.Trim()}: only Shadowbringers, Endwalker, and Dawntrail are supported";
+            status = $"Ignored {source} alert for {creature.Trim()}: its expansion is not supported";
+            return;
+        }
+        if (!config.IsExpansionEnabled(expansion))
+        {
+            status = $"Ignored {source} alert for {creature.Trim()}: " +
+                     $"{HuntCatalog.ExpansionName(expansion)} hunting is disabled";
             return;
         }
 
@@ -568,14 +575,24 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null)
             return;
 
-        var attuned = data.GetExcelSheet<Aetheryte>()
-            .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
-            .Select(row => row.RowId)
-            .Where(travel.CanTeleportTo)
-            .ToArray();
-        territoryAetheryteId = attuned.FirstOrDefault(id => id == current.PreferredAetheryteId);
-        if (territoryAetheryteId == 0)
-            territoryAetheryteId = attuned.FirstOrDefault();
+        // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
+        // Idyllshire followed by the Prologue Gate aethernet destination.
+        if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
+            travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
+        {
+            territoryAetheryteId = HuntCatalog.IdyllshireAetheryteId;
+        }
+        else
+        {
+            var attuned = data.GetExcelSheet<Aetheryte>()
+                .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
+                .Select(row => row.RowId)
+                .Where(travel.CanTeleportTo)
+                .ToArray();
+            territoryAetheryteId = attuned.FirstOrDefault(id => id == current.PreferredAetheryteId);
+            if (territoryAetheryteId == 0)
+                territoryAetheryteId = attuned.FirstOrDefault();
+        }
         var map = data.GetExcelSheet<Map>()
             .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
         if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
@@ -671,6 +688,18 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.WaitForTerritory:
                 TickWaitForTerritory(now);
+                return;
+            case SentinelState.OpenHinterlandsGateway:
+                TickOpenHinterlandsGateway(now);
+                return;
+            case SentinelState.SelectHinterlandsGateway:
+                TickSelectHinterlandsGateway(now);
+                return;
+            case SentinelState.SelectHinterlandsDestination:
+                TickSelectHinterlandsDestination(now);
+                return;
+            case SentinelState.WaitForHinterlands:
+                TickWaitForHinterlands(now);
                 return;
             case SentinelState.ChangeInstance:
                 TickChangeInstance(now);
@@ -933,6 +962,11 @@ public sealed class Plugin : IDalamudPlugin
             BeginInstanceCheck();
             return;
         }
+        if (NeedsIdyllshireGateway())
+        {
+            BeginHinterlandsGateway();
+            return;
+        }
         if (territoryAetheryteId == 0)
         {
             FailCurrent($"No attuned aetheryte was found for territory {current.TerritoryId}");
@@ -959,8 +993,120 @@ public sealed class Plugin : IDalamudPlugin
             BeginInstanceCheck();
             return;
         }
+        if (!travel.IsBusy && NeedsIdyllshireGateway())
+        {
+            BeginHinterlandsGateway();
+            return;
+        }
         if (TravelTimedOut(now))
             FailCurrent($"Teleport arrival in territory {current.TerritoryId} timed out");
+    }
+
+    private bool NeedsIdyllshireGateway() =>
+        current?.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
+        clientState.TerritoryType == HuntCatalog.IdyllshireTerritoryId;
+
+    private void BeginHinterlandsGateway()
+    {
+        nextActionUtc = DateTime.UtcNow;
+        SetState(SentinelState.OpenHinterlandsGateway,
+            "Using Idyllshire's normal Prologue Gate aethernet route to the Dravanian Hinterlands");
+    }
+
+    private void TickOpenHinterlandsGateway(DateTime now)
+    {
+        if (current is null)
+            return;
+        if (clientState.TerritoryType == current.TerritoryId)
+        {
+            BeginInstanceCheck();
+            return;
+        }
+        if (!NeedsIdyllshireGateway())
+        {
+            if (!travel.IsBusy)
+                SetState(SentinelState.TeleportToTerritory, "Re-establishing the normal territory route");
+            return;
+        }
+        if (TravelTimedOut(now))
+        {
+            FailCurrent("Could not open the Idyllshire aethernet for the western gate");
+            return;
+        }
+        if (now < nextActionUtc || travel.IsBusy)
+            return;
+        if (condition[ConditionFlag.Mounted])
+        {
+            UseGeneralAction(23);
+            nextActionUtc = now.AddSeconds(2);
+            return;
+        }
+        if (travel.InteractWithNearbyAetheryte(35f))
+        {
+            SetState(SentinelState.SelectHinterlandsGateway,
+                "Selecting Prologue Gate (Western Hinterlands)");
+            return;
+        }
+        nextActionUtc = now.AddSeconds(2);
+    }
+
+    private void TickSelectHinterlandsGateway(DateTime now)
+    {
+        if (current is null)
+            return;
+        if (clientState.TerritoryType == current.TerritoryId)
+        {
+            BeginInstanceCheck();
+            return;
+        }
+        if (TravelTimedOut(now))
+        {
+            FailCurrent("Prologue Gate was not available from the Idyllshire aethernet");
+            return;
+        }
+        // Some client/menu states expose the destination list immediately; others first expose
+        // the ordinary "Select aethernet destination" entry. Support both normal UI paths.
+        if (travel.SelectIdyllshireWesternGate())
+        {
+            SetState(SentinelState.WaitForHinterlands,
+                "Traveling normally through Prologue Gate to the Dravanian Hinterlands");
+            return;
+        }
+        if (travel.SelectAethernetTravelMenu())
+            SetState(SentinelState.SelectHinterlandsDestination,
+                "Choosing Prologue Gate (Western Hinterlands) from the aethernet");
+    }
+
+    private void TickSelectHinterlandsDestination(DateTime now)
+    {
+        if (current is null)
+            return;
+        if (clientState.TerritoryType == current.TerritoryId)
+        {
+            BeginInstanceCheck();
+            return;
+        }
+        if (TravelTimedOut(now))
+        {
+            FailCurrent("Prologue Gate was not available in the Idyllshire aethernet");
+            return;
+        }
+        if (travel.SelectIdyllshireWesternGate())
+            SetState(SentinelState.WaitForHinterlands,
+                "Traveling normally through Prologue Gate to the Dravanian Hinterlands");
+    }
+
+    private void TickWaitForHinterlands(DateTime now)
+    {
+        if (current is null)
+            return;
+        if (!travel.IsBusy && clientState.TerritoryType == current.TerritoryId)
+        {
+            BeginInstanceCheck();
+            return;
+        }
+        if (TravelTimedOut(now))
+            FailCurrent("Arrival in the Dravanian Hinterlands timed out");
     }
 
     private void BeginInstanceCheck()
@@ -1142,12 +1288,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (!EnsureMounted(now))
             return;
-        if (vnav.MoveCloseToSafe(approachPoint.Value, true, config.FlagApproachDistance))
+        if (vnav.MoveCloseToSafe(approachPoint.Value, true, ActiveDistanceProfile.FlagApproachDistance))
         {
             nextActionUtc = now.AddSeconds(3);
             SetState(SentinelState.ApproachAlertCoordinates,
                 $"Flying toward {current.CreatureName}'s reported coordinates; " +
-                $"entity resolution waits until within about {config.FlagApproachDistance:0}y");
+                $"entity resolution waits until within about {ActiveDistanceProfile.FlagApproachDistance:0}y");
             return;
         }
 
@@ -1173,7 +1319,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var distance = HorizontalDistance(PlayerPosition(), approachPoint.Value);
-        if (distance <= config.FlagApproachDistance + 8f)
+        if (distance <= ActiveDistanceProfile.FlagApproachDistance + 8f)
         {
             vnav.StopSafe();
             SetState(SentinelState.LocateMark,
@@ -1193,7 +1339,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!EnsureMounted(now))
             return;
 
-        if (vnav.MoveCloseToSafe(approachPoint.Value, true, config.FlagApproachDistance))
+        if (vnav.MoveCloseToSafe(approachPoint.Value, true, ActiveDistanceProfile.FlagApproachDistance))
             status = $"Coordinate route stopped early; retrying while keeping {current.CreatureName} active";
         else
             status = $"Coordinate route is currently unavailable; holding position and retrying {current.CreatureName}";
@@ -1287,7 +1433,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         SetState(SentinelState.SafeWait,
-            $"Parked {config.WaitingDistance:0}y clear; emergency floor {config.EmergencyDistance:0}y");
+            $"Parked {ActiveDistanceProfile.WaitingDistance:0}y clear; " +
+            $"emergency floor {ActiveDistanceProfile.EmergencyDistance:0}y");
     }
 
     private void TickSafeWait(DateTime now)
@@ -1305,13 +1452,13 @@ public sealed class Plugin : IDalamudPlugin
         status = $"Safe wait: {mark.Name.TextValue} {clearance:0.0}y clear, {hp:0.0}% HP, " +
                  (inCombat ? "in combat" : "not in combat");
 
-        if (clearance < config.EmergencyDistance)
+        if (clearance < ActiveDistanceProfile.EmergencyDistance)
         {
             BeginGroundRetreat(mark);
             return;
         }
 
-        if (!tagAttempted && inCombat && hp <= config.EngageHpPercent)
+        if (!tagAttempted && inCombat && hp <= ActiveDistanceProfile.EngageHpPercent)
         {
             activeTagActionId = combat.ResolveTagActionId(config.AutomaticTagAction, config.TagActionId);
             if (activeTagActionId == 0)
@@ -1343,7 +1490,7 @@ public sealed class Plugin : IDalamudPlugin
             if (now >= nextActionUtc)
             {
                 BeginGroundRetreat(mark);
-                status = $"Attack cutoff active; retreating to {config.WaitingDistance:0}y after the one tag attempt";
+                status = $"Attack cutoff active; retreating to {ActiveDistanceProfile.WaitingDistance:0}y after the one tag attempt";
             }
             else
             {
@@ -1352,7 +1499,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!CombatController.IsMarkInCombat(mark) || CombatController.HpPercent(mark) > config.EngageHpPercent)
+        if (!CombatController.IsMarkInCombat(mark) ||
+            CombatController.HpPercent(mark) > ActiveDistanceProfile.EngageHpPercent)
         {
             vnav.StopSafe();
             BeginGroundRetreat(mark);
@@ -1398,7 +1546,7 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.SafeWait, "Mark lost during retreat; stopped safely");
             return;
         }
-        if (ClearanceFromMark(mark) >= config.WaitingDistance - 2f)
+        if (ClearanceFromMark(mark) >= ActiveDistanceProfile.WaitingDistance - 2f)
         {
             vnav.StopSafe();
             SetState(SentinelState.SafeWait, tagAttempted ? "One tag attempt completed; safe radius restored" : "Safe radius restored");
@@ -1546,7 +1694,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (fly && !EnsureMounted(DateTime.UtcNow))
             return;
-        PrepareParkingCandidates(target, config.WaitingDistance);
+        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance);
         if (!TryStartNextParkingRoute(fly))
         {
             vnav.StopSafe();
@@ -1556,12 +1704,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         SetState(SentinelState.MoveToSafePoint,
-            $"Parking dynamically {config.WaitingDistance:0}y clear of the S rank ({parkingCandidates.Count} alternatives ready)");
+            $"Parking dynamically {ActiveDistanceProfile.WaitingDistance:0}y clear of the S rank " +
+            $"({parkingCandidates.Count} alternatives ready)");
     }
 
     private void BeginGroundRetreat(IBattleChara target)
     {
-        PrepareParkingCandidates(target, config.WaitingDistance);
+        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance);
         if (!TryStartNextParkingRoute(false))
         {
             vnav.StopSafe();
@@ -1569,7 +1718,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         SetState(SentinelState.GroundRetreat,
-            $"Retreating to {config.WaitingDistance:0}y clear ({parkingCandidates.Count} alternatives ready)");
+            $"Retreating to {ActiveDistanceProfile.WaitingDistance:0}y clear " +
+            $"({parkingCandidates.Count} alternatives ready)");
     }
 
     private void PrepareParkingCandidates(IBattleChara target, float clearance)
@@ -1587,7 +1737,7 @@ public sealed class Plugin : IDalamudPlugin
         ReadOnlySpan<float> extraRadii = [0f, 8f];
         var hitboxPadding = target.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f);
         var centerRadius = clearance + hitboxPadding;
-        var minimumCenterDistance = config.EmergencyDistance + hitboxPadding + 3f;
+        var minimumCenterDistance = ActiveDistanceProfile.EmergencyDistance + hitboxPadding + 3f;
         var accepted = new List<Vector3>();
 
         foreach (var extra in extraRadii)
@@ -1923,6 +2073,7 @@ public sealed class Plugin : IDalamudPlugin
         !killedAlerts.ContainsKey(alert.Key) &&
         travel.IsSameDataCenter(alert.World) &&
         HuntCatalog.IsSupportedTerritory(alert.TerritoryId) &&
+        config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)) &&
         HuntCatalog.Resolve(alert.TerritoryId, alert.CreatureName) is not null;
 
     private bool IsWithinFreshnessWindow(DateTime timestamp, DateTime now)
@@ -1957,6 +2108,25 @@ public sealed class Plugin : IDalamudPlugin
             .ToList();
         config.Save();
     }
+
+    private void RemoveDisabledQueuedAlerts()
+    {
+        var survivors = pendingAlerts
+            .Where(alert => config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)))
+            .ToArray();
+        if (survivors.Length == pendingAlerts.Count)
+            return;
+
+        var removed = pendingAlerts.Count - survivors.Length;
+        pendingAlerts.Clear();
+        foreach (var alert in survivors)
+            pendingAlerts.Enqueue(alert);
+        PersistQueue();
+        status = $"Removed {removed} queued hunt(s) from disabled expansions";
+    }
+
+    private HuntDistanceProfile ActiveDistanceProfile => config.GetDistanceProfile(
+        current is null ? SupportedExpansion.Shadowbringers : HuntCatalog.GetExpansion(current.TerritoryId));
 
     private bool TravelTimedOut(DateTime now) =>
         (now - stateSinceUtc).TotalSeconds > config.TravelTimeoutSeconds;
@@ -2024,7 +2194,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!configOpen)
             return;
-        ImGui.SetNextWindowSize(new Vector2(600, 610), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(640, 820), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("S Rank Sentinel###SRankSentinel", ref configOpen))
         {
             ImGui.End();
@@ -2049,7 +2219,7 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Separator();
         ImGui.TextUnformatted("STANDALONE S-RANK ORCHESTRATOR");
-        ImGui.TextWrapped("Faloop, HuntAlerts, and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, ShB/EW/DT SS watch, and post-kill recovery.");
+        ImGui.TextWrapped("Faloop, HuntAlerts, and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, expansion-specific SS watch, and post-kill recovery.");
         ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
@@ -2094,7 +2264,7 @@ public sealed class Plugin : IDalamudPlugin
                 faloopLoginStatus = "Saved Faloop session removed; authenticate again to reconnect.";
             }
         }
-        ImGui.TextWrapped("Only the resulting Faloop session is saved for reconnects; the account password is never stored or logged. ShB/EW/DT are enforced locally regardless of website filters.");
+        ImGui.TextWrapped("Only the resulting Faloop session is saved for reconnects; the account password is never stored or logged. Expansion eligibility is enforced locally before queueing or travel, regardless of website filters.");
 
         var huntAlertsFallback = config.EnableHuntAlertsFallback;
         if (ImGui.Checkbox("HuntAlerts fallback", ref huntAlertsFallback))
@@ -2110,10 +2280,49 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        config.FlagApproachDistance = DrawFloat("Initial coordinate stop", config.FlagApproachDistance, 35f, 90f);
-        config.WaitingDistance = DrawFloat("Safe parking clearance", config.WaitingDistance, 20f, 70f);
-        config.EmergencyDistance = DrawFloat("Emergency clearance", config.EmergencyDistance, 15f, 50f);
-        config.EngageHpPercent = DrawFloat("Engage only at/below HP %", config.EngageHpPercent, 1f, 99f, "%.0f%%");
+        ImGui.TextUnformatted("EXPANSION HUNTING");
+        var expansionChanged = false;
+        var centurio = config.EnableCenturio;
+        if (ImGui.Checkbox("Centurio (ARR / HW / SB)", ref centurio))
+        {
+            config.EnableCenturio = centurio;
+            expansionChanged = true;
+        }
+        var shadowbringers = config.EnableShadowbringers;
+        if (ImGui.Checkbox("Shadowbringers", ref shadowbringers))
+        {
+            config.EnableShadowbringers = shadowbringers;
+            expansionChanged = true;
+        }
+        var endwalker = config.EnableEndwalker;
+        if (ImGui.Checkbox("Endwalker", ref endwalker))
+        {
+            config.EnableEndwalker = endwalker;
+            expansionChanged = true;
+        }
+        var dawntrail = config.EnableDawntrail;
+        if (ImGui.Checkbox("Dawntrail", ref dawntrail))
+        {
+            config.EnableDawntrail = dawntrail;
+            expansionChanged = true;
+        }
+        var evercold = false;
+        ImGui.BeginDisabled();
+        ImGui.Checkbox("Evercold", ref evercold);
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.TextUnformatted("Future placeholder — hunt data not available");
+        if (expansionChanged)
+        {
+            RemoveDisabledQueuedAlerts();
+            config.Save();
+        }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("DISTANCE PROFILES");
+        DrawDistanceProfile("Legacy / Shadowbringers profile", "legacy", config.LegacyShadowbringersProfile);
+        DrawDistanceProfile("Endwalker profile", "endwalker", config.EndwalkerProfile);
+        DrawDistanceProfile("Dawntrail profile", "dawntrail", config.DawntrailProfile);
         ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
                           $"{config.SsChainTimeoutSeconds}s after a precursor is detected.");
         var freshnessMinutes = config.AlertFreshnessMinutes;
@@ -2153,6 +2362,20 @@ public sealed class Plugin : IDalamudPlugin
         return value;
     }
 
+    private static void DrawDistanceProfile(string heading, string id, HuntDistanceProfile profile)
+    {
+        ImGui.Spacing();
+        ImGui.TextUnformatted(heading);
+        profile.FlagApproachDistance = DrawFloat($"Initial coordinate stop##{id}",
+            profile.FlagApproachDistance, 35f, 90f);
+        profile.WaitingDistance = DrawFloat($"Safe parking clearance##{id}",
+            profile.WaitingDistance, 20f, 70f);
+        profile.EmergencyDistance = DrawFloat($"Emergency clearance##{id}",
+            profile.EmergencyDistance, 15f, 50f);
+        profile.EngageHpPercent = DrawFloat($"Engage only at/below HP %##{id}",
+            profile.EngageHpPercent, 1f, 99f, "%.0f%%");
+    }
+
     private enum SentinelState
     {
         Idle,
@@ -2163,6 +2386,10 @@ public sealed class Plugin : IDalamudPlugin
         WaitForWorld,
         TeleportToTerritory,
         WaitForTerritory,
+        OpenHinterlandsGateway,
+        SelectHinterlandsGateway,
+        SelectHinterlandsDestination,
+        WaitForHinterlands,
         ChangeInstance,
         SelectInstance,
         WaitForInstance,

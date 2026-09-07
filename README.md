@@ -5,13 +5,13 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 ## Workflow
 
 1. Connect directly to Faloop's authenticated Socket.IO feed and consume spawn/death events. Faloop credentials are entered in Sentinel's window; the password is never saved or logged. Only the resulting session ID is saved for automatic reconnect.
-2. Apply Sentinel's own expansion gate before any reset, World Visit, or territory teleport. Only Shadowbringers, Endwalker, and Dawntrail S/SS alerts are eligible, even when HuntAlerts or Sonar also announces ARR, Heavensward, or Stormblood marks.
+2. Apply Sentinel's configurable expansion gate before queueing, reset, World Visit, or territory teleport. Centurio (ARR/HW/SB), Shadowbringers, Endwalker, and Dawntrail can be enabled independently; disabled-expansion alerts are ignored locally regardless of the source's website/UI filters. Evercold is reserved as a disabled future placeholder until hunt data exists.
 3. Translate Faloop zone/POI IDs through a reviewed coordinate snapshot from the current web client, convert the stored map coordinates to a local game-world destination, and retain it across World Visit, teleport, zoning, and instance transitions. This feeds vnavmesh directly without creating or reading the game's global map flag and is never a direct player-position write.
 4. Optionally accept HuntAlerts IPC and Sonar chat/map-link alerts as fallback sources. Either fallback can be disabled independently after the direct feed is proven on the player's data center.
 5. Reject cross-data-center alerts, suppress duplicate feed events, deduplicate same-data-center alerts by world + territory + instance + mark, and persist the ordered queue without interrupting the active hunt. Matching Faloop death events immediately invalidate queued entries; historical deaths older than the freshness window cannot invalidate a newer spawn.
 6. Reset through Ul'dah before every hunt.
 7. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
-8. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu.
+8. Choose the hunt territory's preferred attuned aetheryte deterministically, use the game's normal teleport system, and select the requested zone instance. If already far from that aetheryte, teleport back to it before opening the instance menu. The Dravanian Hinterlands uses its normal Idyllshire → Prologue Gate (Western Hinterlands) aethernet route because that field zone has no main teleport crystal.
 9. After arriving in the correct territory and instance, first wait for zoning and the local player state to settle, then wait indefinitely and motionless at the aetheryte until vnavmesh reports the mesh fully ready. Mesh generation/download is a blocking state, never a hunt failure; newer alerts remain queued and cannot replace the active hunt.
 10. Use the stored Faloop/HuntAlerts/Sonar coordinates directly as the initial vnavmesh flight destination. Direct Faloop operation does not depend on HuntAlerts, Sonar, or either fallback creating a map flag. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
 11. If the mark is not visible near the alert coordinates, remain there and rescan in repeated bounded windows. A missing entity, unavailable coordinate projection, interrupted path, or failed route never means the hunt is dead and never clears it.
@@ -31,6 +31,9 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - Safe parking clearance: **45y** plus player/mark hitboxes
 - Emergency clearance: **38y** plus player/mark hitboxes
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
+- Centurio and Shadowbringers share a **Legacy / Shadowbringers** distance profile; Endwalker and Dawntrail have independent profiles
+- Each usable profile stores its own initial stop, safe clearance, emergency clearance, and HP gate; existing installs migrate their exact global values into every profile
+- Safe-clearance sliders allow **20–70y**, emergency-clearance sliders allow **15–50y**, and HP gates are displayed as percentages
 - Ranged tag action: selected automatically from the current combat job and adjusted for learned upgrades
 - Exactly one client action attempt per mark, whether the client accepts or rejects it; no retry loop and no combat rotation
 - Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking; a manual action-ID override remains available

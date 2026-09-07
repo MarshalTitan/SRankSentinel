@@ -110,6 +110,16 @@ internal sealed class NativeTravel(
             text.Contains("Travel to Instanced Area", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("Change instance", StringComparison.OrdinalIgnoreCase));
 
+    public unsafe bool SelectAethernetTravelMenu() =>
+        TrySelectStringEntry(text =>
+            text.Contains("aethernet destination", StringComparison.OrdinalIgnoreCase) ||
+            text.Equals("Aethernet", StringComparison.OrdinalIgnoreCase));
+
+    public unsafe bool SelectIdyllshireWesternGate() =>
+        TrySelectStringEntry(text =>
+            text.Contains("Prologue Gate", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Western Hinterlands", StringComparison.OrdinalIgnoreCase));
+
     public unsafe bool SelectInstance(int instance)
     {
         if (instance is < 1 or > 9)
