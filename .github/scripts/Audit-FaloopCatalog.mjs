@@ -2,8 +2,10 @@ import { readFile } from "node:fs/promises";
 
 const catalogPath = process.argv[2] ?? "FaloopCatalog.cs";
 const huntCatalogPath = process.argv[3] ?? "HuntCatalog.cs";
+const clientPath = process.argv[4] ?? "FaloopClient.cs";
 const catalog = await readFile(catalogPath, "utf8");
 const huntCatalog = await readFile(huntCatalogPath, "utf8");
+const client = await readFile(clientPath, "utf8");
 
 const home = await fetch("https://faloop.app/");
 if (!home.ok) throw new Error(`Faloop page failed: ${home.status}`);
@@ -52,6 +54,20 @@ for (const match of catalog.matchAll(/\["([^"]+)"\]\s*=\s*Zone\((\d+),\s*"([^"]*
 }
 
 let failures = 0;
+for (const required of [
+  '"mobworldspawn"',
+  'TryEnrichLocationAsync',
+  '/api/app/datacenter/',
+  '"windows"',
+  '"sightings"',
+  '"zonePoiId"',
+  'different spawn cycle',
+]) {
+  if (!client.includes(required)) {
+    console.error(`Faloop direct-feed enrichment audit: ${clientPath} is missing ${required}`);
+    failures++;
+  }
+}
 let expectedPoiCount = 0;
 for (const [normalizedSlug, actual] of actualZones) {
   const zoneMarker = new RegExp(`([a-z0-9_]+):\\{id:"\\1"`, "g");
