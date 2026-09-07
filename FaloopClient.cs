@@ -15,9 +15,13 @@ internal enum FaloopEventAction
 
 internal sealed record FaloopFeedEvent(
     FaloopEventAction Action,
+    string EventType,
+    string EventSubType,
+    string EventId,
     string MobSlug,
     string WorldSlug,
     string? ZoneSlug,
+    string RawMapId,
     int PoiId,
     string RawPoiKey,
     float DirectMapX,
@@ -26,6 +30,18 @@ internal sealed record FaloopFeedEvent(
     string RawCoordinateData,
     int Instance,
     DateTime OccurredAtUtc);
+
+internal sealed record FaloopLocationEnrichmentResult(
+    bool Success,
+    FaloopFeedEvent Event,
+    string Detail)
+{
+    public static FaloopLocationEnrichmentResult Resolved(FaloopFeedEvent feedEvent, string detail) =>
+        new(true, feedEvent, detail);
+
+    public static FaloopLocationEnrichmentResult Pending(FaloopFeedEvent feedEvent, string detail) =>
+        new(false, feedEvent, detail);
+}
 
 internal sealed record FaloopAuthenticationResult(bool Success, string SessionId, string Error)
 {
@@ -52,6 +68,7 @@ internal sealed class FaloopClient : IDisposable
     private bool connected;
     private DateTime lastMessageUtc = DateTime.MinValue;
     private DateTime lastEventUtc = DateTime.MinValue;
+    private string activeSessionId = string.Empty;
 
     public FaloopClient(IPluginLog pluginLog) => log = pluginLog;
 
@@ -159,9 +176,77 @@ internal sealed class FaloopClient : IDisposable
             runCancellation = cancellation = new CancellationTokenSource();
             connected = false;
             status = "Connecting to Faloop";
+            activeSessionId = sessionId.Trim();
         }
 
         _ = Task.Run(() => RunReconnectLoopAsync(sessionId.Trim(), cancellation.Token));
+    }
+
+    /// <summary>
+    /// Resolves location-less lightweight spawn notifications against Faloop's authenticated
+    /// datacenter snapshot. The snapshot pairs the current mob/world window with its latest
+    /// sighting, which carries the authoritative zone POI even when mobworldspawn does not.
+    /// </summary>
+    public async Task<FaloopLocationEnrichmentResult> TryEnrichLocationAsync(
+        FaloopFeedEvent feedEvent,
+        string dataCenterSlug,
+        CancellationToken cancellationToken = default)
+    {
+        string sessionId;
+        lock (sync) sessionId = activeSessionId;
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return FaloopLocationEnrichmentResult.Pending(feedEvent, "no authenticated session is available");
+        if (string.IsNullOrWhiteSpace(dataCenterSlug))
+            return FaloopLocationEnrichmentResult.Pending(feedEvent, "the target datacenter could not be resolved");
+
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://faloop.app");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://faloop.app/");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "SRankSentinel/0.7");
+
+            using var refresh = await client.PostAsJsonAsync(
+                "https://faloop.app/api/auth/user/refresh",
+                new Dictionary<string, object?> { ["sessionId"] = sessionId },
+                cancellationToken).ConfigureAwait(false);
+            if (!refresh.IsSuccessStatusCode)
+                return FaloopLocationEnrichmentResult.Pending(feedEvent,
+                    $"session refresh returned HTTP {(int)refresh.StatusCode}");
+            using var refreshJson = JsonDocument.Parse(
+                await refresh.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            if (!TryReadAuthData(refreshJson.RootElement, out _, out var token))
+                return FaloopLocationEnrichmentResult.Pending(feedEvent, "session refresh returned no access token");
+
+            var slug = new string(dataCenterSlug.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+            using var request = new HttpRequestMessage(HttpMethod.Get,
+                $"https://faloop.app/api/app/datacenter/{Uri.EscapeDataString(slug)}");
+            request.Headers.TryAddWithoutValidation("Authorization", token);
+            request.Headers.TryAddWithoutValidation("Origin", "https://faloop.app");
+            request.Headers.TryAddWithoutValidation("Referer", "https://faloop.app/");
+            request.Headers.TryAddWithoutValidation("User-Agent", "SRankSentinel/0.7");
+            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return FaloopLocationEnrichmentResult.Pending(feedEvent,
+                    $"datacenter state returned HTTP {(int)response.StatusCode}");
+
+            using var stateJson = JsonDocument.Parse(
+                await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            return TryResolveFromDatacenterState(stateJson.RootElement, feedEvent, out var enriched, out var detail)
+                ? FaloopLocationEnrichmentResult.Resolved(enriched, detail)
+                : FaloopLocationEnrichmentResult.Pending(feedEvent, detail);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return FaloopLocationEnrichmentResult.Pending(feedEvent, "datacenter state request timed out");
+        }
+        catch (Exception ex)
+        {
+            log.Warning("Faloop location enrichment failed for {Mob}/{World}: {Error}",
+                feedEvent.MobSlug, feedEvent.WorldSlug, ex.Message);
+            return FaloopLocationEnrichmentResult.Pending(feedEvent, "datacenter state request failed");
+        }
     }
 
     public void Stop(string reason = "Disabled")
@@ -172,6 +257,7 @@ internal sealed class FaloopClient : IDisposable
             activeSocket?.Abort();
             connected = false;
             status = reason;
+            activeSessionId = string.Empty;
         }
     }
 
@@ -411,6 +497,11 @@ internal sealed class FaloopClient : IDisposable
         if (action is null)
             return false;
 
+        var eventSubType = FirstString(root, "subType", "subtype");
+        var eventId = FirstPrimitiveString(root, "spawnId", "reportId", "eventId", "id");
+        if (string.IsNullOrWhiteSpace(eventId))
+            eventId = FirstPrimitiveString(eventData, "spawnId", "reportId", "eventId");
+
         var mob = string.Empty;
         var world = string.Empty;
         if (eventData.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Object)
@@ -434,6 +525,9 @@ internal sealed class FaloopClient : IDisposable
         if (string.IsNullOrWhiteSpace(zone) &&
             TryFindNamedProperty(eventData, ["zoneId2", "zoneId"], out var nestedZone, out _))
             zone = ElementText(nestedZone);
+        var rawMapId = TryFindNamedProperty(eventData, ["mapId", "mapId2"], out var mapId, out var mapPath)
+            ? $"{mapPath}={ElementText(mapId)}"
+            : "(missing)";
 
         // Faloop currently emits both zonePoiIds:[id] and zonePoiId:id depending on the
         // report/recent-event path. Search the complete event data so a wrapper such as
@@ -476,12 +570,128 @@ internal sealed class FaloopClient : IDisposable
         if (DateTimeOffset.TryParse(timeText, out var timestamp))
             occurred = timestamp.UtcDateTime;
 
-        feedEvent = new FaloopFeedEvent(action.Value, mob.Trim(), world.Trim(),
-            string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), poiId, rawPoiKey,
+        feedEvent = new FaloopFeedEvent(action.Value, type, eventSubType, eventId,
+            mob.Trim(), world.Trim(), string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), rawMapId,
+            poiId, rawPoiKey,
             directMapX, directMapY, rawLocation,
             coordinateEvidence.Count == 0 ? "(none)" : string.Join("; ", coordinateEvidence),
             Math.Max(0, instance), occurred);
         return true;
+    }
+
+    private static bool TryResolveFromDatacenterState(
+        JsonElement root,
+        FaloopFeedEvent feedEvent,
+        out FaloopFeedEvent enriched,
+        out string detail)
+    {
+        enriched = feedEvent;
+        detail = "no matching active Faloop window/sighting is available yet";
+        if (!TryGetPropertyIgnoreCase(root, "data", out var dataElement) ||
+            !TryGetPropertyIgnoreCase(dataElement, "status", out var statusElement) ||
+            !TryGetPropertyIgnoreCase(statusElement, "windows", out var windowsElement) ||
+            windowsElement.ValueKind != JsonValueKind.Array ||
+            !TryGetPropertyIgnoreCase(statusElement, "sightings", out var sightingsElement) ||
+            sightingsElement.ValueKind != JsonValueKind.Array)
+        {
+            detail = "Faloop datacenter state did not contain windows and sightings arrays";
+            return false;
+        }
+
+        JsonElement? matchingWindow = null;
+        DateTime matchingStartedAt = DateTime.MinValue;
+        foreach (var window in windowsElement.EnumerateArray())
+        {
+            if (window.ValueKind != JsonValueKind.Object ||
+                !SlugEquals(FirstString(window, "mobId2", "mobId"), feedEvent.MobSlug) ||
+                !SlugEquals(FirstString(window, "worldId2", "worldId"), feedEvent.WorldSlug) ||
+                !InstanceMatches(window, feedEvent.Instance))
+                continue;
+            var startedAt = ReadTimestamp(window, "startedAt", "spawnedAt", "timestamp");
+            if (startedAt == DateTime.MinValue || startedAt > matchingStartedAt)
+            {
+                matchingWindow = window;
+                matchingStartedAt = startedAt;
+            }
+        }
+        if (matchingWindow is null)
+            return false;
+
+        // Do not attach a sighting from an older spawn cycle to a newer partial notification.
+        // A current window normally starts within seconds of its lightweight websocket event.
+        var anchor = matchingStartedAt == DateTime.MinValue ? feedEvent.OccurredAtUtc : matchingStartedAt;
+        if (Math.Abs((anchor - feedEvent.OccurredAtUtc).TotalMinutes) > 15)
+        {
+            detail = "matching Faloop window belongs to a different spawn cycle";
+            return false;
+        }
+
+        JsonElement? bestSighting = null;
+        DateTime bestSightedAt = DateTime.MinValue;
+        var bestIsPreviousLocation = false;
+        foreach (var sighting in sightingsElement.EnumerateArray())
+        {
+            if (sighting.ValueKind != JsonValueKind.Object ||
+                !SlugEquals(FirstString(sighting, "mobId2", "mobId"), feedEvent.MobSlug) ||
+                !SlugEquals(FirstString(sighting, "worldId2", "worldId"), feedEvent.WorldSlug) ||
+                !InstanceMatches(sighting, feedEvent.Instance) ||
+                !TryFindPoi(sighting, out var candidatePoi, out _) || candidatePoi <= 0)
+                continue;
+            var sightedAt = ReadTimestamp(sighting, "sightedAt", "timestamp", "createdAt");
+            if (sightedAt != DateTime.MinValue && Math.Abs((sightedAt - anchor).TotalMinutes) > 5)
+                continue;
+            var isPreviousLocation = TryGetPropertyIgnoreCase(sighting, "prevLocation", out var previous) &&
+                                     previous.ValueKind == JsonValueKind.True;
+            if (bestSighting is null || isPreviousLocation && !bestIsPreviousLocation ||
+                isPreviousLocation == bestIsPreviousLocation && sightedAt > bestSightedAt)
+            {
+                bestSighting = sighting;
+                bestSightedAt = sightedAt;
+                bestIsPreviousLocation = isPreviousLocation;
+            }
+        }
+        if (bestSighting is null || !TryFindPoi(bestSighting.Value, out var poiId, out var rawPoi))
+        {
+            detail = "matching active Faloop window has no usable location sighting yet";
+            return false;
+        }
+
+        var zone = FirstString(bestSighting.Value, "zoneId2", "zoneId");
+        if (string.IsNullOrWhiteSpace(zone))
+            zone = feedEvent.ZoneSlug ?? string.Empty;
+        enriched = feedEvent with
+        {
+            ZoneSlug = string.IsNullOrWhiteSpace(zone) ? feedEvent.ZoneSlug : zone,
+            PoiId = poiId,
+            RawPoiKey = $"datacenter.status.sightings:{rawPoi}",
+            RawCoordinateData = feedEvent.RawCoordinateData == "(none)"
+                ? $"state POI {poiId}"
+                : $"{feedEvent.RawCoordinateData}; state POI {poiId}",
+        };
+        detail = $"matched active window and sighting POI {poiId}";
+        return true;
+    }
+
+    private static bool InstanceMatches(JsonElement element, int requestedInstance)
+    {
+        if (requestedInstance <= 1)
+            return true;
+        if (!TryFindNamedProperty(element, ["zoneInstance", "instance"], out var instanceElement, out _) ||
+            !TryInt(instanceElement, out var candidateInstance) || candidateInstance <= 0)
+            return true;
+        return candidateInstance == requestedInstance;
+    }
+
+    private static bool SlugEquals(string left, string right) =>
+        NormalizeSlug(left).Equals(NormalizeSlug(right), StringComparison.Ordinal);
+
+    private static string NormalizeSlug(string value) =>
+        new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
+    private static DateTime ReadTimestamp(JsonElement element, params string[] names)
+    {
+        var text = FirstString(element, names);
+        return DateTimeOffset.TryParse(text, out var value) ? value.UtcDateTime : DateTime.MinValue;
     }
 
     private static bool TryFindPoi(JsonElement root, out int poiId, out string rawPoiKey)
@@ -623,6 +833,11 @@ internal sealed class FaloopClient : IDisposable
                  TryGetPropertyIgnoreCase(element, "y", out var yElement) &&
                  TryFloat(xElement, out var objectX) && TryFloat(yElement, out var objectY))
             location = $"{objectX.ToString(CultureInfo.InvariantCulture)},{objectY.ToString(CultureInfo.InvariantCulture)}";
+        else if (element.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+        {
+            var raw = element.GetRawText();
+            location = raw.Length <= 512 ? raw : raw[..512] + "...";
+        }
         return !string.IsNullOrWhiteSpace(location);
     }
 
@@ -717,6 +932,17 @@ internal sealed class FaloopClient : IDisposable
         foreach (var name in names)
             if (TryString(element, name, out var value) && !string.IsNullOrWhiteSpace(value))
                 return value;
+        return string.Empty;
+    }
+
+    private static string FirstPrimitiveString(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (TryGetPropertyIgnoreCase(element, name, out var value) &&
+                value.ValueKind is JsonValueKind.String or JsonValueKind.Number)
+                return ElementText(value);
+        }
         return string.Empty;
     }
 
