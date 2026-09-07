@@ -25,6 +25,12 @@ public sealed class Plugin : IDalamudPlugin
     private const double ReturnActionRetrySeconds = 10;
     private const double ReturnTransitionTimeoutSeconds = 45;
     private const double ReturnRecoveryWatchdogSeconds = 120;
+    private const float CrowdSearchRadius = 90f;
+    private const float CrowdClusterLinkDistance = 14f;
+    private const float CrowdRevalidationRadius = 18f;
+    private const float CrowdMovementTolerance = 10f;
+    private const int CrowdMinimumPlayers = 3;
+    private const double CrowdPathQueryTimeoutSeconds = 20;
     private readonly IDalamudPluginInterface pi;
     private readonly ICommandManager commands;
     private readonly IClientState clientState;
@@ -45,7 +51,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
     private readonly Dictionary<string, HuntAlertSnapshot> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
-    private readonly Queue<Vector3> parkingCandidates = new();
+    private readonly Queue<ParkingCandidate> parkingCandidates = new();
 
     private bool configOpen;
     private HuntAlertSnapshot? current;
@@ -53,6 +59,11 @@ public sealed class Plugin : IDalamudPlugin
     private Vector3? alertPoint;
     private Vector3? approachPoint;
     private Vector3? safePoint;
+    private ParkingCandidate? selectedParkingCandidate;
+    private Task<List<Vector3>>? parkingPathTask;
+    private DateTime parkingPathStartedUtc = DateTime.MinValue;
+    private List<Vector3>? selectedParkingPath;
+    private bool crowdFallbackAnnounced;
     private uint territoryAetheryteId;
     private SentinelState state = SentinelState.Idle;
     private DateTime stateSinceUtc = DateTime.UtcNow;
@@ -771,6 +782,11 @@ public sealed class Plugin : IDalamudPlugin
         alertPoint = null;
         approachPoint = null;
         safePoint = null;
+        selectedParkingCandidate = null;
+        parkingPathTask = null;
+        parkingPathStartedUtc = DateTime.MinValue;
+        selectedParkingPath = null;
+        crowdFallbackAnnounced = false;
         parkingCandidates.Clear();
         nextActionUtc = DateTime.MinValue;
 
@@ -1795,6 +1811,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             vnav.StopSafe();
             safePoint = null;
+            selectedParkingCandidate = null;
+            parkingPathTask = null;
+            selectedParkingPath = null;
             parkingCandidates.Clear();
             nextActionUtc = now.AddSeconds(1);
             SetState(SentinelState.LocateMark,
@@ -1802,15 +1821,25 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         MarkWasIdentified(mark);
+        if (parkingPathTask is not null)
+        {
+            PollCrowdParkingPath(mark, now);
+            return;
+        }
         if (safePoint is not null && HorizontalDistance(PlayerPosition(), safePoint.Value) <= 5f)
         {
             vnav.StopSafe();
+            if (!RevalidateParkingForLanding(mark, out var reason))
+            {
+                RestartSafeParkingAfterRevalidation(mark, reason);
+                return;
+            }
             SetState(SentinelState.Landing, "At the safe parking point; landing normally");
             return;
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
         {
-            if (!TryStartNextParkingRoute(true))
+            if (!TryStartNextParkingRoute(true, mark))
             {
                 vnav.StopSafe();
                 nextActionUtc = now.AddSeconds(3);
@@ -1827,6 +1856,24 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (now < nextActionUtc)
             return;
+        mark = FindMark();
+        if (mark is null)
+        {
+            vnav.StopSafe();
+            safePoint = null;
+            selectedParkingCandidate = null;
+            selectedParkingPath = null;
+            nextActionUtc = now.AddSeconds(1);
+            SetState(SentinelState.LocateMark,
+                "Mark temporarily left object range before landing; remaining mounted and rescanning");
+            return;
+        }
+        MarkWasIdentified(mark);
+        if (!RevalidateParkingForLanding(mark, out var reason))
+        {
+            RestartSafeParkingAfterRevalidation(mark, reason);
+            return;
+        }
         if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
         {
             UseGeneralAction(23);
@@ -1955,7 +2002,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
         {
-            if (!TryStartNextParkingRoute(false))
+            if (!TryStartNextParkingRoute(false, mark))
             {
                 vnav.StopSafe();
                 SetState(SentinelState.SafeWait, "No ground-retreat route was reachable; holding position");
@@ -2095,8 +2142,8 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (fly && !EnsureMounted(DateTime.UtcNow))
             return;
-        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance);
-        if (!TryStartNextParkingRoute(fly))
+        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance, preferCrowd: true);
+        if (!TryStartNextParkingRoute(fly, target))
         {
             vnav.StopSafe();
             nextActionUtc = DateTime.UtcNow.AddSeconds(3);
@@ -2111,8 +2158,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginGroundRetreat(IBattleChara target)
     {
-        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance);
-        if (!TryStartNextParkingRoute(false))
+        PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance, preferCrowd: false);
+        if (!TryStartNextParkingRoute(false, target))
         {
             vnav.StopSafe();
             SetState(SentinelState.SafeWait, "No sampled ground-retreat route was reachable; holding position");
@@ -2123,10 +2170,15 @@ public sealed class Plugin : IDalamudPlugin
             $"({parkingCandidates.Count} alternatives ready)");
     }
 
-    private void PrepareParkingCandidates(IBattleChara target, float clearance)
+    private void PrepareParkingCandidates(IBattleChara target, float clearance, bool preferCrowd)
     {
         parkingCandidates.Clear();
         safePoint = null;
+        selectedParkingCandidate = null;
+        parkingPathTask = null;
+        parkingPathStartedUtc = DateTime.MinValue;
+        selectedParkingPath = null;
+        crowdFallbackAnnounced = !preferCrowd;
         var player = PlayerPosition();
         var away = player - target.Position;
         away.Y = 0;
@@ -2140,6 +2192,59 @@ public sealed class Plugin : IDalamudPlugin
         var centerRadius = clearance + hitboxPadding;
         var minimumCenterDistance = ActiveDistanceProfile.EmergencyDistance + hitboxPadding + 3f;
         var accepted = new List<Vector3>();
+
+        if (preferCrowd)
+        {
+            var clusters = DetectPlayerClusters(target);
+            log.Information("Detected {ClusterCount} player clusters near {Mark}", clusters.Count, target.Name.TextValue);
+
+            var crowdCandidates = new List<(ParkingCandidate Candidate, float Score)>();
+            foreach (var cluster in clusters)
+            {
+                var towardCrowd = cluster.Center - target.Position;
+                towardCrowd.Y = 0;
+                if (towardCrowd.LengthSquared() < 0.01f)
+                    continue;
+                towardCrowd = Vector3.Normalize(towardCrowd);
+
+                ReadOnlySpan<float> offsets = [0f, 12f, -12f];
+                foreach (var offset in offsets)
+                {
+                    var radians = offset * MathF.PI / 180f;
+                    var direction = new Vector3(
+                        towardCrowd.X * MathF.Cos(radians) - towardCrowd.Z * MathF.Sin(radians),
+                        0f,
+                        towardCrowd.X * MathF.Sin(radians) + towardCrowd.Z * MathF.Cos(radians));
+                    var candidate = target.Position + direction * centerRadius;
+                    candidate.Y = 1024f;
+                    var projected = vnav.PointOnFloorSafe(candidate, 12f);
+                    if (projected is null ||
+                        ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
+                        crowdCandidates.Any(existing => HorizontalDistance(existing.Candidate.Position, projected.Value) < 2f))
+                        continue;
+
+                    var score = cluster.Population * 1000f -
+                                cluster.Tightness * 25f -
+                                HorizontalDistance(projected.Value, cluster.Center) * 3f -
+                                HorizontalDistance(player, projected.Value) * 0.25f -
+                                MathF.Abs(offset);
+                    crowdCandidates.Add((
+                        new ParkingCandidate(projected.Value, true, cluster.Population, cluster.Center), score));
+                }
+            }
+
+            foreach (var entry in crowdCandidates.OrderByDescending(entry => entry.Score))
+            {
+                accepted.Add(entry.Candidate.Position);
+                parkingCandidates.Enqueue(entry.Candidate);
+            }
+
+            if (crowdCandidates.Count == 0)
+            {
+                crowdFallbackAnnounced = true;
+                log.Information("No safe crowd candidate; using standard parking");
+            }
+        }
 
         foreach (var extra in extraRadii)
         {
@@ -2160,23 +2265,313 @@ public sealed class Plugin : IDalamudPlugin
                 if (accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
                     continue;
                 accepted.Add(projected.Value);
-                parkingCandidates.Enqueue(projected.Value);
+                parkingCandidates.Enqueue(new ParkingCandidate(projected.Value, false, 0, Vector3.Zero));
             }
         }
     }
 
-    private bool TryStartNextParkingRoute(bool fly)
+    private bool TryStartNextParkingRoute(bool fly, IBattleChara target)
     {
         while (parkingCandidates.Count > 0)
         {
             var candidate = parkingCandidates.Dequeue();
-            if (!vnav.MoveToSafe(candidate, fly))
+            if (!candidate.IsCrowd)
+            {
+                if (!crowdFallbackAnnounced)
+                {
+                    crowdFallbackAnnounced = true;
+                    log.Information("No safe crowd candidate; using standard parking");
+                }
+                if (!vnav.MoveToSafe(candidate.Position, fly))
+                    continue;
+                selectedParkingCandidate = candidate;
+                safePoint = candidate.Position;
+                selectedParkingPath = null;
+                return true;
+            }
+
+            var protectedRadius = ProtectedCenterRadius(target);
+            if (HorizontalSegmentDistance(PlayerPosition(), candidate.Position, target.Position) < protectedRadius)
+            {
+                log.Information("Rejected crowd candidate: route crosses mark safety radius");
+                status = "Rejected crowd candidate: route crosses mark safety radius";
                 continue;
-            safePoint = candidate;
+            }
+
+            var pathTask = vnav.PathfindAvoidSafe(
+                PlayerPosition(), candidate.Position, fly, target.Position, protectedRadius);
+            if (pathTask is null)
+            {
+                log.Information("Rejected crowd candidate: vnavmesh could not start a protected path query");
+                continue;
+            }
+
+            selectedParkingCandidate = candidate;
+            parkingPathTask = pathTask;
+            parkingPathStartedUtc = DateTime.UtcNow;
+            safePoint = null;
+            selectedParkingPath = null;
+            status = $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd";
             return true;
         }
         safePoint = null;
+        selectedParkingCandidate = null;
+        parkingPathTask = null;
+        selectedParkingPath = null;
         return false;
+    }
+
+    private void PollCrowdParkingPath(IBattleChara target, DateTime now)
+    {
+        var task = parkingPathTask;
+        var candidate = selectedParkingCandidate;
+        if (task is null || candidate is null || !candidate.IsCrowd)
+            return;
+
+        if (!task.IsCompleted)
+        {
+            if ((now - parkingPathStartedUtc).TotalSeconds <= CrowdPathQueryTimeoutSeconds)
+            {
+                status = $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd";
+                return;
+            }
+
+            parkingPathTask = null;
+            selectedParkingCandidate = null;
+            log.Information("Rejected crowd candidate: protected vnavmesh path query timed out");
+            ContinueParkingAfterCrowdRejection(target, now);
+            return;
+        }
+
+        List<Vector3>? path = null;
+        try
+        {
+            if (task.IsCompletedSuccessfully)
+                path = task.Result;
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Protected crowd parking path query failed");
+        }
+
+        parkingPathTask = null;
+        if (path is null || path.Count == 0)
+        {
+            selectedParkingCandidate = null;
+            log.Information("Rejected crowd candidate: vnavmesh found no protected route");
+            ContinueParkingAfterCrowdRejection(target, now);
+            return;
+        }
+
+        var protectedRadius = ProtectedCenterRadius(target);
+        if (HorizontalSegmentDistance(PlayerPosition(), candidate.Position, target.Position) < protectedRadius ||
+            !PathStaysOutsideProtectedRadius(PlayerPosition(), path, target.Position, protectedRadius))
+        {
+            selectedParkingCandidate = null;
+            log.Information("Rejected crowd candidate: route crosses mark safety radius");
+            status = "Rejected crowd candidate: route crosses mark safety radius";
+            ContinueParkingAfterCrowdRejection(target, now);
+            return;
+        }
+
+        if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
+            !vnav.MovePathSafe(path, true))
+        {
+            selectedParkingCandidate = null;
+            log.Information("Rejected crowd candidate: destination or protected route became unavailable");
+            ContinueParkingAfterCrowdRejection(target, now);
+            return;
+        }
+
+        safePoint = candidate.Position;
+        selectedParkingPath = path;
+        parkingPathStartedUtc = DateTime.MinValue;
+        var clearance = ClearanceAtPoint(candidate.Position, target);
+        status = $"Selected crowd parking candidate: {candidate.CrowdPopulation} players, {clearance:0}y from mark";
+        log.Information("Selected crowd parking candidate: {Players} players, {Clearance:0}y from mark",
+            candidate.CrowdPopulation, clearance);
+    }
+
+    private void ContinueParkingAfterCrowdRejection(IBattleChara target, DateTime now)
+    {
+        safePoint = null;
+        selectedParkingPath = null;
+        parkingPathStartedUtc = DateTime.MinValue;
+        if (TryStartNextParkingRoute(true, target))
+        {
+            stateSinceUtc = now;
+            return;
+        }
+
+        vnav.StopSafe();
+        nextActionUtc = now.AddSeconds(3);
+        SetState(SentinelState.LocateMark,
+            "No crowd or standard parking route is currently reachable; keeping the hunt active and retrying");
+    }
+
+    private bool RevalidateParkingForLanding(IBattleChara target, out string reason)
+    {
+        var candidate = selectedParkingCandidate;
+        if (candidate is null || safePoint is null)
+        {
+            reason = "Parking destination was lost before landing; resampling safely";
+            return false;
+        }
+
+        if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
+            ClearanceFromMark(target) < ActiveDistanceProfile.EmergencyDistance)
+        {
+            reason = "Mark movement invalidated the configured parking clearance; resampling safely";
+            return false;
+        }
+
+        if (!candidate.IsCrowd)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        var protectedRadius = ProtectedCenterRadius(target);
+        if (HorizontalSegmentDistance(PlayerPosition(), candidate.Position, target.Position) < protectedRadius ||
+            !FinalApproachStaysOutsideProtectedRadius(selectedParkingPath, target.Position, protectedRadius))
+        {
+            reason = "Crowd parking final approach now crosses the mark safety radius; resampling safely";
+            return false;
+        }
+
+        var liveCluster = DetectPlayerClusters(target)
+            .OrderBy(cluster => HorizontalDistance(cluster.Center, candidate.CrowdCenter))
+            .FirstOrDefault();
+        if (liveCluster is null ||
+            HorizontalDistance(liveCluster.Center, candidate.CrowdCenter) > CrowdMovementTolerance ||
+            HorizontalDistance(liveCluster.Center, candidate.Position) > CrowdRevalidationRadius + ActiveDistanceProfile.WaitingDistance)
+        {
+            reason = "Crowd positions changed before landing; resampling safely";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private void RestartSafeParkingAfterRevalidation(IBattleChara target, string reason)
+    {
+        vnav.StopSafe();
+        log.Information("{Reason}", reason);
+        status = reason;
+        BeginSafeParking(target, true);
+    }
+
+    private List<PlayerCluster> DetectPlayerClusters(IBattleChara target)
+    {
+        var localPlayer = objects.LocalPlayer;
+        if (localPlayer is null)
+            return [];
+
+        var players = objects.OfType<IPlayerCharacter>()
+            .Where(player => player.GameObjectId != localPlayer.GameObjectId &&
+                             !player.IsDead &&
+                             HorizontalDistance(player.Position, target.Position) <= CrowdSearchRadius)
+            .Select(player => player.Position)
+            .ToArray();
+        var visited = new bool[players.Length];
+        var clusters = new List<PlayerCluster>();
+
+        for (var start = 0; start < players.Length; start++)
+        {
+            if (visited[start])
+                continue;
+
+            var members = new List<Vector3>();
+            var pending = new Queue<int>();
+            pending.Enqueue(start);
+            visited[start] = true;
+            while (pending.Count > 0)
+            {
+                var index = pending.Dequeue();
+                members.Add(players[index]);
+                for (var other = 0; other < players.Length; other++)
+                {
+                    if (!visited[other] &&
+                        HorizontalDistance(players[index], players[other]) <= CrowdClusterLinkDistance)
+                    {
+                        visited[other] = true;
+                        pending.Enqueue(other);
+                    }
+                }
+            }
+
+            if (members.Count < CrowdMinimumPlayers)
+                continue;
+            var center = new Vector3(
+                members.Average(point => point.X),
+                members.Average(point => point.Y),
+                members.Average(point => point.Z));
+            var tightness = MathF.Sqrt(members.Average(point =>
+            {
+                var distance = HorizontalDistance(point, center);
+                return distance * distance;
+            }));
+            clusters.Add(new PlayerCluster(center, members.Count, tightness));
+        }
+
+        return clusters
+            .OrderByDescending(cluster => cluster.Population)
+            .ThenBy(cluster => cluster.Tightness)
+            .ToList();
+    }
+
+    private float ClearanceAtPoint(Vector3 point, IBattleChara target)
+    {
+        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
+        return MathF.Max(0f,
+            HorizontalDistance(point, target.Position) - target.HitboxRadius - playerRadius);
+    }
+
+    private float ProtectedCenterRadius(IBattleChara target)
+    {
+        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
+        return ActiveDistanceProfile.EmergencyDistance + target.HitboxRadius + playerRadius + 3f;
+    }
+
+    private static bool PathStaysOutsideProtectedRadius(
+        Vector3 start,
+        IReadOnlyList<Vector3> path,
+        Vector3 protectedCenter,
+        float protectedRadius)
+    {
+        var previous = start;
+        foreach (var waypoint in path)
+        {
+            if (HorizontalSegmentDistance(previous, waypoint, protectedCenter) < protectedRadius)
+                return false;
+            previous = waypoint;
+        }
+        return true;
+    }
+
+    private static bool FinalApproachStaysOutsideProtectedRadius(
+        IReadOnlyList<Vector3>? path,
+        Vector3 protectedCenter,
+        float protectedRadius)
+    {
+        if (path is null || path.Count == 0)
+            return false;
+        var start = path.Count >= 2 ? path[^2] : path[0];
+        return HorizontalSegmentDistance(start, path[^1], protectedCenter) >= protectedRadius;
+    }
+
+    private static float HorizontalSegmentDistance(Vector3 start, Vector3 end, Vector3 point)
+    {
+        var segmentX = end.X - start.X;
+        var segmentZ = end.Z - start.Z;
+        var lengthSquared = segmentX * segmentX + segmentZ * segmentZ;
+        if (lengthSquared < 0.0001f)
+            return HorizontalDistance(start, point);
+        var t = ((point.X - start.X) * segmentX + (point.Z - start.Z) * segmentZ) / lengthSquared;
+        t = Math.Clamp(t, 0f, 1f);
+        var closest = new Vector3(start.X + segmentX * t, point.Y, start.Z + segmentZ * t);
+        return HorizontalDistance(closest, point);
     }
 
     private IBattleChara? FindMark()
@@ -2267,6 +2662,11 @@ public sealed class Plugin : IDalamudPlugin
         alertPoint = null;
         approachPoint = null;
         safePoint = null;
+        selectedParkingCandidate = null;
+        parkingPathTask = null;
+        parkingPathStartedUtc = DateTime.MinValue;
+        selectedParkingPath = null;
+        crowdFallbackAnnounced = false;
         territoryAetheryteId = 0;
         killConfirmed = false;
         tagAttempted = false;
@@ -2865,6 +3265,17 @@ public sealed class Plugin : IDalamudPlugin
         SsWatch,
     }
 }
+
+internal sealed record ParkingCandidate(
+    Vector3 Position,
+    bool IsCrowd,
+    int CrowdPopulation,
+    Vector3 CrowdCenter);
+
+internal sealed record PlayerCluster(
+    Vector3 Center,
+    int Population,
+    float Tightness);
 
 internal sealed class HuntTrainMessageDto
 {
