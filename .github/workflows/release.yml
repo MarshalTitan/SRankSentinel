@@ -21,7 +21,7 @@ jobs:
           ref: main
 
       - name: Audit supported Faloop POI coverage
-        run: node .github/scripts/Audit-FaloopCatalog.mjs FaloopCatalog.cs HuntCatalog.cs
+        run: node .github/scripts/Audit-FaloopCatalog.mjs FaloopCatalog.cs HuntCatalog.cs FaloopClient.cs
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
