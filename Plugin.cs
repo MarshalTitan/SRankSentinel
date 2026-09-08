@@ -35,6 +35,16 @@ public sealed class Plugin : IDalamudPlugin
     private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
     private const double FaloopLocationEnrichmentInitialRetrySeconds = 5;
     private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
+    private const float PullResetMinimumHpPercent = 99f;
+    private const double PullResetConfirmationSeconds = 4;
+    private const byte AetheryteMapMarkerDataType = 3;
+    private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
+        new Dictionary<uint, TerritoryAetheryteOverride>
+        {
+            // Macarenses Angle is unsuitable for S-rank travel. This hard route override is
+            // intentionally centralized so future territory-specific exceptions stay declarative.
+            [818] = new(147, "The Tempest", "The Ondo Cups"),
+        };
     private readonly IDalamudPluginInterface pi;
     private readonly ICommandManager commands;
     private readonly IClientState clientState;
@@ -79,6 +89,9 @@ public sealed class Plugin : IDalamudPlugin
     private bool tagAttempted;
     private bool markEverIdentified;
     private bool markCombatObserved;
+    private ulong identifiedMarkGameObjectId;
+    private int pullCycle = 1;
+    private DateTime pullResetCandidateSinceUtc = DateTime.MinValue;
     private uint activeTagActionId;
     private bool discardAtUldah;
     private bool ssChainObserved;
@@ -818,6 +831,9 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        identifiedMarkGameObjectId = 0;
+        pullCycle = 1;
+        pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = false;
@@ -843,6 +859,9 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        identifiedMarkGameObjectId = 0;
+        pullCycle = 1;
+        pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = true;
@@ -896,24 +915,6 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null)
             return;
 
-        // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
-        // Idyllshire followed by the Prologue Gate aethernet destination.
-        if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
-            travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
-        {
-            territoryAetheryteId = HuntCatalog.IdyllshireAetheryteId;
-        }
-        else
-        {
-            var attuned = data.GetExcelSheet<Aetheryte>()
-                .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
-                .Select(row => row.RowId)
-                .Where(travel.CanTeleportTo)
-                .ToArray();
-            territoryAetheryteId = attuned.FirstOrDefault(id => id == current.PreferredAetheryteId);
-            if (territoryAetheryteId == 0)
-                territoryAetheryteId = attuned.FirstOrDefault();
-        }
         var map = data.GetExcelSheet<Map>()
             .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
         if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
@@ -928,6 +929,91 @@ public sealed class Plugin : IDalamudPlugin
                 "Preserved alert destination for {Mark}: map ({MapX:0.0}, {MapY:0.0}) -> local ({LocalX:0.0}, {LocalZ:0.0})",
                 current.CreatureName, current.MapX, current.MapY, alertPoint.Value.X, alertPoint.Value.Z);
         }
+
+        // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
+        // Idyllshire followed by the Prologue Gate aethernet destination.
+        if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
+            travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
+        {
+            territoryAetheryteId = HuntCatalog.IdyllshireAetheryteId;
+        }
+        else
+        {
+            var attuned = data.GetExcelSheet<Aetheryte>()
+                .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
+                .Where(row => travel.CanTeleportTo(row.RowId))
+                .ToArray();
+
+            if (TerritoryAetheryteOverrides.TryGetValue(current.TerritoryId, out var territoryOverride))
+            {
+                territoryAetheryteId = territoryOverride.AetheryteId;
+                log.Information("Territory override: {Territory} -> {Aetheryte}",
+                    territoryOverride.TerritoryName, territoryOverride.AetheryteName);
+                if (!attuned.Any(row => row.RowId == territoryAetheryteId))
+                    log.Warning(
+                        "Required territory override {Aetheryte} ({AetheryteId}) is not currently usable; refusing to choose another aetheryte in {Territory}",
+                        territoryOverride.AetheryteName, territoryAetheryteId, territoryOverride.TerritoryName);
+            }
+            else if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
+            {
+                territoryAetheryteId = SelectNearestUsableAetheryte(attuned, map, current.MapX, current.MapY);
+            }
+
+            if (territoryAetheryteId == 0)
+                territoryAetheryteId = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId).RowId;
+            if (territoryAetheryteId == 0)
+                territoryAetheryteId = attuned.FirstOrDefault().RowId;
+        }
+    }
+
+    private uint SelectNearestUsableAetheryte(
+        IReadOnlyCollection<Aetheryte> attuned,
+        Map map,
+        float destinationMapX,
+        float destinationMapY)
+    {
+        if (!data.GetSubrowExcelSheet<MapMarker>().TryGetRow(map.RowId, out var mapMarkers))
+        {
+            log.Warning("No map-marker data was available to rank aetherytes for territory {TerritoryId}; using the configured fallback",
+                current?.TerritoryId ?? 0);
+            return 0;
+        }
+
+        var candidates = new List<(uint Id, string Name, float Distance)>();
+        foreach (var aetheryte in attuned)
+        {
+            var marker = mapMarkers.FirstOrDefault(candidate =>
+                candidate.DataType == AetheryteMapMarkerDataType &&
+                candidate.DataKey.RowId == aetheryte.RowId);
+            if (marker.DataKey.RowId != aetheryte.RowId)
+                continue;
+
+            var divisor = map.SizeFactor / 2f;
+            if (divisor <= 0f)
+                continue;
+            var markerMapX = marker.X / divisor + 1f;
+            var markerMapY = marker.Y / divisor + 1f;
+            var mapDistance = Vector2.Distance(
+                new Vector2(destinationMapX, destinationMapY),
+                new Vector2(markerMapX, markerMapY));
+            var distanceYalms = mapDistance * map.SizeFactor;
+            var name = aetheryte.PlaceName.Value.Name.ToString();
+            candidates.Add((aetheryte.RowId, name, distanceYalms));
+            log.Information("Teleport candidate: {Aetheryte} - {Distance:0}y from mark",
+                name, distanceYalms);
+        }
+
+        var selected = candidates.OrderBy(candidate => candidate.Distance).FirstOrDefault();
+        if (selected.Id == 0)
+        {
+            log.Warning("Usable aetherytes were found for territory {TerritoryId}, but none had a usable map marker; using the configured fallback",
+                current?.TerritoryId ?? 0);
+            return 0;
+        }
+
+        log.Information("Selected nearest aetheryte: {Aetheryte} ({Distance:0}y from mark)",
+            selected.Name, selected.Distance);
+        return selected.Id;
     }
 
     private void OnFrameworkUpdate(IFramework _)
@@ -978,7 +1064,11 @@ public sealed class Plugin : IDalamudPlugin
                         ConfirmKill($"Previously identified {visibleMark.Name.TextValue} is visibly dead");
                         return;
                     }
+                    if (ObservePullCycleReset(visibleMark, now))
+                        return;
                 }
+                else
+                    pullResetCandidateSinceUtc = DateTime.MinValue;
             }
 
             if (combat.IsPlayerDead)
@@ -2022,8 +2112,12 @@ public sealed class Plugin : IDalamudPlugin
             combat.TargetMark(mark);
             var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + 18f;
             if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
+            {
+                log.Information("Proper pull detected for {Mark}; attempting ranged tag for pull cycle {PullCycle}",
+                    mark.Name.TextValue, pullCycle);
                 SetState(SentinelState.TagApproach,
-                    $"Combat/HP gate passed ({hp:0.0}%); targeted mark and moving into range for action {activeTagActionId}");
+                    $"Proper pull detected; attempting ranged tag for pull cycle {pullCycle} at {hp:0.0}% HP");
+            }
         }
     }
 
@@ -2072,9 +2166,12 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     tagAttempted = true;
                     nextActionUtc = now.AddSeconds(3);
-                    status = $"One tag attempt sent (action {activeTagActionId}); client " +
+                    status = $"Tagged {mark.Name.TextValue} for pull cycle {pullCycle} (action {activeTagActionId}); client " +
                              (attempt.Accepted ? "accepted it" : "did not accept it") +
                              "; attack cutoff is active and no further attacks will be issued";
+                    log.Information(
+                        "Tagged {Mark} for pull cycle {PullCycle}; one action attempt sent, client accepted={Accepted}",
+                        mark.Name.TextValue, pullCycle, attempt.Accepted);
                     return;
                 }
 
@@ -2854,6 +2951,7 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null || killConfirmed)
             return;
         killConfirmed = true;
+        pullResetCandidateSinceUtc = DateTime.MinValue;
         discardAtUldah = false;
         vnav.StopSafe();
         var now = DateTime.UtcNow;
@@ -2906,6 +3004,9 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        identifiedMarkGameObjectId = 0;
+        pullCycle = 1;
+        pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
         ssChainObserved = false;
@@ -2931,9 +3032,64 @@ public sealed class Plugin : IDalamudPlugin
     {
         mark = target;
         markEverIdentified = true;
+        if (identifiedMarkGameObjectId == 0)
+            identifiedMarkGameObjectId = target.GameObjectId;
         lastMarkSeenUtc = DateTime.UtcNow;
         if (CombatController.IsMarkInCombat(target))
             markCombatObserved = true;
+    }
+
+    private bool ObservePullCycleReset(IBattleChara target, DateTime now)
+    {
+        if (!tagAttempted || killConfirmed || target.IsDead || target.CurrentHp == 0 ||
+            identifiedMarkGameObjectId == 0 || target.GameObjectId != identifiedMarkGameObjectId)
+        {
+            pullResetCandidateSinceUtc = DateTime.MinValue;
+            return false;
+        }
+
+        var outOfCombatAtFullHealth = !CombatController.IsMarkInCombat(target) &&
+                                      CombatController.HpPercent(target) >= PullResetMinimumHpPercent;
+        if (!outOfCombatAtFullHealth)
+        {
+            pullResetCandidateSinceUtc = DateTime.MinValue;
+            return false;
+        }
+
+        if (pullResetCandidateSinceUtc == DateTime.MinValue)
+        {
+            pullResetCandidateSinceUtc = now;
+            log.Information(
+                "Possible reset for {Mark}: combat ended and HP restored; requiring {Seconds:0}s stable confirmation",
+                target.Name.TextValue, PullResetConfirmationSeconds);
+            return false;
+        }
+
+        if ((now - pullResetCandidateSinceUtc).TotalSeconds < PullResetConfirmationSeconds)
+            return false;
+
+        var completedCycle = pullCycle;
+        pullCycle++;
+        tagAttempted = false;
+        activeTagActionId = 0;
+        postTagRetreatActive = false;
+        pullResetCandidateSinceUtc = DateTime.MinValue;
+        vnav.StopSafe();
+        log.Information("Reset detected for {Mark}: HP restored and combat ended after pull cycle {PullCycle}",
+            target.Name.TextValue, completedCycle);
+        log.Information("Tag gate re-armed for pull cycle {PullCycle}", pullCycle);
+
+        if (ClearanceFromMark(target) < ActiveDistanceProfile.WaitingDistance || state != SentinelState.SafeWait)
+        {
+            BeginSafeParking(target, fly: false);
+            status = $"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle} and returning to safe parking";
+        }
+        else
+        {
+            SetState(SentinelState.SafeWait,
+                $"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle}");
+        }
+        return true;
     }
 
     private static bool IsKillEventType(string? huntType)
@@ -3465,7 +3621,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ImGui.Separator();
-        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, permanently closes the attack gate for that mark, and never runs a rotation. A missing entity or failed route never means cleared; only a positive death event/message or a visibly dead identified mark can complete the hunt. Forgiven Gossip, Ker Shroud, and Crystal Incarnation precursors are observation-only and are never targeted, approached, or attacked.");
+        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, closes the attack gate for that pull cycle, and never runs a rotation. The gate re-arms only after the same living mark remains out of combat at restored health long enough to prove a genuine reset. A missing entity or failed route never means cleared; only a positive death event/message or a visibly dead identified mark can complete the hunt. Forgiven Gossip, Ker Shroud, and Crystal Incarnation precursors are observation-only and are never targeted, approached, or attacked.");
         ImGui.End();
     }
 
@@ -3542,6 +3698,11 @@ internal sealed record PlayerCluster(
     Vector3 Center,
     int Population,
     float Tightness);
+
+internal sealed record TerritoryAetheryteOverride(
+    uint AetheryteId,
+    string TerritoryName,
+    string AetheryteName);
 
 internal sealed class PendingFaloopLocation(
     HuntAlertSnapshot alert,
