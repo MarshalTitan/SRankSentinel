@@ -37,6 +37,10 @@ public sealed class Plugin : IDalamudPlugin
     private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
     private const float PullResetMinimumHpPercent = 99f;
     private const double PullResetConfirmationSeconds = 4;
+    private const double IncidentalAggroClearConfirmationSeconds = 2;
+    private const double IncidentalAggroRouteRetrySeconds = 6;
+    private const float IncidentalAggroThreatRadius = 60f;
+    private const float IncidentalAggroEscapeDistance = 55f;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -114,6 +118,12 @@ public sealed class Plugin : IDalamudPlugin
     private bool returnWatchdogWarning;
     private int returnActionAttempts;
     private int returnConfirmationAttempts;
+    private SentinelState incidentalAggroResumeState = SentinelState.Idle;
+    private DateTime incidentalAggroStartedUtc = DateTime.MinValue;
+    private DateTime incidentalAggroClearSinceUtc = DateTime.MinValue;
+    private DateTime incidentalAggroLastProgressUtc = DateTime.MinValue;
+    private Vector3 incidentalAggroLastPosition;
+    private int incidentalAggroEscapeAttempt;
     private Task<FaloopAuthenticationResult>? faloopLoginTask;
     private bool faloopLoginWasAutomatic;
     private bool automaticFaloopReauthenticationAttempted;
@@ -856,6 +866,7 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetIncidentalAggroTracking();
         PrepareCurrentTravel();
         log.Information(
             "Hunt activated: {Mark} on {World}, territory {Territory}, instance {Instance}; positive kill evidence remains required",
@@ -891,6 +902,7 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetIncidentalAggroTracking();
         PrepareCurrentTravel();
 
         // Prefer the alert coordinates whenever they exist. Object resolution starts only near
@@ -1132,6 +1144,12 @@ public sealed class Plugin : IDalamudPlugin
             }
         }
 
+        if (state != SentinelState.AvoidIncidentalAggro && ShouldBeginIncidentalAggroAvoidance(out var threat))
+        {
+            BeginIncidentalAggroAvoidance(threat, now);
+            return;
+        }
+
         switch (state)
         {
             case SentinelState.ResetToUldah:
@@ -1205,6 +1223,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.GroundRetreat:
                 TickGroundRetreat(now);
+                return;
+            case SentinelState.AvoidIncidentalAggro:
+                TickAvoidIncidentalAggro(now);
                 return;
             case SentinelState.PostKillSsGrace:
                 TickPostKillSsGrace(now);
@@ -1402,6 +1423,235 @@ public sealed class Plugin : IDalamudPlugin
                 status = "Teleporting normally to Ul'dah for the mandatory reset";
             nextActionUtc = now.AddSeconds(8);
         }
+    }
+
+    private bool ShouldBeginIncidentalAggroAvoidance(out IBattleChara? nearestThreat)
+    {
+        nearestThreat = FindIncidentalAggroThreats().FirstOrDefault();
+        if (nearestThreat is not null)
+            return true;
+
+        // During post-kill/reset travel, any remaining combat flag blocks Teleport. The attacker
+        // may already be outside object range, so recovery must still make a non-attacking escape
+        // attempt rather than silently retrying Teleport forever.
+        return state == SentinelState.ResetToUldah && condition[ConditionFlag.InCombat];
+    }
+
+    private IBattleChara[] FindIncidentalAggroThreats()
+    {
+        if (objects.LocalPlayer is not { } player)
+            return [];
+
+        return objects.OfType<IBattleChara>()
+            .Where(actor => actor.ObjectKind == ObjectKind.BattleNpc &&
+                            actor.GameObjectId != identifiedMarkGameObjectId &&
+                            !actor.IsDead && actor.CurrentHp > 0 && actor.IsTargetable &&
+                            actor.TargetObjectId == player.GameObjectId &&
+                            HorizontalDistance(actor.Position, player.Position) <= IncidentalAggroThreatRadius)
+            .OrderBy(actor => HorizontalDistance(actor.Position, player.Position))
+            .ToArray();
+    }
+
+    private void BeginIncidentalAggroAvoidance(IBattleChara? threat, DateTime now)
+    {
+        incidentalAggroResumeState = state;
+        incidentalAggroStartedUtc = now;
+        incidentalAggroClearSinceUtc = DateTime.MinValue;
+        incidentalAggroLastProgressUtc = now;
+        incidentalAggroLastPosition = PlayerPosition();
+        incidentalAggroEscapeAttempt = 0;
+        vnav.StopSafe();
+        parkingPathTask = null;
+        selectedParkingPath = null;
+        safePoint = null;
+        var threatName = threat?.Name.TextValue ?? "an out-of-range overworld enemy";
+        log.Warning(
+            "Incidental aggro detected from {Threat} while state={State}, hunt={Mark}, killConfirmed={KillConfirmed}; fleeing without attacking and preserving the hunt/queue",
+            threatName, state, current?.CreatureName ?? "(none)", killConfirmed);
+        SetState(SentinelState.AvoidIncidentalAggro,
+            $"Incidental aggro from {threatName}; escaping without attacking while preserving the active hunt");
+    }
+
+    private void TickAvoidIncidentalAggro(DateTime now)
+    {
+        if (current is null)
+        {
+            ResetIncidentalAggroTracking();
+            SetState(SentinelState.ResetToUldah, "Incidental aggro recovery retained no active hunt; resetting through Ul'dah");
+            return;
+        }
+
+        if (combat.IsPlayerDead)
+        {
+            vnav.StopSafe();
+            if (killConfirmed)
+            {
+                ResetIncidentalAggroTracking();
+                SetState(SentinelState.ResetToUldah,
+                    $"Died to incidental aggro after {current.CreatureName} was confirmed dead; starting normal Return recovery");
+            }
+            else
+            {
+                status = $"Died to incidental aggro while {current.CreatureName} remains active; waiting for Raise and refusing Return";
+            }
+            return;
+        }
+
+        var threats = FindIncidentalAggroThreats();
+        var recoveryCombatStillBlocking = incidentalAggroResumeState == SentinelState.ResetToUldah &&
+                                          condition[ConditionFlag.InCombat];
+        if (threats.Length == 0 && !recoveryCombatStillBlocking)
+        {
+            if (incidentalAggroClearSinceUtc == DateTime.MinValue)
+            {
+                incidentalAggroClearSinceUtc = now;
+                vnav.StopSafe();
+                status = "Incidental aggro ended; confirming combat is clear before resuming";
+                return;
+            }
+
+            if ((now - incidentalAggroClearSinceUtc).TotalSeconds < IncidentalAggroClearConfirmationSeconds)
+                return;
+
+            var resume = incidentalAggroResumeState;
+            log.Information(
+                "Incidental aggro cleared after {Seconds:0.0}s; resuming state {State} with hunt {Mark} and killConfirmed={KillConfirmed}",
+                (now - incidentalAggroStartedUtc).TotalSeconds, resume, current.CreatureName, killConfirmed);
+            ResetIncidentalAggroTracking();
+            if (killConfirmed || resume == SentinelState.ResetToUldah)
+            {
+                nextActionUtc = now;
+                SetState(SentinelState.ResetToUldah,
+                    $"Incidental aggro cleared; resuming same-world Ul'dah recovery for {current.CreatureName}");
+                return;
+            }
+
+            mark = FindMark();
+            if (mark is not null)
+            {
+                MarkWasIdentified(mark);
+                BeginSafeParking(mark, fly: condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight]);
+                return;
+            }
+
+            SetState(SentinelState.LocateMark,
+                $"Incidental aggro cleared; holding the active {current.CreatureName} hunt and resuming entity scans");
+            return;
+        }
+
+        incidentalAggroClearSinceUtc = DateTime.MinValue;
+        var playerPosition = PlayerPosition();
+        if (HorizontalDistance(playerPosition, incidentalAggroLastPosition) >= 3f)
+        {
+            incidentalAggroLastPosition = playerPosition;
+            incidentalAggroLastProgressUtc = now;
+        }
+
+        if (vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe())
+        {
+            if ((now - incidentalAggroLastProgressUtc).TotalSeconds < IncidentalAggroRouteRetrySeconds)
+            {
+                status = $"Escaping incidental aggro without attacking; preserving {current.CreatureName} and {pendingAlerts.Count} queued hunt(s)";
+                return;
+            }
+
+            vnav.StopSafe();
+            log.Warning("Incidental-aggro escape route made no progress; sampling another route");
+        }
+
+        if (!vnav.IsReadySafe())
+        {
+            status = "Incidental combat blocks travel and vnavmesh is not ready; holding the hunt and retrying safely";
+            return;
+        }
+
+        incidentalAggroEscapeAttempt++;
+        if (!TryStartIncidentalAggroEscape(threats, incidentalAggroEscapeAttempt, out var destination, out var fly))
+        {
+            status = "Incidental combat blocks travel; no safe escape route resolved yet, retaining the hunt and retrying";
+            incidentalAggroLastProgressUtc = now.AddSeconds(2);
+            return;
+        }
+
+        incidentalAggroLastPosition = playerPosition;
+        incidentalAggroLastProgressUtc = now;
+        log.Information(
+            "Incidental-aggro escape attempt {Attempt}: moving {Distance:0}y without attacking (flight={Flight})",
+            incidentalAggroEscapeAttempt, HorizontalDistance(playerPosition, destination), fly);
+        status = $"Incidental combat blocks travel; escape attempt {incidentalAggroEscapeAttempt} underway without attacking";
+    }
+
+    private bool TryStartIncidentalAggroEscape(
+        IReadOnlyCollection<IBattleChara> threats,
+        int attempt,
+        out Vector3 destination,
+        out bool fly)
+    {
+        destination = default;
+        fly = condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight];
+        var start = PlayerPosition();
+        var threatCenter = threats.Count > 0
+            ? new Vector3(threats.Average(actor => actor.Position.X), start.Y,
+                threats.Average(actor => actor.Position.Z))
+            : start;
+        var away = new Vector2(start.X - threatCenter.X, start.Z - threatCenter.Z);
+        if (away.LengthSquared() < 0.01f)
+        {
+            var seedAngle = attempt * 2.3999632f;
+            away = new Vector2(MathF.Cos(seedAngle), MathF.Sin(seedAngle));
+        }
+        else
+        {
+            away = Vector2.Normalize(away);
+        }
+
+        var liveMark = FindMark();
+        var angleOffsets = new[] { 0f, 0.55f, -0.55f, 1.1f, -1.1f, 1.65f, -1.65f, MathF.PI };
+        var rotationStart = Math.Max(0, attempt - 1) % angleOffsets.Length;
+        for (var index = 0; index < angleOffsets.Length; index++)
+        {
+            var angle = angleOffsets[(rotationStart + index) % angleOffsets.Length];
+            var direction = new Vector2(
+                away.X * MathF.Cos(angle) - away.Y * MathF.Sin(angle),
+                away.X * MathF.Sin(angle) + away.Y * MathF.Cos(angle));
+            var distance = IncidentalAggroEscapeDistance + (attempt % 3) * 10f;
+            var proposed = new Vector3(start.X + direction.X * distance,
+                fly ? start.Y + 15f : start.Y,
+                start.Z + direction.Y * distance);
+            var candidate = fly ? proposed : vnav.PointOnFloorSafe(proposed, 15f);
+            if (candidate is null)
+                continue;
+
+            if (liveMark is not null)
+            {
+                var minimumClearance = Math.Max(ActiveDistanceProfile.WaitingDistance,
+                    ActiveDistanceProfile.EmergencyDistance);
+                if (ClearanceAtPoint(candidate.Value, liveMark) < minimumClearance ||
+                    !ProtectedSegmentIsSafe(start, candidate.Value, liveMark.Position,
+                        ProtectedCenterRadius(liveMark), true))
+                {
+                    log.Information("Incidental-aggro escape candidate rejected: crosses the active mark safety radius");
+                    continue;
+                }
+            }
+
+            if (!vnav.MoveToSafe(candidate.Value, fly))
+                continue;
+            destination = candidate.Value;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ResetIncidentalAggroTracking()
+    {
+        incidentalAggroResumeState = SentinelState.Idle;
+        incidentalAggroStartedUtc = DateTime.MinValue;
+        incidentalAggroClearSinceUtc = DateTime.MinValue;
+        incidentalAggroLastProgressUtc = DateTime.MinValue;
+        incidentalAggroLastPosition = default;
+        incidentalAggroEscapeAttempt = 0;
     }
 
     private void TickDeadReturnRecovery(DateTime now)
@@ -3096,6 +3346,7 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetIncidentalAggroTracking();
         parkingCandidates.Clear();
     }
 
@@ -3105,7 +3356,8 @@ public sealed class Plugin : IDalamudPlugin
         SentinelState.Landing or
         SentinelState.SafeWait or
         SentinelState.TagApproach or
-        SentinelState.GroundRetreat;
+        SentinelState.GroundRetreat or
+        SentinelState.AvoidIncidentalAggro;
 
     private void MarkWasIdentified(IBattleChara target)
     {
@@ -3782,6 +4034,7 @@ public sealed class Plugin : IDalamudPlugin
         SafeWait,
         TagApproach,
         GroundRetreat,
+        AvoidIncidentalAggro,
         PostKillSsGrace,
         SsWatch,
     }
