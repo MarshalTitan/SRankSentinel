@@ -41,6 +41,9 @@ public sealed class Plugin : IDalamudPlugin
     private const double IncidentalAggroRouteRetrySeconds = 6;
     private const float IncidentalAggroThreatRadius = 60f;
     private const float IncidentalAggroEscapeDistance = 55f;
+    private const double SsStagingPathQueryTimeoutSeconds = 20;
+    private const double SsStagingRouteRetrySeconds = 3;
+    private const float SsStagingArrivalDistance = 5f;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -69,6 +72,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Dictionary<string, PendingFaloopLocation> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Queue<ParkingCandidate> parkingCandidates = new();
+    private readonly Queue<SsStagingCandidate> ssStagingCandidates = new();
+    private readonly Queue<Vector3> approachProjectionCandidates = new();
 
     private bool configOpen;
     private HuntAlertSnapshot? current;
@@ -103,6 +108,16 @@ public sealed class Plugin : IDalamudPlugin
     private bool ssChainObserved;
     private bool ssSpawnAnnounced;
     private SsProfile? activeSsProfile;
+    private SsStagingLocation? activeSsStagingLocation;
+    private Vector3? ssStagingAnchor;
+    private Vector3? ssStagingDestination;
+    private SsStagingCandidate? selectedSsStagingCandidate;
+    private Task<List<Vector3>>? ssStagingPathTask;
+    private List<Vector3>? selectedSsStagingPath;
+    private DateTime ssStagingPathStartedUtc = DateTime.MinValue;
+    private DateTime nextSsStagingAttemptUtc = DateTime.MinValue;
+    private bool ssStagingArrived;
+    private bool ssStagingProjectionFailureLogged;
     private DateTime postKillSsGraceDeadlineUtc = DateTime.MinValue;
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
     private DateTime playerReadySinceUtc = DateTime.MinValue;
@@ -187,6 +202,15 @@ public sealed class Plugin : IDalamudPlugin
         else
             foreach (var issue in coverageAudit.Issues)
                 log.Error("Faloop coordinate coverage audit: {Issue}", issue);
+
+        var ssStagingAudit = HuntCatalog.AuditSsStagingLocations();
+        if (ssStagingAudit.Issues.Count == 0)
+            log.Information(
+                "Fixed SS staging coverage audit passed: {Configured}/{Expected} ShB/EW/DT territories",
+                ssStagingAudit.ConfiguredCount, ssStagingAudit.ExpectedCount);
+        else
+            foreach (var issue in ssStagingAudit.Issues)
+                log.Error("Fixed SS staging coverage audit: {Issue}", issue);
 
         RestorePersistentQueue();
         if (TryDequeueNextValid(out var restored))
@@ -670,11 +694,15 @@ public sealed class Plugin : IDalamudPlugin
                     ObserveSsChain(activeSsProfile,
                         $"{activeSsProfile.SsName} spawn message detected");
                     ssSpawnAnnounced = true;
+                    ssWatchDeadlineUtc = DateTime.MaxValue;
+                    log.Information(
+                        "Actual SS spawn announced: {Ss}; disabling the precursor timeout while its alert/entity is resolved",
+                        activeSsProfile.SsName);
                     status = $"{activeSsProfile.SsName} announced; waiting for its alert or game object location";
                 }
                 if (text.Contains(activeSsProfile.PrecursorName, StringComparison.OrdinalIgnoreCase))
                     ObserveSsChain(activeSsProfile,
-                        $"{activeSsProfile.PrecursorName} observed; remaining stationary and not targeting it");
+                        $"{activeSsProfile.PrecursorName} observed; continuing fixed-location staging without targeting it");
             }
 
             var directSsProfile = HuntCatalog.FindSsProfileInText(text);
@@ -863,6 +891,7 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
@@ -899,6 +928,7 @@ public sealed class Plugin : IDalamudPlugin
                           HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
@@ -940,6 +970,7 @@ public sealed class Plugin : IDalamudPlugin
         selectedParkingPath = null;
         crowdFallbackAnnounced = false;
         parkingCandidates.Clear();
+        approachProjectionCandidates.Clear();
         nextActionUtc = DateTime.MinValue;
 
         if (current is null)
@@ -1654,6 +1685,21 @@ public sealed class Plugin : IDalamudPlugin
         incidentalAggroEscapeAttempt = 0;
     }
 
+    private void ResetSsStagingTracking()
+    {
+        activeSsStagingLocation = null;
+        ssStagingAnchor = null;
+        ssStagingDestination = null;
+        selectedSsStagingCandidate = null;
+        ssStagingPathTask = null;
+        selectedSsStagingPath = null;
+        ssStagingPathStartedUtc = DateTime.MinValue;
+        nextSsStagingAttemptUtc = DateTime.MinValue;
+        ssStagingArrived = false;
+        ssStagingProjectionFailureLogged = false;
+        ssStagingCandidates.Clear();
+    }
+
     private void TickDeadReturnRecovery(DateTime now)
     {
         if (returnRecoveryStartedUtc == DateTime.MinValue)
@@ -2203,7 +2249,11 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (now < nextActionUtc)
                 return;
-            approachPoint = vnav.PointOnFloorSafe(alertPoint.Value, 20f);
+            if (approachProjectionCandidates.Count == 0)
+                PrepareApproachProjectionCandidates(alertPoint.Value);
+            approachPoint = approachProjectionCandidates.Count > 0
+                ? approachProjectionCandidates.Dequeue()
+                : null;
             nextActionUtc = now.AddSeconds(2);
             if (approachPoint is null)
             {
@@ -2228,7 +2278,13 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         nextActionUtc = now.AddSeconds(3);
-        status = $"No route to {current.CreatureName}'s alert coordinates is available yet; holding and retrying";
+        if (HuntCatalog.IsAnySsName(current.CreatureName) && approachProjectionCandidates.Count > 0)
+        {
+            approachPoint = null;
+            status = $"The first {current.CreatureName} projection was unreachable; trying a nearby candidate";
+        }
+        else
+            status = $"No route to {current.CreatureName}'s alert coordinates is available yet; holding and retrying";
     }
 
     private void TickApproachAlertCoordinates(DateTime now)
@@ -2271,9 +2327,47 @@ public sealed class Plugin : IDalamudPlugin
 
         if (vnav.MoveCloseToSafe(approachPoint.Value, true, ActiveDistanceProfile.FlagApproachDistance))
             status = $"Coordinate route stopped early; retrying while keeping {current.CreatureName} active";
+        else if (HuntCatalog.IsAnySsName(current.CreatureName) && approachProjectionCandidates.Count > 0)
+        {
+            approachPoint = null;
+            SetState(SentinelState.PrepareApproachDestination,
+                $"Mapped {current.CreatureName} destination was unreachable; trying another nearby projection");
+        }
         else
             status = $"Coordinate route is currently unavailable; holding position and retrying {current.CreatureName}";
         nextActionUtc = now.AddSeconds(3);
+    }
+
+    private void PrepareApproachProjectionCandidates(Vector3 anchor)
+    {
+        approachProjectionCandidates.Clear();
+        var projected = new List<Vector3>();
+        var isSs = current is not null && HuntCatalog.IsAnySsName(current.CreatureName);
+        var offsets = isSs
+            ? new[] { 0f, 6f, 12f, 18f, 24f }
+            : new[] { 0f };
+        var angles = new[] { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
+
+        foreach (var radius in offsets)
+        {
+            foreach (var angle in radius == 0f ? new[] { 0f } : angles)
+            {
+                var radians = angle * MathF.PI / 180f;
+                var sample = anchor + new Vector3(MathF.Cos(radians) * radius, 0f, MathF.Sin(radians) * radius);
+                sample.Y = 1024f;
+                var floor = vnav.PointOnFloorSafe(sample, isSs ? 18f : 20f);
+                if (floor is null || projected.Any(point => HorizontalDistance(point, floor.Value) < 2f))
+                    continue;
+                projected.Add(floor.Value);
+            }
+        }
+
+        foreach (var point in projected.OrderBy(point => HorizontalDistance(point, anchor)))
+            approachProjectionCandidates.Enqueue(point);
+        if (isSs && projected.Count > 0 && HorizontalDistance(projected[0], anchor) > 2f)
+            log.Information(
+                "Fixed SS coordinate projection failed; selected {Count} nearby projected candidate(s) for routing",
+                projected.Count);
     }
 
     private void TickLocateMark(DateTime now)
@@ -2601,7 +2695,7 @@ public sealed class Plugin : IDalamudPlugin
         if (state != SentinelState.SsWatch || current is null || activeSsProfile is null)
             return;
 
-        if (now >= ssWatchDeadlineUtc)
+        if (!ssSpawnAnnounced && now >= ssWatchDeadlineUtc)
         {
             nextActionUtc = now;
             SetState(SentinelState.ResetToUldah,
@@ -2617,10 +2711,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var remaining = Math.Max(0, (int)Math.Ceiling((ssWatchDeadlineUtc - now).TotalSeconds));
-        status = $"{activeSsProfile.ExpansionName} SS watch: " +
-                 $"{(ssSpawnAnnounced ? activeSsProfile.SsName + " announced" : activeSsProfile.PrecursorName + " chain active")}; " +
-                 $"holding position without targeting precursors ({remaining}s remaining)";
+        TickSsStaging(now);
     }
 
     private bool ValidateSsWatchContext(string phase)
@@ -2670,6 +2761,7 @@ public sealed class Plugin : IDalamudPlugin
                 activeSsProfile.SsDataId, current.PreferredAetheryteId,
                 travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance,
                 0f, 0f, now);
+            log.Information("Actual SS detected; switching to entity tracking: {Ss}", activeSsProfile.SsName);
             StartSsAlertDirect(ss, "game object scan");
             return;
         }
@@ -2681,6 +2773,360 @@ public sealed class Plugin : IDalamudPlugin
             ObserveSsChain(activeSsProfile,
                 $"{precursorCount} {activeSsProfile.PrecursorName} precursor(s) visible; ignoring them safely");
     }
+
+    private void TickSsStaging(DateTime now)
+    {
+        if (current is null || activeSsProfile is null)
+            return;
+        if (!TryInitializeSsStagingAnchor())
+        {
+            status = $"No fixed {activeSsProfile.SsName} staging coordinate is configured for territory " +
+                     $"{current.TerritoryId}; holding the SS watch without abandoning it";
+            return;
+        }
+        if (!vnav.IsReadySafe())
+        {
+            vnav.StopSafe();
+            status = $"Waiting for vnavmesh readiness before staging for {activeSsProfile.SsName}; " +
+                     "the SS watch remains active";
+            return;
+        }
+
+        var anchor = ssStagingAnchor!.Value;
+        if (ssStagingArrived)
+        {
+            if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
+            {
+                if (now >= nextActionUtc)
+                {
+                    UseGeneralAction(23);
+                    nextActionUtc = now.AddSeconds(1);
+                }
+                status = $"At the {activeSsProfile.SsName} staging point; landing normally";
+                return;
+            }
+
+            status = ssSpawnAnnounced
+                ? $"{activeSsProfile.SsName} announced; holding at its staging point until the entity is detectable"
+                : $"Holding at SS staging point; waiting for precursors ({SsWatchRemaining(now)})";
+            return;
+        }
+
+        if (ssStagingPathTask is not null)
+        {
+            PollSsStagingPath(now, anchor);
+            return;
+        }
+
+        if (ssStagingDestination is not null)
+        {
+            var remaining = HorizontalDistance(PlayerPosition(), ssStagingDestination.Value);
+            if (remaining <= SsStagingArrivalDistance)
+            {
+                vnav.StopSafe();
+                if (!RevalidateSsStagingDestination(anchor, out var reason))
+                {
+                    log.Information("{Reason}", reason);
+                    status = reason;
+                    InvalidateSsStagingRoute(now);
+                    return;
+                }
+
+                ssStagingArrived = true;
+                nextActionUtc = now;
+                log.Information(
+                    "SS staging candidate selected and reached: {Ss} in {Territory}, {Distance:0.0}y from fixed spawn",
+                    activeSsProfile.SsName, activeSsStagingLocation!.TerritoryName,
+                    HorizontalDistance(PlayerPosition(), anchor));
+                return;
+            }
+
+            if (vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe())
+            {
+                status = $"Navigating to SS staging area for {activeSsProfile.SsName} ({remaining:0}y remaining)";
+                return;
+            }
+
+            if (now < nextSsStagingAttemptUtc)
+                return;
+            log.Information("SS staging route stopped before arrival; trying another nearby candidate");
+            InvalidateSsStagingRoute(now);
+        }
+
+        if (now < nextSsStagingAttemptUtc)
+            return;
+        if (!EnsureMounted(now))
+            return;
+
+        if (ssStagingCandidates.Count == 0)
+            PrepareSsStagingCandidates(anchor);
+        if (!TryStartNextSsStagingRoute(now, anchor))
+        {
+            nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+            status = $"Fixed SS coordinate projection failed; trying nearby candidate for {activeSsProfile.SsName}";
+            log.Information("Fixed SS coordinate projection failed; trying nearby candidate");
+        }
+    }
+
+    private bool TryInitializeSsStagingAnchor()
+    {
+        if (ssStagingAnchor is not null && activeSsStagingLocation is not null)
+            return true;
+        if (current is null || activeSsProfile is null ||
+            !HuntCatalog.TryGetSsStagingLocation(current.TerritoryId, out var location) ||
+            !HuntCatalog.NamesMatch(location.SsName, activeSsProfile.SsName))
+            return false;
+
+        var map = data.GetExcelSheet<Map>()
+            .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
+        if (map.RowId == 0)
+            return false;
+
+        var mapped = new MapLinkPayload(current.TerritoryId, map.RowId, location.MapX, location.MapY);
+        activeSsStagingLocation = location;
+        ssStagingAnchor = new Vector3(mapped.RawX / 1000f, 1024f, mapped.RawY / 1000f);
+        log.Information(
+            "SS staging location: {Territory} X{MapX:0.0} Y{MapY:0.0} for {Ss}; local anchor ({LocalX:0.0}, {LocalZ:0.0})",
+            location.TerritoryName, location.MapX, location.MapY, location.SsName,
+            ssStagingAnchor.Value.X, ssStagingAnchor.Value.Z);
+        return true;
+    }
+
+    private void PrepareSsStagingCandidates(Vector3 anchor)
+    {
+        ssStagingCandidates.Clear();
+        selectedSsStagingCandidate = null;
+        ssStagingPathTask = null;
+        selectedSsStagingPath = null;
+        ssStagingDestination = null;
+
+        if (!ssStagingProjectionFailureLogged && vnav.PointOnFloorSafe(anchor, 10f) is null)
+        {
+            ssStagingProjectionFailureLogged = true;
+            log.Information("Fixed SS coordinate projection failed; trying nearby candidate");
+        }
+
+        var player = PlayerPosition();
+        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
+        var safeRadius = ActiveDistanceProfile.WaitingDistance + playerRadius + 2f;
+        var minimumRadius = ActiveDistanceProfile.EmergencyDistance + playerRadius + 3f;
+        var accepted = new List<Vector3>();
+
+        var crowdCandidates = new List<(SsStagingCandidate Candidate, float Score)>();
+        foreach (var cluster in DetectPlayerClusters(anchor))
+        {
+            var towardCrowd = cluster.Center - anchor;
+            towardCrowd.Y = 0f;
+            if (towardCrowd.LengthSquared() < 0.01f)
+                continue;
+            towardCrowd = Vector3.Normalize(towardCrowd);
+            var tangent = new Vector3(-towardCrowd.Z, 0f, towardCrowd.X);
+            var clusterRadius = HorizontalDistance(cluster.Center, anchor);
+            foreach (var lateral in new[] { 6f, -6f, 10f, -10f })
+            {
+                var candidate = anchor + towardCrowd * MathF.Max(safeRadius, clusterRadius + 2f) + tangent * lateral;
+                candidate.Y = 1024f;
+                var projected = vnav.PointOnFloorSafe(candidate, 18f);
+                if (projected is null ||
+                    HorizontalDistance(projected.Value, anchor) < safeRadius - 0.5f ||
+                    HorizontalDistance(projected.Value, anchor) < minimumRadius ||
+                    HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
+                    accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
+                    continue;
+
+                var score = cluster.Population * 1000f - cluster.Tightness * 25f -
+                            HorizontalDistance(projected.Value, cluster.Center) * 3f -
+                            HorizontalDistance(player, projected.Value) * 0.25f;
+                crowdCandidates.Add((
+                    new SsStagingCandidate(projected.Value, true, cluster.Population, cluster.Center), score));
+            }
+        }
+
+        foreach (var entry in crowdCandidates.OrderByDescending(entry => entry.Score))
+        {
+            accepted.Add(entry.Candidate.Position);
+            ssStagingCandidates.Enqueue(entry.Candidate);
+        }
+
+        var away = player - anchor;
+        away.Y = 0f;
+        if (away.LengthSquared() < 0.01f)
+            away = Vector3.UnitX;
+        away = Vector3.Normalize(away);
+        foreach (var extraRadius in new[] { 0f, 6f, 12f, 18f })
+        {
+            foreach (var angle in new[] { 0f, 25f, -25f, 50f, -50f, 80f, -80f, 110f, -110f, 145f, -145f, 180f })
+            {
+                var radians = angle * MathF.PI / 180f;
+                var direction = new Vector3(
+                    away.X * MathF.Cos(radians) - away.Z * MathF.Sin(radians),
+                    0f,
+                    away.X * MathF.Sin(radians) + away.Z * MathF.Cos(radians));
+                var candidate = anchor + direction * (safeRadius + extraRadius);
+                candidate.Y = 1024f;
+                var projected = vnav.PointOnFloorSafe(candidate, 18f);
+                if (projected is null ||
+                    HorizontalDistance(projected.Value, anchor) < safeRadius - 0.5f ||
+                    HorizontalDistance(projected.Value, anchor) < minimumRadius ||
+                    accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
+                    continue;
+                accepted.Add(projected.Value);
+                ssStagingCandidates.Enqueue(new SsStagingCandidate(projected.Value, false, 0, Vector3.Zero));
+            }
+        }
+
+        log.Information(
+            "Prepared {Count} safely projected SS staging candidates near {Ss} ({CrowdCount} crowd-aware)",
+            ssStagingCandidates.Count, activeSsProfile?.SsName ?? "SS", crowdCandidates.Count);
+    }
+
+    private bool TryStartNextSsStagingRoute(DateTime now, Vector3 anchor)
+    {
+        var protectedRadius = ActiveDistanceProfile.EmergencyDistance +
+                              (objects.LocalPlayer?.HitboxRadius ?? 0f) + 3f;
+        while (ssStagingCandidates.Count > 0)
+        {
+            var candidate = ssStagingCandidates.Dequeue();
+            if (!ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, anchor, protectedRadius, true))
+            {
+                log.Information("SS staging candidate rejected: route crosses fixed spawn safety radius");
+                continue;
+            }
+
+            var startDistance = HorizontalDistance(PlayerPosition(), anchor);
+            var queryRadius = startDistance < protectedRadius
+                ? MathF.Max(1f, startDistance - 1f)
+                : protectedRadius;
+            var pathTask = vnav.PathfindAvoidSafe(PlayerPosition(), candidate.Position, true, anchor, queryRadius);
+            if (pathTask is null)
+                continue;
+
+            selectedSsStagingCandidate = candidate;
+            ssStagingPathTask = pathTask;
+            ssStagingPathStartedUtc = now;
+            status = candidate.IsCrowd
+                ? $"Validating an SS staging route near a {candidate.CrowdPopulation}-player crowd"
+                : "Validating a protected route to the SS staging area";
+            return true;
+        }
+        return false;
+    }
+
+    private void PollSsStagingPath(DateTime now, Vector3 anchor)
+    {
+        var task = ssStagingPathTask;
+        var candidate = selectedSsStagingCandidate;
+        if (task is null || candidate is null)
+            return;
+        if (!task.IsCompleted)
+        {
+            if ((now - ssStagingPathStartedUtc).TotalSeconds <= SsStagingPathQueryTimeoutSeconds)
+            {
+                status = "Validating a protected vnavmesh route to the fixed SS staging area";
+                return;
+            }
+            log.Information("SS staging candidate rejected: vnavmesh path query timed out");
+            ssStagingPathTask = null;
+            selectedSsStagingCandidate = null;
+            TryStartNextSsStagingRoute(now, anchor);
+            return;
+        }
+
+        List<Vector3>? path = null;
+        try
+        {
+            if (task.IsCompletedSuccessfully)
+                path = task.Result;
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "SS staging path query failed");
+        }
+        ssStagingPathTask = null;
+
+        var protectedRadius = ActiveDistanceProfile.EmergencyDistance +
+                              (objects.LocalPlayer?.HitboxRadius ?? 0f) + 3f;
+        if (path is null || path.Count == 0 ||
+            !ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, anchor, protectedRadius, true) ||
+            !PathStaysOutsideProtectedRadius(PlayerPosition(), path, anchor, protectedRadius, true) ||
+            !vnav.MovePathSafe(path, true))
+        {
+            log.Information("SS staging candidate rejected: no safely reachable vnavmesh route");
+            selectedSsStagingCandidate = null;
+            if (!TryStartNextSsStagingRoute(now, anchor))
+                nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+            return;
+        }
+
+        ssStagingDestination = candidate.Position;
+        selectedSsStagingPath = path;
+        nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+        status = candidate.IsCrowd
+            ? $"Navigating to crowd-aware SS staging ({candidate.CrowdPopulation} players)"
+            : "Navigating to SS staging area";
+        log.Information(
+            "SS staging candidate selected: {Type}, {Distance:0.0}y from fixed spawn",
+            candidate.IsCrowd ? $"crowd ({candidate.CrowdPopulation} players)" : "standard",
+            HorizontalDistance(candidate.Position, anchor));
+    }
+
+    private bool RevalidateSsStagingDestination(Vector3 anchor, out string reason)
+    {
+        var candidate = selectedSsStagingCandidate;
+        if (candidate is null || ssStagingDestination is null)
+        {
+            reason = "SS staging destination was lost; sampling another nearby point";
+            return false;
+        }
+
+        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
+        if (HorizontalDistance(candidate.Position, anchor) < ActiveDistanceProfile.WaitingDistance + playerRadius - 0.5f ||
+            HorizontalDistance(candidate.Position, anchor) < ActiveDistanceProfile.EmergencyDistance + playerRadius)
+        {
+            reason = "SS staging destination no longer meets the active safety profile; resampling";
+            return false;
+        }
+
+        var protectedRadius = ActiveDistanceProfile.EmergencyDistance + playerRadius + 3f;
+        if (!ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, anchor, protectedRadius, true) ||
+            !FinalApproachStaysOutsideProtectedRadius(selectedSsStagingPath, anchor, protectedRadius))
+        {
+            reason = "SS staging final approach crosses the fixed spawn safety radius; resampling";
+            return false;
+        }
+
+        if (candidate.IsCrowd)
+        {
+            var liveCluster = DetectPlayerClusters(anchor)
+                .OrderBy(cluster => HorizontalDistance(cluster.Center, candidate.CrowdCenter))
+                .FirstOrDefault();
+            if (liveCluster is null ||
+                HorizontalDistance(liveCluster.Center, candidate.CrowdCenter) > CrowdMovementTolerance ||
+                HorizontalDistance(liveCluster.Center, candidate.Position) > CrowdRevalidationRadius)
+            {
+                reason = "SS staging crowd moved before landing; resampling a safe point";
+                return false;
+            }
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private void InvalidateSsStagingRoute(DateTime now)
+    {
+        vnav.StopSafe();
+        ssStagingDestination = null;
+        selectedSsStagingCandidate = null;
+        ssStagingPathTask = null;
+        selectedSsStagingPath = null;
+        ssStagingArrived = false;
+        nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+    }
+
+    private string SsWatchRemaining(DateTime now) => ssSpawnAnnounced
+        ? "spawn announced; timeout disabled"
+        : $"{Math.Max(0, (int)Math.Ceiling((ssWatchDeadlineUtc - now).TotalSeconds))}s remaining";
 
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
@@ -3087,7 +3533,10 @@ public sealed class Plugin : IDalamudPlugin
         BeginSafeParking(target, true);
     }
 
-    private List<PlayerCluster> DetectPlayerClusters(IBattleChara target)
+    private List<PlayerCluster> DetectPlayerClusters(IBattleChara target) =>
+        DetectPlayerClusters(target.Position);
+
+    private List<PlayerCluster> DetectPlayerClusters(Vector3 centerPoint)
     {
         var localPlayer = objects.LocalPlayer;
         if (localPlayer is null)
@@ -3096,7 +3545,7 @@ public sealed class Plugin : IDalamudPlugin
         var players = objects.OfType<IPlayerCharacter>()
             .Where(player => player.GameObjectId != localPlayer.GameObjectId &&
                              !player.IsDead &&
-                             HorizontalDistance(player.Position, target.Position) <= CrowdSearchRadius)
+                             HorizontalDistance(player.Position, centerPoint) <= CrowdSearchRadius)
             .Select(player => player.Position)
             .ToArray();
         var visited = new bool[players.Length];
@@ -3259,11 +3708,13 @@ public sealed class Plugin : IDalamudPlugin
         {
             ssChainObserved = true;
             ssWatchDeadlineUtc = DateTime.UtcNow.AddSeconds(config.SsChainTimeoutSeconds);
+            ResetSsStagingTracking();
+            log.Information("SS precursor event detected: {Ss}; reason={Reason}", profile.SsName, reason);
         }
         if (state == SentinelState.PostKillSsGrace)
             SetState(SentinelState.SsWatch,
-                $"{reason}; staying in-zone for {profile.SsName}");
-        status = $"{reason}; {profile.PrecursorName} will not be targeted or approached";
+                $"{reason}; staging at the fixed {profile.SsName} spawn location");
+        status = $"{reason}; navigating to {profile.SsName} staging without targeting {profile.PrecursorName}";
     }
 
     private void ConfirmKill(string reason)
@@ -3288,6 +3739,7 @@ public sealed class Plugin : IDalamudPlugin
             ssSpawnAnnounced = false;
             postKillSsGraceDeadlineUtc = now.AddSeconds(config.PostKillSsGraceSeconds);
             ssWatchDeadlineUtc = DateTime.MinValue;
+            ResetSsStagingTracking();
             nextActionUtc = DateTime.MinValue;
             SetState(SentinelState.PostKillSsGrace,
                 $"{reason}; checking for {activeSsProfile!.PrecursorName}/{activeSsProfile.SsName} evidence for " +
@@ -3343,6 +3795,7 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
@@ -4052,6 +4505,12 @@ internal sealed record PlayerCluster(
     Vector3 Center,
     int Population,
     float Tightness);
+
+internal sealed record SsStagingCandidate(
+    Vector3 Position,
+    bool IsCrowd,
+    int CrowdPopulation,
+    Vector3 CrowdCenter);
 
 internal sealed record TerritoryAetheryteOverride(
     uint AetheryteId,

@@ -24,6 +24,15 @@ internal sealed record SsProfile(
     string SsName,
     string PrecursorName);
 
+internal sealed record SsStagingLocation(
+    uint TerritoryId,
+    string TerritoryName,
+    string SsName,
+    float MapX,
+    float MapY);
+
+internal sealed record SsStagingCoverageAudit(int ExpectedCount, int ConfiguredCount, IReadOnlyList<string> Issues);
+
 /// <summary>
 /// Stable game-data identifiers for open-world S ranks.  Alert plugins remain the source of
 /// spawn coordinates; this catalog is only used to validate the actor and choose the normal
@@ -66,6 +75,34 @@ internal static class HuntCatalog
         new(SupportedExpansion.Dawntrail, "Dawntrail", DawntrailTerritories,
             0, ArchAethereaterName, CrystalIncarnationName),
     ];
+
+    // Fixed SS locations verified against the reviewed Faloop POI snapshot in FaloopCatalog.
+    // The POI values are kept as the canonical coordinates where they differ slightly from
+    // rounded community map labels (for example The Tempest X12.9 Y22.2 rather than X13 Y22).
+    private static readonly IReadOnlyDictionary<uint, SsStagingLocation> SsStagingLocations =
+        new Dictionary<uint, SsStagingLocation>
+        {
+            [813] = new(813, "Lakeland", ForgivenRebellionName, 23.3f, 22.1f),
+            [814] = new(814, "Kholusia", ForgivenRebellionName, 34.3f, 10.5f),
+            [815] = new(815, "Amh Araeng", ForgivenRebellionName, 27.5f, 35.1f),
+            [816] = new(816, "Il Mheg", ForgivenRebellionName, 13.4f, 22.9f),
+            [817] = new(817, "The Rak'tika Greatwood", ForgivenRebellionName, 24.4f, 37.2f),
+            [818] = new(818, "The Tempest", ForgivenRebellionName, 12.9f, 22.2f),
+
+            [956] = new(956, "Labyrinthos", KerName, 24.9f, 16.0f),
+            [957] = new(957, "Thavnair", KerName, 24.2f, 16.8f),
+            [958] = new(958, "Garlemald", KerName, 20.3f, 23.7f),
+            [959] = new(959, "Mare Lamentorum", KerName, 18.5f, 30.2f),
+            [960] = new(960, "Ultima Thule", KerName, 14.5f, 29.6f),
+            [961] = new(961, "Elpis", KerName, 22.7f, 19.5f),
+
+            [1187] = new(1187, "Urqopacha", ArchAethereaterName, 25.9f, 27.9f),
+            [1188] = new(1188, "Kozama'uka", ArchAethereaterName, 13.8f, 14.8f),
+            [1189] = new(1189, "Yak T'el", ArchAethereaterName, 29.7f, 18.9f),
+            [1190] = new(1190, "Shaaloani", ArchAethereaterName, 13.3f, 13.3f),
+            [1191] = new(1191, "Heritage Found", ArchAethereaterName, 17.5f, 20.3f),
+            [1192] = new(1192, "Living Memory", ArchAethereaterName, 34.4f, 26.3f),
+        };
 
     private static readonly SRankDefinition[] Definitions =
     [
@@ -199,6 +236,44 @@ internal static class HuntCatalog
 
     public static SsProfile? GetSsProfileForTerritory(uint territoryId) =>
         SsProfiles.FirstOrDefault(profile => profile.TerritoryIds.Contains(territoryId));
+
+    public static bool TryGetSsStagingLocation(uint territoryId, out SsStagingLocation location)
+    {
+        if (SsStagingLocations.TryGetValue(territoryId, out var configured))
+        {
+            location = configured;
+            return true;
+        }
+
+        location = null!;
+        return false;
+    }
+
+    public static SsStagingCoverageAudit AuditSsStagingLocations()
+    {
+        var expectedTerritories = SsProfiles.SelectMany(profile => profile.TerritoryIds).Distinct().Order().ToArray();
+        var issues = new List<string>();
+        foreach (var territoryId in expectedTerritories)
+        {
+            if (!SsStagingLocations.TryGetValue(territoryId, out var location))
+            {
+                issues.Add($"territory {territoryId} has no fixed SS staging location");
+                continue;
+            }
+
+            var profile = GetSsProfileForTerritory(territoryId);
+            if (profile is null || !NamesMatch(profile.SsName, location.SsName))
+                issues.Add($"territory {territoryId} stages {location.SsName} but its SS profile does not match");
+            if (!float.IsFinite(location.MapX) || !float.IsFinite(location.MapY) ||
+                location.MapX < 1f || location.MapX > 50f || location.MapY < 1f || location.MapY > 50f)
+                issues.Add($"territory {territoryId} has unusable SS staging coordinates ({location.MapX}, {location.MapY})");
+        }
+
+        foreach (var territoryId in SsStagingLocations.Keys.Except(expectedTerritories))
+            issues.Add($"territory {territoryId} has an orphaned SS staging location");
+
+        return new SsStagingCoverageAudit(expectedTerritories.Length, SsStagingLocations.Count, issues);
+    }
 
     public static SsProfile? GetSsProfileForSsName(string? name) =>
         SsProfiles.FirstOrDefault(profile => IsSsName(name, profile));
