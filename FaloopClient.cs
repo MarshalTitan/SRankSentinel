@@ -29,7 +29,9 @@ internal sealed record FaloopFeedEvent(
     string? RawLocation,
     string RawCoordinateData,
     int Instance,
-    DateTime OccurredAtUtc);
+    DateTime OccurredAtUtc,
+    bool HasAuthoritativeTimestamp,
+    string TimestampSource);
 
 internal sealed record FaloopLocationEnrichmentResult(
     bool Success,
@@ -498,9 +500,14 @@ internal sealed class FaloopClient : IDisposable
             return false;
 
         var eventSubType = FirstString(root, "subType", "subtype");
-        var eventId = FirstPrimitiveString(root, "spawnId", "reportId", "eventId", "id");
+        var eventId = FirstPrimitiveString(root, "spawnId", "reportId", "eventId", "windowId");
         if (string.IsNullOrWhiteSpace(eventId))
-            eventId = FirstPrimitiveString(eventData, "spawnId", "reportId", "eventId");
+            eventId = FirstPrimitiveString(eventData, "spawnId", "reportId", "eventId", "windowId", "sightingId");
+        if (string.IsNullOrWhiteSpace(eventId) &&
+            TryFindPrimitiveNamedProperty(eventData,
+                ["spawnId", "reportId", "eventId", "windowId", "sightingId"],
+                out var nestedEventId, out _))
+            eventId = ElementText(nestedEventId);
 
         var mob = string.Empty;
         var world = string.Empty;
@@ -560,6 +567,8 @@ internal sealed class FaloopClient : IDisposable
             TryInt(instanceElement, out instance);
 
         var occurred = DateTime.UtcNow;
+        var hasAuthoritativeTimestamp = false;
+        var timestampSource = "receipt time";
         var timeText = action == FaloopEventAction.Death
             ? FirstString(eventData, "killedAt", "timestamp", "spawnedAt")
             : inner.ValueKind == JsonValueKind.Object
@@ -567,15 +576,29 @@ internal sealed class FaloopClient : IDisposable
                 : string.Empty;
         if (string.IsNullOrWhiteSpace(timeText))
             timeText = FirstString(eventData, "timestamp", "spawnedAt");
+        if (!string.IsNullOrWhiteSpace(timeText))
+            timestampSource = "event timestamp";
+        else if (TryFindPrimitiveNamedProperty(eventData,
+                     action == FaloopEventAction.Death
+                         ? ["killedAt", "occurredAt", "timestamp", "spawnedAt", "createdAt"]
+                         : ["occurredAt", "timestamp", "spawnedAt", "createdAt", "sightedAt"],
+                     out var nestedTime, out var nestedTimePath))
+        {
+            timeText = ElementText(nestedTime);
+            timestampSource = nestedTimePath;
+        }
         if (DateTimeOffset.TryParse(timeText, out var timestamp))
+        {
             occurred = timestamp.UtcDateTime;
+            hasAuthoritativeTimestamp = true;
+        }
 
         feedEvent = new FaloopFeedEvent(action.Value, type, eventSubType, eventId,
             mob.Trim(), world.Trim(), string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), rawMapId,
             poiId, rawPoiKey,
             directMapX, directMapY, rawLocation,
             coordinateEvidence.Count == 0 ? "(none)" : string.Join("; ", coordinateEvidence),
-            Math.Max(0, instance), occurred);
+            Math.Max(0, instance), occurred, hasAuthoritativeTimestamp, timestampSource);
         return true;
     }
 
@@ -600,6 +623,8 @@ internal sealed class FaloopClient : IDisposable
 
         JsonElement? matchingWindow = null;
         DateTime matchingStartedAt = DateTime.MinValue;
+        string matchingWindowId = string.Empty;
+        var matchingWindowUsesEventId = false;
         foreach (var window in windowsElement.EnumerateArray())
         {
             if (window.ValueKind != JsonValueKind.Object ||
@@ -607,70 +632,184 @@ internal sealed class FaloopClient : IDisposable
                 !SlugEquals(FirstString(window, "worldId2", "worldId"), feedEvent.WorldSlug) ||
                 !InstanceMatches(window, feedEvent.Instance))
                 continue;
+
+            var candidateWindowId = FindCorrelationId(window);
+            var candidateUsesEventId = !string.IsNullOrWhiteSpace(feedEvent.EventId) &&
+                                       !string.IsNullOrWhiteSpace(candidateWindowId) &&
+                                       candidateWindowId.Equals(feedEvent.EventId, StringComparison.OrdinalIgnoreCase);
             var startedAt = ReadTimestamp(window, "startedAt", "spawnedAt", "timestamp");
-            if (startedAt == DateTime.MinValue || startedAt > matchingStartedAt)
+            if (matchingWindow is null || candidateUsesEventId && !matchingWindowUsesEventId ||
+                candidateUsesEventId == matchingWindowUsesEventId && startedAt > matchingStartedAt)
             {
                 matchingWindow = window;
                 matchingStartedAt = startedAt;
+                matchingWindowId = candidateWindowId;
+                matchingWindowUsesEventId = candidateUsesEventId;
             }
         }
         if (matchingWindow is null)
             return false;
 
-        // Do not attach a sighting from an older spawn cycle to a newer partial notification.
-        // A current window normally starts within seconds of its lightweight websocket event.
-        var anchor = matchingStartedAt == DateTime.MinValue ? feedEvent.OccurredAtUtc : matchingStartedAt;
-        if (Math.Abs((anchor - feedEvent.OccurredAtUtc).TotalMinutes) > 15)
+        // A lightweight mob/report notification frequently has no timestamp. In that case
+        // OccurredAtUtc is only the local receipt time and may be hours after Faloop opened the
+        // current spawn window. Reject only when an explicit event timestamp demonstrably
+        // predates a newer window; never compare a window start to a synthetic receipt time.
+        if (feedEvent.HasAuthoritativeTimestamp && matchingStartedAt != DateTime.MinValue &&
+            matchingStartedAt - feedEvent.OccurredAtUtc > TimeSpan.FromMinutes(15))
         {
-            detail = "matching Faloop window belongs to a different spawn cycle";
+            detail = $"matching Faloop window is newer than the event ({matchingStartedAt:O} vs {feedEvent.OccurredAtUtc:O})";
             return false;
+        }
+
+        if (TryBuildEnrichedEventFromStateLocation(
+                matchingWindow.Value, feedEvent, matchingWindowId, "datacenter.status.windows",
+                out enriched, out var windowLocationDetail))
+        {
+            detail = $"matched active window directly ({windowLocationDetail})";
+            return true;
         }
 
         JsonElement? bestSighting = null;
         DateTime bestSightedAt = DateTime.MinValue;
-        var bestIsPreviousLocation = false;
+        var bestIsPreviousLocation = true;
+        string bestSightingId = string.Empty;
         foreach (var sighting in sightingsElement.EnumerateArray())
         {
             if (sighting.ValueKind != JsonValueKind.Object ||
                 !SlugEquals(FirstString(sighting, "mobId2", "mobId"), feedEvent.MobSlug) ||
                 !SlugEquals(FirstString(sighting, "worldId2", "worldId"), feedEvent.WorldSlug) ||
                 !InstanceMatches(sighting, feedEvent.Instance) ||
-                !TryFindPoi(sighting, out var candidatePoi, out _) || candidatePoi <= 0)
+                !HasUsableLocationEvidence(sighting))
                 continue;
+
             var sightedAt = ReadTimestamp(sighting, "sightedAt", "timestamp", "createdAt");
-            if (sightedAt != DateTime.MinValue && Math.Abs((sightedAt - anchor).TotalMinutes) > 5)
+            // The current location can be reported long after the spawn window opened. Only
+            // discard sightings that positively belong to the previous window.
+            if (matchingStartedAt != DateTime.MinValue && sightedAt != DateTime.MinValue &&
+                sightedAt < matchingStartedAt - TimeSpan.FromMinutes(1))
                 continue;
+
+            var candidateSightingId = FindCorrelationId(sighting);
+            if (!string.IsNullOrWhiteSpace(feedEvent.EventId) &&
+                !string.IsNullOrWhiteSpace(candidateSightingId) &&
+                !candidateSightingId.Equals(feedEvent.EventId, StringComparison.OrdinalIgnoreCase) &&
+                matchingWindowUsesEventId)
+                continue;
+
             var isPreviousLocation = TryGetPropertyIgnoreCase(sighting, "prevLocation", out var previous) &&
                                      previous.ValueKind == JsonValueKind.True;
-            if (bestSighting is null || isPreviousLocation && !bestIsPreviousLocation ||
+            // Prefer a positively reported current location over Faloop's previous-location
+            // placeholder. If only the placeholder exists, it is still the same location that
+            // Faloop exposes for the active window and is preferable to waiting forever.
+            if (bestSighting is null || !isPreviousLocation && bestIsPreviousLocation ||
                 isPreviousLocation == bestIsPreviousLocation && sightedAt > bestSightedAt)
             {
                 bestSighting = sighting;
                 bestSightedAt = sightedAt;
                 bestIsPreviousLocation = isPreviousLocation;
+                bestSightingId = candidateSightingId;
             }
         }
-        if (bestSighting is null || !TryFindPoi(bestSighting.Value, out var poiId, out var rawPoi))
+        if (bestSighting is null)
         {
             detail = "matching active Faloop window has no usable location sighting yet";
             return false;
         }
 
-        var zone = FirstString(bestSighting.Value, "zoneId2", "zoneId");
-        if (string.IsNullOrWhiteSpace(zone))
-            zone = feedEvent.ZoneSlug ?? string.Empty;
-        enriched = feedEvent with
+        if (!TryBuildEnrichedEventFromStateLocation(
+                bestSighting.Value, feedEvent,
+                string.IsNullOrWhiteSpace(bestSightingId) ? matchingWindowId : bestSightingId,
+                "datacenter.status.sightings", out enriched, out var sightingDetail))
         {
-            ZoneSlug = string.IsNullOrWhiteSpace(zone) ? feedEvent.ZoneSlug : zone,
-            PoiId = poiId,
-            RawPoiKey = $"datacenter.status.sightings:{rawPoi}",
-            RawCoordinateData = feedEvent.RawCoordinateData == "(none)"
-                ? $"state POI {poiId}"
-                : $"{feedEvent.RawCoordinateData}; state POI {poiId}",
-        };
-        detail = $"matched active window and sighting POI {poiId}";
+            detail = "matching active Faloop sighting contained no usable coordinate or POI";
+            return false;
+        }
+
+        var locationKind = bestIsPreviousLocation ? "previous-location placeholder" : "current location report";
+        detail = $"matched active window to {locationKind} ({sightingDetail})";
         return true;
     }
+
+    private static bool HasUsableLocationEvidence(JsonElement element) =>
+        TryFindPoi(element, out var poiId, out _) && poiId > 0 ||
+        TryFindDirectMapCoordinates(element, out _, out _, out _) ||
+        TryFindLocation(element, out _, out _);
+
+    private static bool TryBuildEnrichedEventFromStateLocation(
+        JsonElement locationElement,
+        FaloopFeedEvent feedEvent,
+        string correlationId,
+        string sourcePrefix,
+        out FaloopFeedEvent enriched,
+        out string detail)
+    {
+        enriched = feedEvent;
+        detail = string.Empty;
+        var poiId = 0;
+        var rawPoi = "(missing)";
+        TryFindPoi(locationElement, out poiId, out rawPoi);
+
+        var directMapX = 0f;
+        var directMapY = 0f;
+        var directPath = string.Empty;
+        TryFindDirectMapCoordinates(locationElement, out directMapX, out directMapY, out directPath);
+
+        string? rawLocation = null;
+        var locationPath = string.Empty;
+        if (TryFindLocation(locationElement, out var foundLocation, out locationPath))
+            rawLocation = foundLocation;
+        if (poiId <= 0 && !IsUsableMapCoordinate(directMapX, directMapY) &&
+            string.IsNullOrWhiteSpace(rawLocation))
+            return false;
+
+        var zone = FirstString(locationElement, "zoneId2", "zoneId");
+        if (string.IsNullOrWhiteSpace(zone) &&
+            TryFindNamedProperty(locationElement, ["zoneId2", "zoneId"], out var nestedZone, out _))
+            zone = ElementText(nestedZone);
+        if (string.IsNullOrWhiteSpace(zone))
+            zone = feedEvent.ZoneSlug ?? string.Empty;
+
+        var rawMapId = feedEvent.RawMapId;
+        if (TryFindNamedProperty(locationElement, ["mapId", "mapId2"], out var mapId, out var mapPath))
+            rawMapId = $"{sourcePrefix}:{mapPath}={ElementText(mapId)}";
+
+        var evidence = new List<string>();
+        if (feedEvent.RawCoordinateData != "(none)")
+            evidence.Add(feedEvent.RawCoordinateData);
+        if (poiId > 0)
+            evidence.Add($"{sourcePrefix} POI {poiId}");
+        if (IsUsableMapCoordinate(directMapX, directMapY))
+            evidence.Add($"{sourcePrefix}:{directPath}=({directMapX.ToString("0.###", CultureInfo.InvariantCulture)},{directMapY.ToString("0.###", CultureInfo.InvariantCulture)})");
+        if (!string.IsNullOrWhiteSpace(rawLocation))
+            evidence.Add($"{sourcePrefix}:{locationPath}={rawLocation}");
+
+        enriched = feedEvent with
+        {
+            EventId = string.IsNullOrWhiteSpace(feedEvent.EventId) ? correlationId : feedEvent.EventId,
+            ZoneSlug = string.IsNullOrWhiteSpace(zone) ? feedEvent.ZoneSlug : zone,
+            RawMapId = rawMapId,
+            PoiId = poiId > 0 ? poiId : feedEvent.PoiId,
+            RawPoiKey = poiId > 0 ? $"{sourcePrefix}:{rawPoi}" : feedEvent.RawPoiKey,
+            DirectMapX = IsUsableMapCoordinate(directMapX, directMapY) ? directMapX : feedEvent.DirectMapX,
+            DirectMapY = IsUsableMapCoordinate(directMapX, directMapY) ? directMapY : feedEvent.DirectMapY,
+            RawLocation = string.IsNullOrWhiteSpace(rawLocation) ? feedEvent.RawLocation : rawLocation,
+            RawCoordinateData = evidence.Count == 0 ? "(none)" : string.Join("; ", evidence),
+        };
+        detail = poiId > 0
+            ? $"POI {poiId}, correlationId={DisplayId(correlationId)}"
+            : $"direct/nested coordinates, correlationId={DisplayId(correlationId)}";
+        return true;
+    }
+
+    private static string FindCorrelationId(JsonElement element)
+    {
+        if (TryFindPrimitiveNamedProperty(element,
+                ["spawnId", "reportId", "eventId", "windowId"], out var id, out _))
+            return ElementText(id);
+        return string.Empty;
+    }
+
+    private static string DisplayId(string id) => string.IsNullOrWhiteSpace(id) ? "(missing)" : id;
 
     private static bool InstanceMatches(JsonElement element, int requestedInstance)
     {
@@ -876,6 +1015,51 @@ internal sealed class FaloopClient : IDisposable
             {
                 if (item.ValueKind == JsonValueKind.Object &&
                     TryFindNamedProperty(item, names, out value, out path,
+                        $"{currentPath}.{property.Name}[{index}]", depth + 1))
+                    return true;
+                index++;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryFindPrimitiveNamedProperty(
+        JsonElement element,
+        string[] names,
+        out JsonElement value,
+        out string path,
+        string currentPath = "data",
+        int depth = 0)
+    {
+        value = default;
+        path = string.Empty;
+        if (depth > 8 || element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (names.Contains(property.Name, StringComparer.OrdinalIgnoreCase) &&
+                property.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number)
+            {
+                value = property.Value;
+                path = $"{currentPath}.{property.Name}";
+                return true;
+            }
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object &&
+                TryFindPrimitiveNamedProperty(property.Value, names, out value, out path,
+                    $"{currentPath}.{property.Name}", depth + 1))
+                return true;
+            if (property.Value.ValueKind != JsonValueKind.Array)
+                continue;
+            var index = 0;
+            foreach (var item in property.Value.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object &&
+                    TryFindPrimitiveNamedProperty(item, names, out value, out path,
                         $"{currentPath}.{property.Name}[{index}]", depth + 1))
                     return true;
                 index++;

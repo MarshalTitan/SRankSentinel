@@ -477,6 +477,15 @@ public sealed class Plugin : IDalamudPlugin
             !IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
             return;
 
+        var reportId = string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId;
+        log.Information(
+            "Faloop spawn received: {Mark} / {World} / {Territory} / reportId={ReportId}; event={EventType}/{SubType}, instance={Instance}, POI={Poi}, map={MapId}, directXY={DirectX},{DirectY}, location={Location}, timestamp={Timestamp:O} ({TimestampSource})",
+            definition.Name, world, feedEvent.ZoneSlug ?? territory.ToString(), reportId,
+            feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
+            Math.Max(1, feedEvent.Instance), feedEvent.RawPoiKey, feedEvent.RawMapId,
+            feedEvent.DirectMapX, feedEvent.DirectMapY, feedEvent.RawLocation ?? "(missing)",
+            feedEvent.OccurredAtUtc, feedEvent.TimestampSource);
+
         if (!FaloopCatalog.TryResolveEventCoordinates(
                 feedEvent.ZoneSlug, feedEvent.PoiId,
                 feedEvent.DirectMapX, feedEvent.DirectMapY, feedEvent.RawLocation,
@@ -507,14 +516,17 @@ public sealed class Plugin : IDalamudPlugin
                 ? $"POI id {feedEvent.PoiId}"
                 : feedEvent.RawPoiKey;
             status = $"Waiting for Faloop location enrichment: {definition.Name} on {world} ({rawPoi})";
+            log.Information(
+                "Location missing; waiting for enrichment: {Mark} / {World} / {Territory} / reportId={ReportId}",
+                definition.Name, world, feedEvent.ZoneSlug ?? territory.ToString(), reportId);
             log.Warning(
-                "Faloop spawn is waiting for location enrichment: eventType={EventType}, subType={SubType}, eventId={EventId}, mark={Mark}, markId={MarkId}, world={World}, territory={Zone} ({TerritoryId}), map={MapId}, rawPoi={RawPoi}, directXY={DirectX},{DirectY}, location={Location}, coordinateData={CoordinateData}",
+                "Faloop spawn is waiting for location enrichment: eventType={EventType}, subType={SubType}, eventId={EventId}, mark={Mark}, markId={MarkId}, world={World}, territory={Zone} ({TerritoryId}), map={MapId}, rawPoi={RawPoi}, directXY={DirectX},{DirectY}, location={Location}, coordinateData={CoordinateData}, timestampSource={TimestampSource}",
                 feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
                 string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId,
                 definition.Name, feedEvent.MobSlug, world, feedEvent.ZoneSlug ?? "(missing)", territory,
                 feedEvent.RawMapId, rawPoi,
                 feedEvent.DirectMapX, feedEvent.DirectMapY, feedEvent.RawLocation ?? "(missing)",
-                feedEvent.RawCoordinateData);
+                feedEvent.RawCoordinateData, feedEvent.TimestampSource);
             return;
         }
 
@@ -530,6 +542,8 @@ public sealed class Plugin : IDalamudPlugin
             resolutionKind, definition.Name, world, feedEvent.EventType, feedEvent.EventSubType,
             feedEvent.EventId, feedEvent.ZoneSlug ?? "(missing)", feedEvent.RawMapId, feedEvent.RawPoiKey,
             mapX, mapY, coordinateSource, feedEvent.RawCoordinateData);
+        log.Information("Resolved destination: {Mark} / {World} / X{MapX:0.0} Y{MapY:0.0}; activating travel",
+            definition.Name, world, mapX, mapY);
 
         var isSs = HuntCatalog.IsAnySsName(definition.Name);
         AcceptSRankAlert(
@@ -568,6 +582,12 @@ public sealed class Plugin : IDalamudPlugin
                     ? $"Rejected: unknown POI {rawPoi} for {pending.Alert.CreatureName} after enrichment timeout"
                     : $"Rejected: no usable location after timeout for {pending.Alert.CreatureName} on {pending.Alert.World}";
                 log.Warning("{Status}; last enrichment result: {Detail}", status, pending.LastDetail);
+                log.Warning(
+                    "Location enrichment timed out after {Seconds:0}s: {Mark} / {World} / reportId={ReportId}; attempts={Attempts}, rawPoi={RawPoi}, directXY={DirectX},{DirectY}, location={Location}",
+                    FaloopLocationEnrichmentTimeoutSeconds, pending.Alert.CreatureName, pending.Alert.World,
+                    string.IsNullOrWhiteSpace(pending.FeedEvent.EventId) ? "(missing)" : pending.FeedEvent.EventId,
+                    pending.Attempts, pending.FeedEvent.RawPoiKey, pending.FeedEvent.DirectMapX,
+                    pending.FeedEvent.DirectMapY, pending.FeedEvent.RawLocation ?? "(missing)");
                 continue;
             }
 
@@ -597,8 +617,12 @@ public sealed class Plugin : IDalamudPlugin
                     {
                         unresolvedFaloopAlerts.Remove(key);
                         log.Information(
-                            "POI mapped successfully after Faloop state enrichment: {Mark} on {World}, {Detail}, map ({MapX:0.0}, {MapY:0.0}) via {Source}",
-                            pending.Alert.CreatureName, pending.Alert.World, result.Detail, mapX, mapY, coordinateSource);
+                            "Matched location update to reportId={ReportId}: {Mark} on {World}; {Detail}",
+                            string.IsNullOrWhiteSpace(result.Event.EventId) ? "(missing)" : result.Event.EventId,
+                            pending.Alert.CreatureName, pending.Alert.World, result.Detail);
+                        log.Information(
+                            "Resolved destination: {Mark} / {World} / X{MapX:0.0} Y{MapY:0.0} via {Source}; activating travel",
+                            pending.Alert.CreatureName, pending.Alert.World, mapX, mapY, coordinateSource);
                         resolvedEvents.Add(result.Event);
                         continue;
                     }
