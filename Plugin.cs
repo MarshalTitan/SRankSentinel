@@ -88,11 +88,14 @@ public sealed class Plugin : IDalamudPlugin
     private bool tagAttempted;
     private bool markEverIdentified;
     private bool markCombatObserved;
+    private bool pullCycleCombatObserved;
+    private bool pullCycleTagged;
     private ulong identifiedMarkGameObjectId;
     private int pullCycle = 1;
     private DateTime pullResetCandidateSinceUtc = DateTime.MinValue;
     private uint activeTagActionId;
     private bool discardAtUldah;
+    private string discardReason = string.Empty;
     private bool ssChainObserved;
     private bool ssSpawnAnnounced;
     private SsProfile? activeSsProfile;
@@ -796,6 +799,11 @@ public sealed class Plugin : IDalamudPlugin
             pendingAlerts.Any(alert => alert.Key == incoming.Key))
             return;
 
+        log.Information(
+            "New {Source} alert accepted: {Mark} on {World}, territory {Territory}, instance {Instance}, destination ({MapX:0.0}, {MapY:0.0})",
+            source, incoming.CreatureName, incoming.World, incoming.TerritoryId, incoming.Instance,
+            incoming.MapX, incoming.MapY);
+
         if (isSs &&
             current is not null &&
             (state is SentinelState.PostKillSsGrace or SentinelState.SsWatch ||
@@ -815,6 +823,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             EnqueuePersistent(incoming);
             status = $"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting";
+            log.Information("Eligible alert queued without replacing active hunt: {Mark} on {World}; {Count} pending",
+                incoming.CreatureName, incoming.World, pendingAlerts.Count);
             return;
         }
 
@@ -830,11 +840,14 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        pullCycleCombatObserved = false;
+        pullCycleTagged = false;
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
+        discardReason = string.Empty;
         ssChainObserved = false;
         ssSpawnAnnounced = false;
         activeSsProfile = null;
@@ -844,6 +857,9 @@ public sealed class Plugin : IDalamudPlugin
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
         PrepareCurrentTravel();
+        log.Information(
+            "Hunt activated: {Mark} on {World}, territory {Territory}, instance {Instance}; positive kill evidence remains required",
+            alert.CreatureName, alert.World, alert.TerritoryId, alert.Instance);
         SetState(SentinelState.ResetToUldah,
             $"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}");
     }
@@ -858,11 +874,14 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        pullCycleCombatObserved = false;
+        pullCycleTagged = false;
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
+        discardReason = string.Empty;
         ssChainObserved = true;
         ssSpawnAnnounced = true;
         activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName) ??
@@ -929,40 +948,73 @@ public sealed class Plugin : IDalamudPlugin
                 current.CreatureName, current.MapX, current.MapY, alertPoint.Value.X, alertPoint.Value.Z);
         }
 
+        // Aetheryte data can contain sparse/invalid linked Level rows. Resolution is isolated
+        // so one bad game-data reference can never unwind alert acceptance or discard the hunt.
+        TryResolveTerritoryAetheryte();
+    }
+
+    private bool TryResolveTerritoryAetheryte()
+    {
+        territoryAetheryteId = 0;
+        if (current is null)
+            return false;
+
+        try
+        {
+            ResolveTerritoryAetheryte();
+            return territoryAetheryteId != 0;
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex,
+                "Aetheryte resolution failed for {Mark} in territory {Territory}; retaining the active hunt for retry",
+                current.CreatureName, current.TerritoryId);
+            territoryAetheryteId = 0;
+            return false;
+        }
+    }
+
+    private void ResolveTerritoryAetheryte()
+    {
+        if (current is null)
+            return;
+
+        territoryAetheryteId = 0;
+
         // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
         // Idyllshire followed by the Prologue Gate aethernet destination.
         if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
             travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
         {
             territoryAetheryteId = HuntCatalog.IdyllshireAetheryteId;
+            return;
         }
-        else
+
+        var attuned = data.GetExcelSheet<Aetheryte>()
+            .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
+            .Where(row => travel.CanTeleportTo(row.RowId))
+            .ToArray();
+
+        if (TerritoryAetheryteOverrides.TryGetValue(current.TerritoryId, out var territoryOverride))
         {
-            var attuned = data.GetExcelSheet<Aetheryte>()
-                .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
-                .Where(row => travel.CanTeleportTo(row.RowId))
-                .ToArray();
-
-            if (TerritoryAetheryteOverrides.TryGetValue(current.TerritoryId, out var territoryOverride))
-            {
+            if (attuned.Any(row => row.RowId == territoryOverride.AetheryteId))
                 territoryAetheryteId = territoryOverride.AetheryteId;
-                log.Information("Territory override: {Territory} -> {Aetheryte}",
-                    territoryOverride.TerritoryName, territoryOverride.AetheryteName);
-                if (!attuned.Any(row => row.RowId == territoryAetheryteId))
-                    log.Warning(
-                        "Required territory override {Aetheryte} ({AetheryteId}) is not currently usable; refusing to choose another aetheryte in {Territory}",
-                        territoryOverride.AetheryteName, territoryAetheryteId, territoryOverride.TerritoryName);
-            }
-            else if (alertPoint is not null)
-            {
-                territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
-            }
-
+            log.Information("Territory override: {Territory} -> {Aetheryte}",
+                territoryOverride.TerritoryName, territoryOverride.AetheryteName);
             if (territoryAetheryteId == 0)
-                territoryAetheryteId = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId).RowId;
-            if (territoryAetheryteId == 0)
-                territoryAetheryteId = attuned.FirstOrDefault().RowId;
+                log.Warning(
+                    "Required territory override {Aetheryte} ({AetheryteId}) is not currently usable; refusing to choose another aetheryte in {Territory}",
+                    territoryOverride.AetheryteName, territoryOverride.AetheryteId, territoryOverride.TerritoryName);
         }
+        else if (alertPoint is not null)
+        {
+            territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
+        }
+
+        if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
+            territoryAetheryteId = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId).RowId;
+        if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
+            territoryAetheryteId = attuned.FirstOrDefault().RowId;
     }
 
     private uint SelectNearestUsableAetheryte(
@@ -974,13 +1026,16 @@ public sealed class Plugin : IDalamudPlugin
         {
             var levelReference = aetheryte.Level.FirstOrDefault(reference =>
                 reference.RowId != 0 &&
+                reference.IsValid &&
                 reference.Value.Territory.RowId == current?.TerritoryId);
-            if (levelReference.RowId == 0)
+            if (levelReference.RowId == 0 || !levelReference.IsValid)
                 continue;
 
             var level = levelReference.Value;
             var distanceYalms = HorizontalDistance(destination, new Vector3(level.X, level.Y, level.Z));
-            var name = aetheryte.PlaceName.Value.Name.ToString();
+            var name = aetheryte.PlaceName.IsValid
+                ? aetheryte.PlaceName.Value.Name.ToString()
+                : $"Aetheryte {aetheryte.RowId}";
             candidates.Add((aetheryte.RowId, name, distanceYalms));
             log.Information("Teleport candidate: {Aetheryte} - {Distance:0}y from mark",
                 name, distanceYalms);
@@ -1025,8 +1080,19 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            log.Error(ex, "S Rank Sentinel state machine failed; resetting safely.");
-            FailCurrent("Internal error; resetting through Ul'dah");
+            log.Error(ex, "S Rank Sentinel state machine failed; retaining the active hunt safely.");
+            vnav.StopSafe();
+            if (current is null)
+            {
+                SetState(SentinelState.Idle, "Internal error while idle; no hunt was active");
+                return;
+            }
+
+            discardAtUldah = false;
+            discardReason = string.Empty;
+            nextActionUtc = now.AddSeconds(3);
+            SetState(SentinelState.ResetToUldah,
+                $"Internal error while handling {current.CreatureName}; active hunt retained and retrying through Ul'dah");
         }
     }
 
@@ -1233,14 +1299,15 @@ public sealed class Plugin : IDalamudPlugin
             if (discardAtUldah)
             {
                 var abandoned = current?.CreatureName ?? "alert";
+                var reason = string.IsNullOrWhiteSpace(discardReason) ? "unspecified failure" : discardReason;
                 ClearCurrent();
                 if (TryDequeueNextValid(out var next))
                 {
-                    StartAlert(next, $"{abandoned} reset without a confirmed kill; next queued alert");
+                    StartAlert(next, $"{abandoned} abandoned without a confirmed kill ({reason}); next queued alert");
                     return;
                 }
                 SetState(SentinelState.Idle,
-                    $"{abandoned} reset without a confirmed kill; standing by in Ul'dah on {travel.CurrentWorld}");
+                    $"{abandoned} abandoned without a confirmed kill ({reason}); standing by in Ul'dah on {travel.CurrentWorld}");
                 return;
             }
 
@@ -1280,6 +1347,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
+            log.Information("Travel state entered for {Mark}: {World} -> territory {Territory}, instance {Instance}",
+                current.CreatureName, current.World, current.TerritoryId, current.Instance);
             SetState(SentinelState.TeleportToTerritory,
                 $"World ready; preparing normal teleport toward {current.CreatureName}");
             return;
@@ -1537,6 +1606,9 @@ public sealed class Plugin : IDalamudPlugin
     private void CompleteWorldVisit(string targetWorld)
     {
         vnav.StopSafe();
+        if (current is not null)
+            log.Information("Travel state entered for {Mark}: arrived on {World}; next territory {Territory}, instance {Instance}",
+                current.CreatureName, targetWorld, current.TerritoryId, current.Instance);
         SetState(SentinelState.TeleportToTerritory,
             $"Arrived on {targetWorld}; preparing territory teleport");
     }
@@ -1563,7 +1635,21 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (territoryAetheryteId == 0)
         {
-            FailCurrent($"No attuned aetheryte was found for territory {current.TerritoryId}");
+            if (now < nextActionUtc)
+                return;
+            if (TryResolveTerritoryAetheryte())
+            {
+                log.Information("Recovered territory teleport destination {AetheryteId} for active hunt {Mark}",
+                    territoryAetheryteId, current.CreatureName);
+                nextActionUtc = now;
+                return;
+            }
+
+            status = $"No attuned aetheryte is currently resolvable for territory {current.TerritoryId}; " +
+                     $"retaining {current.CreatureName} and retrying";
+            log.Warning("No attuned aetheryte currently resolved for {Mark} in territory {Territory}; active hunt retained",
+                current.CreatureName, current.TerritoryId);
+            nextActionUtc = now.AddSeconds(5);
             return;
         }
         if (now < nextActionUtc || travel.IsBusy)
@@ -2148,6 +2234,7 @@ public sealed class Plugin : IDalamudPlugin
                 if (attempt.Attempted)
                 {
                     tagAttempted = true;
+                    pullCycleTagged = true;
                     nextActionUtc = now.AddSeconds(3);
                     status = $"Tagged {mark.Name.TextValue} for pull cycle {pullCycle} (action {activeTagActionId}); client " +
                              (attempt.Accepted ? "accepted it" : "did not accept it") +
@@ -2936,9 +3023,12 @@ public sealed class Plugin : IDalamudPlugin
         killConfirmed = true;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         discardAtUldah = false;
+        discardReason = string.Empty;
         vnav.StopSafe();
         var now = DateTime.UtcNow;
         MarkKilled(current, now);
+        log.Information("Hunt cleared/completed with positive evidence: {Mark} on {World}; reason={Reason}",
+            current.CreatureName, current.World, reason);
         if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName) &&
             clientState.TerritoryType == current.TerritoryId &&
             travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
@@ -2964,7 +3054,10 @@ public sealed class Plugin : IDalamudPlugin
     {
         vnav.StopSafe();
         discardAtUldah = true;
+        discardReason = reason;
         nextActionUtc = DateTime.UtcNow;
+        log.Warning("Abandoning active hunt {Mark} without confirmed kill only after explicit failure: {Reason}",
+            current?.CreatureName ?? "(none)", reason);
         SetState(SentinelState.ResetToUldah, $"{reason}; discarding this alert after the Ul'dah reset");
     }
 
@@ -2987,11 +3080,14 @@ public sealed class Plugin : IDalamudPlugin
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
+        pullCycleCombatObserved = false;
+        pullCycleTagged = false;
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
         discardAtUldah = false;
+        discardReason = string.Empty;
         ssChainObserved = false;
         ssSpawnAnnounced = false;
         activeSsProfile = null;
@@ -3014,17 +3110,33 @@ public sealed class Plugin : IDalamudPlugin
     private void MarkWasIdentified(IBattleChara target)
     {
         mark = target;
+        var firstIdentification = !markEverIdentified;
         markEverIdentified = true;
         if (identifiedMarkGameObjectId == 0)
             identifiedMarkGameObjectId = target.GameObjectId;
         lastMarkSeenUtc = DateTime.UtcNow;
+        if (firstIdentification)
+            log.Information(
+                "Entity first positively identified: {Mark}, object={ObjectId}, world={World}, territory={Territory}",
+                target.Name.TextValue, target.GameObjectId, travel.CurrentWorld, clientState.TerritoryType);
         if (CombatController.IsMarkInCombat(target))
+        {
             markCombatObserved = true;
+            if (!pullCycleCombatObserved)
+            {
+                pullCycleCombatObserved = true;
+                log.Information("Combat first observed for {Mark} in pull cycle {PullCycle}",
+                    target.Name.TextValue, pullCycle);
+            }
+        }
     }
 
     private bool ObservePullCycleReset(IBattleChara target, DateTime now)
     {
-        if (!tagAttempted || killConfirmed || target.IsDead || target.CurrentHp == 0 ||
+        if (current is null || !markEverIdentified || !pullCycleCombatObserved || !pullCycleTagged ||
+            !tagAttempted || killConfirmed || target.IsDead || target.CurrentHp == 0 ||
+            clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
             identifiedMarkGameObjectId == 0 || target.GameObjectId != identifiedMarkGameObjectId)
         {
             pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -3043,8 +3155,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             pullResetCandidateSinceUtc = now;
             log.Information(
-                "Possible reset for {Mark}: combat ended and HP restored; requiring {Seconds:0}s stable confirmation",
-                target.Name.TextValue, PullResetConfirmationSeconds);
+                "Reset candidate started: same {Mark} entity, previous combat={PreviousCombat}, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, requiring {Seconds:0.0}s stable confirmation",
+                target.Name.TextValue, pullCycleCombatObserved, pullCycleTagged,
+                CombatController.HpPercent(target), PullResetConfirmationSeconds);
             return false;
         }
 
@@ -3052,14 +3165,19 @@ public sealed class Plugin : IDalamudPlugin
             return false;
 
         var completedCycle = pullCycle;
+        var stableSeconds = (now - pullResetCandidateSinceUtc).TotalSeconds;
         pullCycle++;
         tagAttempted = false;
+        pullCycleCombatObserved = false;
+        pullCycleTagged = false;
         activeTagActionId = 0;
         postTagRetreatActive = false;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         vnav.StopSafe();
-        log.Information("Reset detected for {Mark}: HP restored and combat ended after pull cycle {PullCycle}",
-            target.Name.TextValue, completedCycle);
+        log.Information(
+            "Reset confirmed: same {Mark} entity {ObjectId}, previous combat=true, previous tag=true, combat=false, HP={Hp:0.0}%, stable={Stable:0.0}s; completed pull cycle {PullCycle}",
+            target.Name.TextValue, target.GameObjectId, CombatController.HpPercent(target),
+            stableSeconds, completedCycle);
         log.Information("Tag gate re-armed for pull cycle {PullCycle}", pullCycle);
 
         if (ClearanceFromMark(target) < ActiveDistanceProfile.WaitingDistance || state != SentinelState.SafeWait)
