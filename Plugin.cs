@@ -37,7 +37,6 @@ public sealed class Plugin : IDalamudPlugin
     private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
     private const float PullResetMinimumHpPercent = 99f;
     private const double PullResetConfirmationSeconds = 4;
-    private const byte AetheryteMapMarkerDataType = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -954,9 +953,9 @@ public sealed class Plugin : IDalamudPlugin
                         "Required territory override {Aetheryte} ({AetheryteId}) is not currently usable; refusing to choose another aetheryte in {Territory}",
                         territoryOverride.AetheryteName, territoryAetheryteId, territoryOverride.TerritoryName);
             }
-            else if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
+            else if (alertPoint is not null)
             {
-                territoryAetheryteId = SelectNearestUsableAetheryte(attuned, map, current.MapX, current.MapY);
+                territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
             }
 
             if (territoryAetheryteId == 0)
@@ -968,35 +967,19 @@ public sealed class Plugin : IDalamudPlugin
 
     private uint SelectNearestUsableAetheryte(
         IReadOnlyCollection<Aetheryte> attuned,
-        Map map,
-        float destinationMapX,
-        float destinationMapY)
+        Vector3 destination)
     {
-        if (!data.GetSubrowExcelSheet<MapMarker>().TryGetRow(map.RowId, out var mapMarkers))
-        {
-            log.Warning("No map-marker data was available to rank aetherytes for territory {TerritoryId}; using the configured fallback",
-                current?.TerritoryId ?? 0);
-            return 0;
-        }
-
         var candidates = new List<(uint Id, string Name, float Distance)>();
         foreach (var aetheryte in attuned)
         {
-            var marker = mapMarkers.FirstOrDefault(candidate =>
-                candidate.DataType == AetheryteMapMarkerDataType &&
-                candidate.DataKey.RowId == aetheryte.RowId);
-            if (marker.DataKey.RowId != aetheryte.RowId)
+            var levelReference = aetheryte.Level.FirstOrDefault(reference =>
+                reference.RowId != 0 &&
+                reference.Value.Territory.RowId == current?.TerritoryId);
+            if (levelReference.RowId == 0)
                 continue;
 
-            var divisor = map.SizeFactor / 2f;
-            if (divisor <= 0f)
-                continue;
-            var markerMapX = marker.X / divisor + 1f;
-            var markerMapY = marker.Y / divisor + 1f;
-            var mapDistance = Vector2.Distance(
-                new Vector2(destinationMapX, destinationMapY),
-                new Vector2(markerMapX, markerMapY));
-            var distanceYalms = mapDistance * map.SizeFactor;
+            var level = levelReference.Value;
+            var distanceYalms = HorizontalDistance(destination, new Vector3(level.X, level.Y, level.Z));
             var name = aetheryte.PlaceName.Value.Name.ToString();
             candidates.Add((aetheryte.RowId, name, distanceYalms));
             log.Information("Teleport candidate: {Aetheryte} - {Distance:0}y from mark",
@@ -1006,7 +989,7 @@ public sealed class Plugin : IDalamudPlugin
         var selected = candidates.OrderBy(candidate => candidate.Distance).FirstOrDefault();
         if (selected.Id == 0)
         {
-            log.Warning("Usable aetherytes were found for territory {TerritoryId}, but none had a usable map marker; using the configured fallback",
+            log.Warning("Usable aetherytes were found for territory {TerritoryId}, but none had a linked territory Level position; using the configured fallback",
                 current?.TerritoryId ?? 0);
             return 0;
         }
