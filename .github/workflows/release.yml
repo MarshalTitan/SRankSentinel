@@ -147,12 +147,21 @@ jobs:
       - name: Validate the central catalog before publishing
         if: steps.catalog-auth.outputs.enabled == 'true'
         shell: pwsh
-        run: >-
-          ./central-catalog/.github/scripts/Test-Catalog.ps1
-          -CatalogPath 'central-catalog/repo.json'
-          -VerifyRemoteAssets
-          -ExpectedInternalName 'SRankSentinel'
-          -ExpectedVersion '${{ steps.version.outputs.value }}'
+        run: |
+          # This release owns only the SRankSentinel object. Validate that object in isolation
+          # so unrelated in-development catalog entries cannot block a Sentinel hotfix.
+          $entries = @(Get-Content -LiteralPath 'central-catalog/repo.json' -Raw | ConvertFrom-Json)
+          $entry = $entries | Where-Object { $_.InternalName -eq 'SRankSentinel' } | Select-Object -First 1
+          if ($null -eq $entry) {
+            throw 'The central catalog does not contain SRankSentinel.'
+          }
+          $entryPath = Join-Path $env:RUNNER_TEMP 'sranksentinel-central-entry.json'
+          ConvertTo-Json -InputObject @($entry) -Depth 20 | Set-Content -LiteralPath $entryPath -Encoding utf8
+          ./central-catalog/.github/scripts/Test-Catalog.ps1 `
+            -CatalogPath $entryPath `
+            -VerifyRemoteAssets `
+            -ExpectedInternalName 'SRankSentinel' `
+            -ExpectedVersion '${{ steps.version.outputs.value }}'
 
       - name: Commit the central-catalog update
         if: steps.catalog-auth.outputs.enabled == 'true'
@@ -171,22 +180,7 @@ jobs:
       - name: Verify the public central catalog
         if: steps.catalog-auth.outputs.enabled == 'true'
         shell: pwsh
-        run: |
-          $expectedVersion = '${{ steps.version.outputs.value }}'
-          $publicPath = Join-Path $env:RUNNER_TEMP 'central-repo.json'
-          $published = $false
-          for ($attempt = 1; $attempt -le 12; $attempt++) {
-            $cacheBuster = [Uri]::EscapeDataString("${{ github.run_id }}-$attempt-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())")
-            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json?catalog=$cacheBuster" -OutFile $publicPath
-            $entries = @(Get-Content -LiteralPath $publicPath -Raw | ConvertFrom-Json)
-            $entry = $entries | Where-Object { $_.InternalName -eq 'SRankSentinel' } | Select-Object -First 1
-            if ($null -ne $entry -and $entry.AssemblyVersion -eq $expectedVersion) {
-              $published = $true
-              break
-            }
-            Start-Sleep -Seconds 5
-          }
-          if (-not $published) {
-            throw "The public central catalog did not publish SRankSentinel $expectedVersion before the retry limit."
-          }
-          ./central-catalog/.github/scripts/Test-Catalog.ps1 -CatalogPath $publicPath -VerifyRemoteAssets -ExpectedInternalName 'SRankSentinel' -ExpectedVersion $expectedVersion
+        run: >-
+          ./.github/scripts/Test-PublicDistribution.ps1
+          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
