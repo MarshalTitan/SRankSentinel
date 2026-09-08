@@ -61,12 +61,18 @@ for (const required of [
   '"windows"',
   '"sightings"',
   '"zonePoiId"',
-  'different spawn cycle',
+  'HasAuthoritativeTimestamp',
+  'current location report',
+  'matchingStartedAt - TimeSpan.FromMinutes(1)',
 ]) {
   if (!client.includes(required)) {
     console.error(`Faloop direct-feed enrichment audit: ${clientPath} is missing ${required}`);
     failures++;
   }
+}
+if (client.includes('Math.Abs((anchor - feedEvent.OccurredAtUtc).TotalMinutes) > 15')) {
+  console.error('Faloop direct-feed enrichment audit: synthetic receipt time is still being used as a spawn-cycle cutoff');
+  failures++;
 }
 let expectedPoiCount = 0;
 for (const [normalizedSlug, actual] of actualZones) {
