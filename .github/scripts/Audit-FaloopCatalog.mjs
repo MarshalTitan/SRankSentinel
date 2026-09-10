@@ -56,8 +56,10 @@ for (const match of catalog.matchAll(/\["([^"]+)"\]\s*=\s*Zone\((\d+),\s*"([^"]*
 let failures = 0;
 for (const required of [
   '"mobworldspawn"',
+  '"sighting_set"',
+  '"spawn_location"',
   'TryEnrichLocationAsync',
-  '/api/app/datacenter/',
+  '/api/app/data-center/',
   '"windows"',
   '"sightings"',
   '"zonePoiId"',
@@ -69,6 +71,20 @@ for (const required of [
     console.error(`Faloop direct-feed enrichment audit: ${clientPath} is missing ${required}`);
     failures++;
   }
+}
+for (const required of [
+  'new(2966, 139, 15, "Nandi")',
+  '134, 135, 137, 138, 139, 180',
+  'ResolveUniqueName',
+]) {
+  if (!huntCatalog.includes(required)) {
+    console.error(`Centurio/Nandi audit: ${huntCatalogPath} is missing ${required}`);
+    failures++;
+  }
+}
+if (client.includes('/api/app/datacenter/')) {
+  console.error('Faloop endpoint audit: obsolete /api/app/datacenter/ route is still present');
+  failures++;
 }
 if (client.includes('Math.Abs((anchor - feedEvent.OccurredAtUtc).TotalMinutes) > 15')) {
   console.error('Faloop direct-feed enrichment audit: synthetic receipt time is still being used as a spawn-cycle cutoff');
