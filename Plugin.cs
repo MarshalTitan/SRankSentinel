@@ -45,9 +45,10 @@ public sealed class Plugin : IDalamudPlugin
     private const double SsStagingRouteRetrySeconds = 3;
     private const float SsStagingArrivalDistance = 5f;
     private const double ApproachRouteRetrySeconds = 3;
-    private const double ApproachRouteStallSeconds = 10;
+    private const double ApproachRouteStallSeconds = 15;
+    private const double ApproachMovementStartGraceSeconds = 8;
+    private const double ApproachSlowPathfindNoticeSeconds = 20;
     private const float ApproachSegmentLength = 180f;
-    private const float ApproachWaypointArrivalDistance = 10f;
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
@@ -89,17 +90,24 @@ public sealed class Plugin : IDalamudPlugin
     private Vector3? alertPoint;
     private Vector3? approachPoint;
     private Vector3? approachRouteTarget;
+    private Task<List<Vector3>>? approachPathTask;
     private Vector3 approachRouteStartPosition;
     private Vector3 approachLastProgressPosition;
     private float approachRouteStartRemaining;
     private float approachBestRemaining;
     private DateTime approachRouteStartedUtc = DateTime.MinValue;
     private DateTime approachLastProgressUtc = DateTime.MinValue;
+    private DateTime approachMovementSubmittedUtc = DateTime.MinValue;
     private int approachProjectionCandidateIndex;
     private int approachProjectionCandidateCount;
     private int approachEarlyStops;
     private bool approachRouteIsSegment;
     private bool approachStartingEgressActive;
+    private bool approachPathfindingObserved;
+    private bool approachMovementObserved;
+    private bool approachSlowPathfindNoticeLogged;
+    private int approachSubmittedWaypointCount;
+    private int approachLastObservedWaypointCount = -1;
     private Vector3? safePoint;
     private ParkingCandidate? selectedParkingCandidate;
     private Task<List<Vector3>>? parkingPathTask;
@@ -197,7 +205,7 @@ public sealed class Plugin : IDalamudPlugin
 
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pi);
-        vnav = new VNavmeshIpc(pi);
+        vnav = new VNavmeshIpc(pi, pluginLog);
         travel = new NativeTravel(gameGui, objectTable, targetManager, condition, dataManager);
         combat = new CombatController(gameGui, condition, objectTable, targetManager);
         faloop = new FaloopClient(pluginLog);
@@ -2518,7 +2526,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (!vnav.IsReadySafe())
         {
-            vnav.StopSafe();
+            vnav.StopSafe("mesh readiness was lost during explicit approach path lifecycle");
+            ResetApproachRouteTracking(clearProjectionCandidates: false);
             BeginMeshWait("vnavmesh readiness was lost during the coordinate approach");
             return;
         }
@@ -2533,7 +2542,7 @@ public sealed class Plugin : IDalamudPlugin
         var distance = HorizontalDistance(playerPosition, approachPoint.Value);
         if (distance <= ActiveDistanceProfile.FlagApproachDistance + 8f)
         {
-            vnav.StopSafe();
+            vnav.StopSafe("reported-coordinate scan range reached");
             log.Information(
                 "Within entity scan range for {Mark}: {Distance:0}y from the projected report; switching to mark detection",
                 current.CreatureName, distance);
@@ -2543,13 +2552,114 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe())
+        if (approachPathTask is not null)
         {
-            UpdateApproachProgress(now, playerPosition, distance);
-            if ((now - approachLastProgressUtc).TotalSeconds >= ApproachRouteStallSeconds)
+            var pathfindElapsed = (now - approachRouteStartedUtc).TotalSeconds;
+            var navPathfinding = vnav.IsNavPathfindInProgressSafe();
+            if (navPathfinding && !approachPathfindingObserved)
             {
-                vnav.StopSafe();
-                HandleStoppedApproachRoute(now, "vnavmesh route remained active without measurable movement");
+                approachPathfindingObserved = true;
+                log.Information(
+                    "vnavmesh entered pathfinding for {Mark}; mounted={Mounted}, flying={Flying}",
+                    current.CreatureName, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+            }
+
+            if (!approachPathTask.IsCompleted)
+            {
+                if (pathfindElapsed >= ApproachSlowPathfindNoticeSeconds && !approachSlowPathfindNoticeLogged)
+                {
+                    approachSlowPathfindNoticeLogged = true;
+                    log.Warning(
+                        "Pathfinding for {Mark} is still pending after {Elapsed:0.0}s; retaining the request without Stop/reissue",
+                        current.CreatureName, pathfindElapsed);
+                }
+                status = $"Pathfinding to {current.CreatureName}'s approach waypoint " +
+                         $"({distance:0}y remaining); waiting for vnavmesh without cancelling the request";
+                return;
+            }
+
+            var completedTask = approachPathTask;
+            approachPathTask = null;
+            List<Vector3> path;
+            try
+            {
+                path = completedTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                log.Warning(ex, "vnavmesh pathfinding failed for {Mark}", current.CreatureName);
+                HandleStoppedApproachRoute(now, "pathfinding task failed before movement could begin");
+                return;
+            }
+
+            if (path.Count == 0)
+            {
+                log.Information("Pathfinding returned no waypoints for {Mark}", current.CreatureName);
+                HandleStoppedApproachRoute(now, "pathfinding completed with zero waypoints");
+                return;
+            }
+
+            var firstGap = HorizontalDistance(playerPosition, path[0]);
+            var lastGap = HorizontalDistance(path[^1], approachRouteTarget ?? approachPoint.Value);
+            log.Information(
+                "Pathfinding succeeded for {Mark}: {Count} waypoint(s), first-point gap={FirstGap:0.0}y, endpoint gap={LastGap:0.0}y, movementAllowed={MovementAllowed}",
+                current.CreatureName, path.Count, firstGap, lastGap, vnav.IsMovementAllowedSafe());
+            if (firstGap > 40f)
+                log.Warning(
+                    "First path point for {Mark} is {Gap:0.0}y from the current navmesh position; route will be observed during the movement-start grace period",
+                    current.CreatureName, firstGap);
+
+            if (!vnav.MovePathSafe(path, true))
+            {
+                HandleStoppedApproachRoute(now, "Path.MoveTo rejected the computed waypoint list");
+                return;
+            }
+
+            approachSubmittedWaypointCount = path.Count;
+            approachLastObservedWaypointCount = -1;
+            approachMovementSubmittedUtc = now;
+            approachMovementObserved = false;
+            approachLastProgressUtc = now;
+            status = $"Route submitted for {current.CreatureName} ({path.Count} waypoints); " +
+                     "waiting for vnavmesh movement to begin";
+            return;
+        }
+
+        var pathRunning = vnav.IsPathRunningSafe();
+        var waypointCount = vnav.PathWaypointCountSafe();
+        var simplePathfinding = vnav.IsPathfindInProgressSafe();
+        var navPathfindingActive = vnav.IsNavPathfindInProgressSafe();
+        if (pathRunning || waypointCount > 0)
+        {
+            if (!approachMovementObserved)
+            {
+                approachMovementObserved = true;
+                var activeWaypoints = vnav.PathWaypointsSafe();
+                var activeFirstGap = activeWaypoints.Count > 0
+                    ? HorizontalDistance(playerPosition, activeWaypoints[0])
+                    : -1f;
+                log.Information(
+                    "vnavmesh entered movement/following for {Mark}: running={Running}, waypoints={Waypoints}/{Submitted}, first-active-point={FirstGap:0.0}y, movementAllowed={MovementAllowed}, mounted={Mounted}, flying={Flying}",
+                    current.CreatureName, pathRunning, waypointCount, approachSubmittedWaypointCount,
+                    activeFirstGap, vnav.IsMovementAllowedSafe(), condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+            }
+            if (waypointCount != approachLastObservedWaypointCount)
+            {
+                log.Debug(
+                    "Approach waypoint state for {Mark}: {Previous} -> {Current}",
+                    current.CreatureName, approachLastObservedWaypointCount, waypointCount);
+                approachLastObservedWaypointCount = waypointCount;
+            }
+            UpdateApproachProgress(now, playerPosition, distance);
+            var movementAge = approachMovementSubmittedUtc == DateTime.MinValue
+                ? double.MaxValue
+                : (now - approachMovementSubmittedUtc).TotalSeconds;
+            if (movementAge >= ApproachMovementStartGraceSeconds &&
+                (now - approachLastProgressUtc).TotalSeconds >= ApproachRouteStallSeconds)
+            {
+                vnav.StopSafe("approach route remained active without measurable movement after the startup grace period");
+                HandleStoppedApproachRoute(now,
+                    $"movement stalled; running={pathRunning}, waypoints={waypointCount}, movementAllowed={vnav.IsMovementAllowedSafe()}");
                 return;
             }
 
@@ -2561,13 +2671,26 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (now < nextActionUtc)
-            return;
-        if (approachRouteStartedUtc != DateTime.MinValue)
+        if (approachMovementSubmittedUtc != DateTime.MinValue)
         {
-            HandleStoppedApproachRoute(now, "vnavmesh route stopped before the reported area");
+            var movementStartAge = (now - approachMovementSubmittedUtc).TotalSeconds;
+            if (movementStartAge < ApproachMovementStartGraceSeconds || simplePathfinding || navPathfindingActive)
+            {
+                status = $"Route submitted for {current.CreatureName}; waiting for movement to start " +
+                         $"({movementStartAge:0.0}/{ApproachMovementStartGraceSeconds:0}s grace, " +
+                         $"pathfinding={simplePathfinding || navPathfindingActive})";
+                return;
+            }
+
+            HandleStoppedApproachRoute(now,
+                $"movement state ended after submission; movementStarted={approachMovementObserved}, " +
+                $"running={pathRunning}, waypoints={waypointCount}, movementAllowed={vnav.IsMovementAllowedSafe()}, " +
+                $"mounted={condition[ConditionFlag.Mounted]}, flying={condition[ConditionFlag.InFlight]}");
             return;
         }
+
+        if (now < nextActionUtc)
+            return;
         if (!EnsureMounted(now))
             return;
 
@@ -2645,20 +2768,31 @@ public sealed class Plugin : IDalamudPlugin
         var target = approachRouteCandidates.Dequeue();
         var remaining = HorizontalDistance(player, approachPoint.Value);
         approachRouteIsSegment = HorizontalDistance(target, approachPoint.Value) > 2f;
-        var stopRange = approachRouteIsSegment
-            ? ApproachWaypointArrivalDistance
-            : ActiveDistanceProfile.FlagApproachDistance;
-        if (!vnav.MoveCloseToSafe(target, true, stopRange))
+        var pathTask = vnav.PathfindSafe(player, target, true);
+        if (pathTask is null)
             return false;
 
         approachRouteTarget = target;
+        approachPathTask = pathTask;
         approachRouteStartPosition = player;
         approachLastProgressPosition = player;
         approachRouteStartRemaining = remaining;
         approachBestRemaining = remaining;
         approachRouteStartedUtc = now;
         approachLastProgressUtc = now;
-        nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+        approachMovementSubmittedUtc = DateTime.MinValue;
+        approachPathfindingObserved = false;
+        approachMovementObserved = false;
+        approachSlowPathfindNoticeLogged = false;
+        approachSubmittedWaypointCount = 0;
+        approachLastObservedWaypointCount = -1;
+        nextActionUtc = DateTime.MinValue;
+
+        log.Information(
+            "Submitted explicit vnavmesh pathfind for {Mark}: segment={Segment}, targetDistance={TargetDistance:0.0}y, totalRemaining={Remaining:0.0}y, mounted={Mounted}, flying={Flying}",
+            current?.CreatureName ?? "active hunt", approachRouteIsSegment,
+            HorizontalDistance(player, target), remaining,
+            condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
 
         if (approachStartingEgressActive)
             log.Information(
@@ -2759,8 +2893,15 @@ public sealed class Plugin : IDalamudPlugin
             "Route stopped after {Progress:0.0}y destination progress ({Movement:0.0}y actual movement) for {Mark}: {Reason}",
             destinationProgress, displacement, current.CreatureName, reason);
         approachRouteTarget = null;
+        approachPathTask = null;
         approachRouteStartedUtc = DateTime.MinValue;
         approachLastProgressUtc = DateTime.MinValue;
+        approachMovementSubmittedUtc = DateTime.MinValue;
+        approachPathfindingObserved = false;
+        approachMovementObserved = false;
+        approachSlowPathfindNoticeLogged = false;
+        approachSubmittedWaypointCount = 0;
+        approachLastObservedWaypointCount = -1;
         nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
 
         if (destinationProgress >= ApproachMeaningfulProgressDistance)
@@ -2815,15 +2956,22 @@ public sealed class Plugin : IDalamudPlugin
     {
         approachRouteCandidates.Clear();
         approachRouteTarget = null;
+        approachPathTask = null;
         approachRouteStartPosition = Vector3.Zero;
         approachLastProgressPosition = Vector3.Zero;
         approachRouteStartRemaining = 0f;
         approachBestRemaining = 0f;
         approachRouteStartedUtc = DateTime.MinValue;
         approachLastProgressUtc = DateTime.MinValue;
+        approachMovementSubmittedUtc = DateTime.MinValue;
         approachEarlyStops = 0;
         approachRouteIsSegment = false;
         approachStartingEgressActive = false;
+        approachPathfindingObserved = false;
+        approachMovementObserved = false;
+        approachSlowPathfindNoticeLogged = false;
+        approachSubmittedWaypointCount = 0;
+        approachLastObservedWaypointCount = -1;
         if (!clearProjectionCandidates)
             return;
         approachProjectionCandidates.Clear();
