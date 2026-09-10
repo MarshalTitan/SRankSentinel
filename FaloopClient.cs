@@ -475,7 +475,7 @@ internal sealed class FaloopClient : IDisposable
             lastRejectedEventReason = "None";
             status = "Faloop feed healthy; recognized hunt events received";
         }
-        log.Information(
+        log.Debug(
             "Raw Faloop hunt event recognized: type={Type}/{SubType}, action={Action}, mark={Mark}, world={World}, eventId={EventId}",
             feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
             feedEvent.Action, feedEvent.MobSlug, feedEvent.WorldSlug,

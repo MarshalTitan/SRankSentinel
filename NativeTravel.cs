@@ -21,6 +21,8 @@ internal sealed class NativeTravel(
 {
     public const uint UldahAetheryteId = 9;
     public static readonly Vector3 UldahAetherytePosition = new(-144.52f, -1.36f, -169.67f);
+    private uint lastKnownDataCenterId;
+    private string lastKnownDataCenterName = string.Empty;
 
     public bool IsBetweenAreas =>
         condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
@@ -47,13 +49,44 @@ internal sealed class NativeTravel(
 
     public bool IsSameDataCenter(string world)
     {
-        if (objects.LocalPlayer is not { } player || string.IsNullOrWhiteSpace(world))
+        return TryGetDataCenterRelationship(world, out _, out _, out var isSameDataCenter) &&
+               isSameDataCenter;
+    }
+
+    /// <summary>
+    /// Refreshes the session data center from the character's current visited World. The cached
+    /// value survives short zoning transitions where LocalPlayer is temporarily unavailable.
+    /// </summary>
+    public void RefreshCurrentDataCenter()
+    {
+        if (objects.LocalPlayer is not { } player || player.CurrentWorld.Value.DataCenter.RowId == 0)
+            return;
+        lastKnownDataCenterId = player.CurrentWorld.Value.DataCenter.RowId;
+        lastKnownDataCenterName = player.CurrentWorld.Value.DataCenter.Value.Name.ToString();
+    }
+
+    public bool TryGetDataCenterRelationship(
+        string world,
+        out string currentDataCenter,
+        out string eventDataCenter,
+        out bool isSameDataCenter)
+    {
+        currentDataCenter = string.Empty;
+        eventDataCenter = string.Empty;
+        isSameDataCenter = false;
+        RefreshCurrentDataCenter();
+        if (lastKnownDataCenterId == 0 || string.IsNullOrWhiteSpace(world))
             return false;
 
         var target = data.GetExcelSheet<World>()
             .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));
-        return target.RowId != 0 && player.CurrentWorld.Value.DataCenter.RowId != 0 &&
-               target.DataCenter.RowId == player.CurrentWorld.Value.DataCenter.RowId;
+        if (target.RowId == 0 || target.DataCenter.RowId == 0)
+            return false;
+
+        currentDataCenter = lastKnownDataCenterName;
+        eventDataCenter = target.DataCenter.Value.Name.ToString();
+        isSameDataCenter = target.DataCenter.RowId == lastKnownDataCenterId;
+        return true;
     }
 
     public string GetDataCenterSlug(string world)

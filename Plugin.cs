@@ -446,8 +446,20 @@ public sealed class Plugin : IDalamudPlugin
 
     private void HandleFaloopEvent(FaloopFeedEvent feedEvent)
     {
-        PruneUnresolvedFaloopAlerts();
         var world = ResolveFaloopWorld(feedEvent.WorldSlug);
+        if (travel.TryGetDataCenterRelationship(
+                world, out var currentDataCenter, out var eventDataCenter, out var isSameDataCenter) &&
+            !isSameDataCenter)
+        {
+            // Cross-DC events are irrelevant to normal World Visit. Keep this below the normal
+            // UI/log level and return before territory, expansion, POI, queue, or travel work.
+            log.Debug(
+                "Ignored Faloop event: {World} is on {EventDataCenter}; current DC is {CurrentDataCenter}",
+                world, eventDataCenter, currentDataCenter);
+            return;
+        }
+
+        PruneUnresolvedFaloopAlerts();
         var creature = FaloopCatalog.DisplayName(feedEvent.MobSlug);
         var hasTerritory = FaloopCatalog.TryResolveTerritory(feedEvent.ZoneSlug, out var territory);
         SetFaloopDecision(
@@ -1188,6 +1200,7 @@ public sealed class Plugin : IDalamudPlugin
             CompleteFaloopLoginIfReady();
             if (!config.Enabled)
                 return;
+            travel.RefreshCurrentDataCenter();
             if (config.EnableFaloop)
             {
                 DrainFaloopSessionRejections();
