@@ -44,6 +44,12 @@ public sealed class Plugin : IDalamudPlugin
     private const double SsStagingPathQueryTimeoutSeconds = 20;
     private const double SsStagingRouteRetrySeconds = 3;
     private const float SsStagingArrivalDistance = 5f;
+    private const double ApproachRouteRetrySeconds = 3;
+    private const double ApproachRouteStallSeconds = 10;
+    private const float ApproachSegmentLength = 180f;
+    private const float ApproachWaypointArrivalDistance = 10f;
+    private const float ApproachMeaningfulProgressDistance = 3f;
+    private const int ApproachEarlyStopLimit = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -74,12 +80,25 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Queue<ParkingCandidate> parkingCandidates = new();
     private readonly Queue<SsStagingCandidate> ssStagingCandidates = new();
     private readonly Queue<Vector3> approachProjectionCandidates = new();
+    private readonly Queue<Vector3> approachRouteCandidates = new();
 
     private bool configOpen;
     private HuntAlertSnapshot? current;
     private IBattleChara? mark;
     private Vector3? alertPoint;
     private Vector3? approachPoint;
+    private Vector3? approachRouteTarget;
+    private Vector3 approachRouteStartPosition;
+    private Vector3 approachLastProgressPosition;
+    private float approachRouteStartRemaining;
+    private float approachBestRemaining;
+    private DateTime approachRouteStartedUtc = DateTime.MinValue;
+    private DateTime approachLastProgressUtc = DateTime.MinValue;
+    private int approachProjectionCandidateIndex;
+    private int approachProjectionCandidateCount;
+    private int approachEarlyStops;
+    private bool approachRouteIsSegment;
+    private bool approachStartingEgressActive;
     private Vector3? safePoint;
     private ParkingCandidate? selectedParkingCandidate;
     private Task<List<Vector3>>? parkingPathTask;
@@ -1061,7 +1080,7 @@ public sealed class Plugin : IDalamudPlugin
         selectedParkingPath = null;
         crowdFallbackAnnounced = false;
         parkingCandidates.Clear();
-        approachProjectionCandidates.Clear();
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
         nextActionUtc = DateTime.MinValue;
 
         if (current is null)
@@ -2346,37 +2365,50 @@ public sealed class Plugin : IDalamudPlugin
             approachPoint = approachProjectionCandidates.Count > 0
                 ? approachProjectionCandidates.Dequeue()
                 : null;
-            nextActionUtc = now.AddSeconds(2);
             if (approachPoint is null)
             {
+                nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
                 status = $"Could not project {current.CreatureName}'s mapped local destination onto vnavmesh yet; " +
                          "holding the active hunt and retrying";
                 return;
             }
-            status = $"Direct local destination ready for {current.CreatureName}; preparing normal flight";
+
+            approachProjectionCandidateIndex++;
+            ResetApproachRouteTracking(clearProjectionCandidates: false);
+            log.Information(
+                "Trying approach candidate {Index}/{Count} for {Mark}: local ({X:0.0}, {Z:0.0}), {Distance:0}y from player",
+                approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName,
+                approachPoint.Value.X, approachPoint.Value.Z,
+                HorizontalDistance(PlayerPosition(), approachPoint.Value));
+            status = $"Trying approach candidate {approachProjectionCandidateIndex}/{approachProjectionCandidateCount} " +
+                     $"for {current.CreatureName}";
         }
 
         if (now < nextActionUtc)
             return;
         if (!EnsureMounted(now))
             return;
-        if (vnav.MoveCloseToSafe(approachPoint.Value, true, ActiveDistanceProfile.FlagApproachDistance))
+        if (TryStartApproachRoute(now))
         {
-            nextActionUtc = now.AddSeconds(3);
             SetState(SentinelState.ApproachAlertCoordinates,
                 $"Flying toward {current.CreatureName}'s reported coordinates; " +
                 $"entity resolution waits until within about {ActiveDistanceProfile.FlagApproachDistance:0}y");
             return;
         }
 
-        nextActionUtc = now.AddSeconds(3);
-        if (HuntCatalog.IsAnySsName(current.CreatureName) && approachProjectionCandidates.Count > 0)
+        nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+        if (approachRouteCandidates.Count == 0)
         {
+            log.Information(
+                "Approach candidate {Index}/{Count} could not start a route; trying the next projected candidate",
+                approachProjectionCandidateIndex, approachProjectionCandidateCount);
             approachPoint = null;
-            status = $"The first {current.CreatureName} projection was unreachable; trying a nearby candidate";
+            ResetApproachRouteTracking(clearProjectionCandidates: false);
+            status = $"Mapped {current.CreatureName} destination was unreachable; trying another nearby projection";
         }
         else
-            status = $"No route to {current.CreatureName}'s alert coordinates is available yet; holding and retrying";
+            status = $"No route to {current.CreatureName}'s next approach waypoint is available yet; " +
+                     "holding the active hunt and retrying after a short backoff";
     }
 
     private void TickApproachAlertCoordinates(DateTime now)
@@ -2396,10 +2428,15 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var distance = HorizontalDistance(PlayerPosition(), approachPoint.Value);
+        var playerPosition = PlayerPosition();
+        var distance = HorizontalDistance(playerPosition, approachPoint.Value);
         if (distance <= ActiveDistanceProfile.FlagApproachDistance + 8f)
         {
             vnav.StopSafe();
+            log.Information(
+                "Within entity scan range for {Mark}: {Distance:0}y from the projected report; switching to mark detection",
+                current.CreatureName, distance);
+            ResetApproachRouteTracking(clearProjectionCandidates: false);
             SetState(SentinelState.LocateMark,
                 $"Reached {current.CreatureName}'s reported area; beginning positive entity resolution");
             return;
@@ -2407,37 +2444,62 @@ public sealed class Plugin : IDalamudPlugin
 
         if (vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe())
         {
+            UpdateApproachProgress(now, playerPosition, distance);
+            if ((now - approachLastProgressUtc).TotalSeconds >= ApproachRouteStallSeconds)
+            {
+                vnav.StopSafe();
+                HandleStoppedApproachRoute(now, "vnavmesh route remained active without measurable movement");
+                return;
+            }
+
+            var waypointText = approachRouteIsSegment && approachRouteTarget is not null
+                ? $" via a segmented waypoint {HorizontalDistance(playerPosition, approachRouteTarget.Value):0}y away"
+                : string.Empty;
             status = $"Approaching {current.CreatureName}'s reported coordinates ({distance:0}y remaining); " +
-                     "not scanning for the entity until nearby";
+                     $"not scanning for the entity until nearby{waypointText}";
             return;
         }
 
         if (now < nextActionUtc)
             return;
+        if (approachRouteStartedUtc != DateTime.MinValue)
+        {
+            HandleStoppedApproachRoute(now, "vnavmesh route stopped before the reported area");
+            return;
+        }
         if (!EnsureMounted(now))
             return;
 
-        if (vnav.MoveCloseToSafe(approachPoint.Value, true, ActiveDistanceProfile.FlagApproachDistance))
-            status = $"Coordinate route stopped early; retrying while keeping {current.CreatureName} active";
-        else if (HuntCatalog.IsAnySsName(current.CreatureName) && approachProjectionCandidates.Count > 0)
+        if (TryStartApproachRoute(now))
         {
-            approachPoint = null;
-            SetState(SentinelState.PrepareApproachDestination,
-                $"Mapped {current.CreatureName} destination was unreachable; trying another nearby projection");
+            status = $"Approach resumed for {current.CreatureName}; {distance:0}y remain to the reported area";
+            log.Information("Approach resumed for {Mark}; {Distance:0}y remain", current.CreatureName, distance);
         }
         else
-            status = $"Coordinate route is currently unavailable; holding position and retrying {current.CreatureName}";
-        nextActionUtc = now.AddSeconds(3);
+        {
+            nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+            if (approachRouteCandidates.Count == 0)
+                RejectCurrentApproachCandidate(now,
+                    "all projected waypoint routes were unavailable from the current position");
+            else
+                status = $"Approach waypoint was unavailable; trying another after a short backoff while keeping " +
+                         $"{current.CreatureName} active";
+        }
     }
 
     private void PrepareApproachProjectionCandidates(Vector3 anchor)
     {
         approachProjectionCandidates.Clear();
+        approachProjectionCandidateIndex = 0;
+        approachProjectionCandidateCount = 0;
         var projected = new List<Vector3>();
-        var isSs = current is not null && HuntCatalog.IsAnySsName(current.CreatureName);
-        var offsets = isSs
-            ? new[] { 0f, 6f, 12f, 18f, 24f }
-            : new[] { 0f };
+        var exactProjection = vnav.PointOnFloorSafe(anchor, 8f);
+        if (exactProjection is null)
+            log.Information(
+                "Exact destination projection failed for {Mark}; sampling nearby reachable candidates",
+                current?.CreatureName ?? "active hunt");
+
+        var offsets = new[] { 0f, 6f, 12f, 18f, 24f, 36f };
         var angles = new[] { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
 
         foreach (var radius in offsets)
@@ -2447,19 +2509,225 @@ public sealed class Plugin : IDalamudPlugin
                 var radians = angle * MathF.PI / 180f;
                 var sample = anchor + new Vector3(MathF.Cos(radians) * radius, 0f, MathF.Sin(radians) * radius);
                 sample.Y = 1024f;
-                var floor = vnav.PointOnFloorSafe(sample, isSs ? 18f : 20f);
+                var floor = radius == 0f && exactProjection is not null
+                    ? exactProjection
+                    : vnav.PointOnFloorSafe(sample, 18f);
                 if (floor is null || projected.Any(point => HorizontalDistance(point, floor.Value) < 2f))
                     continue;
                 projected.Add(floor.Value);
             }
         }
 
-        foreach (var point in projected.OrderBy(point => HorizontalDistance(point, anchor)))
+        var ordered = projected
+            .OrderBy(point => HorizontalDistance(point, anchor))
+            .Take(16)
+            .ToArray();
+        foreach (var point in ordered)
             approachProjectionCandidates.Enqueue(point);
-        if (isSs && projected.Count > 0 && HorizontalDistance(projected[0], anchor) > 2f)
+        approachProjectionCandidateCount = ordered.Length;
+        log.Information(
+            "Reported destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} projected approach candidate(s)",
+            current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, ordered.Length);
+    }
+
+    private bool TryStartApproachRoute(DateTime now)
+    {
+        if (approachPoint is null)
+            return false;
+
+        if (approachRouteCandidates.Count == 0)
+            PrepareApproachRouteCandidates(approachPoint.Value);
+        if (approachRouteCandidates.Count == 0)
+            return false;
+
+        var player = PlayerPosition();
+        var target = approachRouteCandidates.Dequeue();
+        var remaining = HorizontalDistance(player, approachPoint.Value);
+        approachRouteIsSegment = HorizontalDistance(target, approachPoint.Value) > 2f;
+        var stopRange = approachRouteIsSegment
+            ? ApproachWaypointArrivalDistance
+            : ActiveDistanceProfile.FlagApproachDistance;
+        if (!vnav.MoveCloseToSafe(target, true, stopRange))
+            return false;
+
+        approachRouteTarget = target;
+        approachRouteStartPosition = player;
+        approachLastProgressPosition = player;
+        approachRouteStartRemaining = remaining;
+        approachBestRemaining = remaining;
+        approachRouteStartedUtc = now;
+        approachLastProgressUtc = now;
+        nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+
+        if (approachStartingEgressActive)
             log.Information(
-                "Fixed SS coordinate projection failed; selected {Count} nearby projected candidate(s) for routing",
-                projected.Count);
+                "Using starting-area egress waypoint: {Distance:0}y toward a reachable launch point",
+                HorizontalDistance(player, target));
+        else if (approachRouteIsSegment)
+            log.Information(
+                "Using segmented approach waypoint: {Distance:0}y toward destination ({Remaining:0}y total remaining)",
+                HorizontalDistance(player, target), remaining);
+        return true;
+    }
+
+    private void PrepareApproachRouteCandidates(Vector3 destination)
+    {
+        approachRouteCandidates.Clear();
+        var player = PlayerPosition();
+        var delta = destination - player;
+        delta.Y = 0f;
+        var remaining = delta.Length();
+        if (remaining < 0.01f)
+            return;
+
+        var direction = Vector3.Normalize(delta);
+        var tangent = new Vector3(-direction.Z, 0f, direction.X);
+        var accepted = new List<Vector3>();
+
+        if (approachStartingEgressActive)
+        {
+            foreach (var distance in new[] { 28f, 42f, 56f })
+            foreach (var lateral in new[] { 0f, 10f, -10f, 18f, -18f })
+            {
+                var intended = player + direction * distance + tangent * lateral;
+                intended.Y = 1024f;
+                var projected = vnav.PointOnFloorSafe(intended, 14f);
+                if (projected is null ||
+                    HorizontalDistance(projected.Value, player) < 12f ||
+                    HorizontalDistance(projected.Value, destination) >= remaining ||
+                    accepted.Any(point => HorizontalDistance(point, projected.Value) < 3f))
+                    continue;
+                accepted.Add(projected.Value);
+            }
+
+            foreach (var point in accepted
+                         .OrderBy(point => HorizontalDistance(point, destination))
+                         .Take(8))
+                approachRouteCandidates.Enqueue(point);
+            log.Information(
+                "Starting-area route recovery prepared {Count} nearby reachable egress candidate(s)",
+                approachRouteCandidates.Count);
+            return;
+        }
+
+        var segmentDistance = remaining > ApproachSegmentLength + ActiveDistanceProfile.FlagApproachDistance
+            ? ApproachSegmentLength
+            : remaining;
+        var intendedTarget = player + direction * segmentDistance;
+        intendedTarget.Y = 1024f;
+        foreach (var radius in new[] { 0f, 8f, 16f, 24f })
+        foreach (var multiplier in radius == 0f ? new[] { 0f } : new[] { -1f, 1f })
+        {
+            var sample = intendedTarget + tangent * radius * multiplier;
+            sample.Y = 1024f;
+            var projected = vnav.PointOnFloorSafe(sample, 16f);
+            if (projected is null ||
+                HorizontalDistance(projected.Value, destination) > remaining + 2f ||
+                accepted.Any(point => HorizontalDistance(point, projected.Value) < 3f))
+                continue;
+            accepted.Add(projected.Value);
+        }
+
+        foreach (var point in accepted.OrderBy(point => HorizontalDistance(point, intendedTarget)))
+            approachRouteCandidates.Enqueue(point);
+    }
+
+    private void UpdateApproachProgress(DateTime now, Vector3 player, float remaining)
+    {
+        var movement = HorizontalDistance(player, approachLastProgressPosition);
+        var improvement = approachBestRemaining - remaining;
+        if (movement < ApproachMeaningfulProgressDistance &&
+            improvement < ApproachMeaningfulProgressDistance)
+            return;
+
+        approachBestRemaining = Math.Min(approachBestRemaining, remaining);
+        approachLastProgressPosition = player;
+        approachLastProgressUtc = now;
+    }
+
+    private void HandleStoppedApproachRoute(DateTime now, string reason)
+    {
+        if (current is null || approachPoint is null)
+            return;
+
+        var player = PlayerPosition();
+        var remaining = HorizontalDistance(player, approachPoint.Value);
+        var displacement = HorizontalDistance(player, approachRouteStartPosition);
+        var destinationProgress = Math.Max(0f, approachRouteStartRemaining - remaining);
+        log.Information(
+            "Route stopped after {Progress:0.0}y destination progress ({Movement:0.0}y actual movement) for {Mark}: {Reason}",
+            destinationProgress, displacement, current.CreatureName, reason);
+        approachRouteTarget = null;
+        approachRouteStartedUtc = DateTime.MinValue;
+        approachLastProgressUtc = DateTime.MinValue;
+        nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+
+        if (destinationProgress >= ApproachMeaningfulProgressDistance)
+        {
+            approachEarlyStops = 0;
+            approachStartingEgressActive = false;
+            approachRouteCandidates.Clear();
+            status = $"Route stopped after {destinationProgress:0.0}y progress; resuming {current.CreatureName}'s segmented approach " +
+                     "after a short backoff";
+            return;
+        }
+
+        approachEarlyStops++;
+        if (!approachStartingEgressActive)
+        {
+            approachStartingEgressActive = true;
+            approachRouteCandidates.Clear();
+            log.Information(
+                "Coordinate route stopped without progress; trying a nearby starting-area egress point before the long approach");
+            status = "Coordinate route made no progress; sampling a reachable point away from the starting area";
+            return;
+        }
+
+        if (approachRouteCandidates.Count > 0 && approachEarlyStops < ApproachEarlyStopLimit)
+        {
+            status = $"Route stopped after {destinationProgress:0.0}y progress; trying another starting-area candidate " +
+                     "after a short backoff";
+            return;
+        }
+
+        RejectCurrentApproachCandidate(now,
+            $"repeated early stops made less than {ApproachMeaningfulProgressDistance:0}y progress");
+    }
+
+    private void RejectCurrentApproachCandidate(DateTime now, string reason)
+    {
+        if (current is null)
+            return;
+        log.Information(
+            "Approach candidate {Index}/{Count} rejected for {Mark}: {Reason}",
+            approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName, reason);
+        approachPoint = null;
+        ResetApproachRouteTracking(clearProjectionCandidates: false);
+        nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+        SetState(SentinelState.PrepareApproachDestination,
+            approachProjectionCandidates.Count > 0
+                ? $"Candidate rejected after repeated early stops; trying another projection for {current.CreatureName}"
+                : $"All current projections stopped early; resampling near {current.CreatureName}'s reported coordinates");
+    }
+
+    private void ResetApproachRouteTracking(bool clearProjectionCandidates)
+    {
+        approachRouteCandidates.Clear();
+        approachRouteTarget = null;
+        approachRouteStartPosition = Vector3.Zero;
+        approachLastProgressPosition = Vector3.Zero;
+        approachRouteStartRemaining = 0f;
+        approachBestRemaining = 0f;
+        approachRouteStartedUtc = DateTime.MinValue;
+        approachLastProgressUtc = DateTime.MinValue;
+        approachEarlyStops = 0;
+        approachRouteIsSegment = false;
+        approachStartingEgressActive = false;
+        if (!clearProjectionCandidates)
+            return;
+        approachProjectionCandidates.Clear();
+        approachProjectionCandidateIndex = 0;
+        approachProjectionCandidateCount = 0;
     }
 
     private void TickLocateMark(DateTime now)
@@ -3893,6 +4161,7 @@ public sealed class Plugin : IDalamudPlugin
         ResetReturnRecoveryTracking();
         ResetIncidentalAggroTracking();
         parkingCandidates.Clear();
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
     }
 
     private bool CanResolveMarkInState() => state is
