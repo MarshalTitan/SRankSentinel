@@ -77,6 +77,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Queue<HuntAlertSnapshot> pendingAlerts = new();
     private readonly Dictionary<string, PendingFaloopLocation> unresolvedFaloopAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> faloopReportIdsByAlertKey = new(StringComparer.Ordinal);
     private readonly Queue<ParkingCandidate> parkingCandidates = new();
     private readonly Queue<SsStagingCandidate> ssStagingCandidates = new();
     private readonly Queue<Vector3> approachProjectionCandidates = new();
@@ -466,36 +467,70 @@ public sealed class Plugin : IDalamudPlugin
     private void HandleFaloopEvent(FaloopFeedEvent feedEvent)
     {
         var world = ResolveFaloopWorld(feedEvent.WorldSlug);
-        if (travel.TryGetDataCenterRelationship(
-                world, out var currentDataCenter, out var eventDataCenter, out var isSameDataCenter) &&
-            !isSameDataCenter)
+        if (!travel.TryGetDataCenterRelationship(
+                world, out var currentDataCenter, out var eventDataCenter, out var isSameDataCenter))
+        {
+            log.Debug(
+                "Ignored Faloop event before classification: data-center relationship for world {World} is not available yet",
+                world);
+            return;
+        }
+        if (!isSameDataCenter)
         {
             // Cross-DC events are irrelevant to normal World Visit. Keep this below the normal
             // UI/log level and return before territory, expansion, POI, queue, or travel work.
             log.Debug(
-                "Ignored Faloop event: {World} is on {EventDataCenter}; current DC is {CurrentDataCenter}",
+                "Ignored off-DC event: {World} / {EventDataCenter}; current DC is {CurrentDataCenter}",
                 world, eventDataCenter, currentDataCenter);
             return;
         }
 
-        PruneUnresolvedFaloopAlerts();
         var creature = FaloopCatalog.DisplayName(feedEvent.MobSlug);
         var hasTerritory = FaloopCatalog.TryResolveTerritory(feedEvent.ZoneSlug, out var territory);
-        SetFaloopDecision(
-            $"Recognized {feedEvent.Action}: {creature} / {world} / " +
-            $"{(feedEvent.ZoneSlug ?? "territory missing")} / {feedEvent.EventType}/" +
-            $"{(string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "subtype missing" : feedEvent.EventSubType)}");
+        if (!hasTerritory && HuntCatalog.ResolveUniqueName(creature) is { } uniqueDefinition)
+        {
+            territory = uniqueDefinition.TerritoryId;
+            hasTerritory = true;
+            // Lightweight sighting_set reports may omit zoneId even though the mark identity is
+            // unambiguous. Preserve the inferred territory through POI resolution/enrichment.
+            feedEvent = feedEvent with { ZoneSlug = territory.ToString() };
+            log.Debug(
+                "Inferred territory {Territory} for {Mark} from its unique supported mark identity",
+                territory, uniqueDefinition.Name);
+        }
 
         if (feedEvent.Action == FaloopEventAction.Death)
         {
-            if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+            if (!TryMatchTrackedFaloopDeath(feedEvent, world, creature,
+                    hasTerritory ? territory : 0, out var matchDetail))
             {
-                SetFaloopDecision($"Rejected stale death event: {creature} on {world}");
+                log.Debug("Ignored unrelated mob death: {Mark} / {World}", creature, world);
                 return;
             }
-            SetFaloopDecision($"Accepted death evidence: {creature} on {world}");
+            if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+            {
+                log.Debug("Ignored stale matching death event: {Mark} / {World}", creature, world);
+                return;
+            }
+
+            faloop.RecordRelevantHuntEvent(feedEvent);
+            SetFaloopDecision($"Accepted death evidence: {creature} on {world} ({matchDetail})");
             InvalidateExternalDeath(world, creature, hasTerritory ? territory : 0,
                 feedEvent.Instance, feedEvent.OccurredAtUtc, "Faloop");
+            return;
+        }
+
+        if (feedEvent.Action == FaloopEventAction.FutureTiming)
+        {
+            log.Debug("Ignored future spawn timing: {Mark} / {World}; action={Action}",
+                creature, world, feedEvent.RawAction);
+            return;
+        }
+
+        if (!IsPositiveCurrentSpawnEvidence(feedEvent))
+        {
+            log.Debug("Ignored non-spawn Faloop event: {Mark} / {World}; type={Type}, action={Action}",
+                creature, world, feedEvent.EventType, feedEvent.RawAction);
             return;
         }
 
@@ -504,55 +539,58 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (hasTerritory && SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
             {
-                SetFaloopDecision($"Accepted SS precursor evidence: {creature} on {world}");
+                log.Debug("Accepted current-DC SS precursor evidence: {Mark} / {World}", creature, world);
                 ObserveSsChain(precursorProfile,
                     $"Faloop reported a {precursorProfile.PrecursorName} precursor");
             }
             else
             {
-                SetFaloopDecision($"Ignored unrelated SS precursor: {creature} on {world}");
+                log.Debug("Ignored unrelated SS precursor: {Mark} / {World}", creature, world);
             }
             return;
         }
 
-        if (!hasTerritory && HuntCatalog.ResolveUniqueName(creature) is { } uniqueDefinition)
-        {
-            territory = uniqueDefinition.TerritoryId;
-            hasTerritory = true;
-            // Lightweight sighting_set reports may omit zoneId even though the mark identity is
-            // unambiguous. Preserve the inferred territory through POI resolution/enrichment.
-            feedEvent = feedEvent with { ZoneSlug = territory.ToString() };
-            SetFaloopDecision(
-                $"Inferred territory {territory} for {uniqueDefinition.Name} from its unique supported mark identity");
-        }
         if (!hasTerritory)
         {
-            SetFaloopDecision($"Rejected {creature} on {world}: territory/zone was missing or unknown");
+            log.Debug("Ignored Faloop spawn without a supported territory: {Mark} / {World}", creature, world);
             return;
         }
         var definition = HuntCatalog.ResolveStrict(territory, creature);
         if (definition is null)
         {
-            SetFaloopDecision($"Ignored {creature} on {world}: not a configured S/SS for territory {territory}");
+            log.Debug("Ignored current-DC non-S/SS event: {Mark} / {World} / territory {Territory}",
+                creature, world, territory);
             return; // Faloop reports many ranks; only the strict configured S/SS catalog is eligible.
         }
         var expansion = HuntCatalog.GetExpansion(territory);
         if (!config.IsExpansionEnabled(expansion))
         {
-            SetFaloopDecision($"Ignored {definition.Name} on {world}: {HuntCatalog.ExpansionName(expansion)} hunting is disabled");
-            return;
-        }
-        if (!travel.IsSameDataCenter(world))
-        {
-            SetFaloopDecision($"Ignored {definition.Name} on {world}: world is outside the current data center");
+            log.Debug("Ignored supported S/SS event: {Mark} / {World}; {Expansion} hunting is disabled",
+                definition.Name, world, HuntCatalog.ExpansionName(expansion));
             return;
         }
         if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
         {
-            SetFaloopDecision($"Rejected stale spawn event: {definition.Name} on {world}");
+            log.Debug("Ignored stale active-spawn event: {Mark} / {World}", definition.Name, world);
             return;
         }
 
+        var faloopAlertIdentity = new HuntAlertSnapshot(
+            HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
+            world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
+            Math.Max(1, feedEvent.Instance), 0f, 0f, feedEvent.OccurredAtUtc);
+        PruneKilledAlerts();
+        if (killedAlerts.ContainsKey(faloopAlertIdentity.Key))
+        {
+            log.Debug("Ignored replayed active-spawn event for already killed hunt: {Mark} / {World}",
+                definition.Name, world);
+            return;
+        }
+
+        PruneUnresolvedFaloopAlerts();
+        faloop.RecordRelevantHuntEvent(feedEvent);
+        RememberFaloopReportId(faloopAlertIdentity.Key, feedEvent.EventId);
+        SetFaloopDecision($"Accepted active spawn: {definition.Name} / {world}; resolving destination");
         var reportId = string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId;
         log.Information(
             "Faloop spawn received: {Mark} / {World} / {Territory} / reportId={ReportId}; event={EventType}/{SubType}, instance={Instance}, POI={Poi}, map={MapId}, directXY={DirectX},{DirectY}, location={Location}, timestamp={Timestamp:O} ({TimestampSource})",
@@ -571,6 +609,7 @@ public sealed class Plugin : IDalamudPlugin
                 HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
                 world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
                 Math.Max(1, feedEvent.Instance), 0, 0, feedEvent.OccurredAtUtc);
+            RememberFaloopReportId(unresolved.Key, feedEvent.EventId);
             if (current?.Key != unresolved.Key && pendingAlerts.All(alert => alert.Key != unresolved.Key))
             {
                 if (unresolvedFaloopAlerts.TryGetValue(unresolved.Key, out var existing))
@@ -607,10 +646,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        unresolvedFaloopAlerts.Remove(new HuntAlertSnapshot(
+        var resolvedAlert = new HuntAlertSnapshot(
             HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
             world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
-            Math.Max(1, feedEvent.Instance), mapX, mapY, feedEvent.OccurredAtUtc).Key);
+            Math.Max(1, feedEvent.Instance), mapX, mapY, feedEvent.OccurredAtUtc);
+        unresolvedFaloopAlerts.Remove(resolvedAlert.Key);
+        RememberFaloopReportId(resolvedAlert.Key, feedEvent.EventId);
         var resolutionKind = coordinateSource.StartsWith("direct", StringComparison.OrdinalIgnoreCase)
             ? "Direct coordinates received"
             : "POI mapped successfully";
@@ -637,6 +678,65 @@ public sealed class Plugin : IDalamudPlugin
             feedEvent.OccurredAtUtc);
     }
 
+    private static bool IsPositiveCurrentSpawnEvidence(FaloopFeedEvent feedEvent)
+    {
+        if (feedEvent.Action != FaloopEventAction.Spawn)
+            return false;
+        if (feedEvent.EventType.Equals("mobworldspawn", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!feedEvent.EventType.Equals("mob", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return feedEvent.RawAction is "spawn" or "sighting_set" or "spawn_location" or "sighting";
+    }
+
+    private bool TryMatchTrackedFaloopDeath(
+        FaloopFeedEvent feedEvent,
+        string world,
+        string creature,
+        uint territory,
+        out string detail)
+    {
+        detail = string.Empty;
+        bool Matches(HuntAlertSnapshot alert)
+        {
+            if (!alert.World.Equals(world, StringComparison.OrdinalIgnoreCase) ||
+                !HuntCatalog.NamesMatch(alert.CreatureName, creature) ||
+                territory != 0 && alert.TerritoryId != territory ||
+                feedEvent.Instance > 0 && alert.Instance != feedEvent.Instance)
+                return false;
+
+            if (!string.IsNullOrWhiteSpace(feedEvent.EventId) &&
+                faloopReportIdsByAlertKey.TryGetValue(alert.Key, out var trackedReportId) &&
+                !string.IsNullOrWhiteSpace(trackedReportId) &&
+                !trackedReportId.Equals(feedEvent.EventId, StringComparison.Ordinal))
+                return false;
+            return true;
+        }
+
+        if (current is not null && Matches(current))
+        {
+            detail = "matched active S/SS identity";
+            return true;
+        }
+        if (pendingAlerts.Any(Matches))
+        {
+            detail = "matched queued S/SS identity";
+            return true;
+        }
+        if (unresolvedFaloopAlerts.Values.Any(pending => Matches(pending.Alert)))
+        {
+            detail = "matched location-pending S/SS identity";
+            return true;
+        }
+        return false;
+    }
+
+    private void RememberFaloopReportId(string alertKey, string reportId)
+    {
+        if (!string.IsNullOrWhiteSpace(alertKey) && !string.IsNullOrWhiteSpace(reportId))
+            faloopReportIdsByAlertKey[alertKey] = reportId;
+    }
+
     private void SetFaloopDecision(string decision)
     {
         lastFaloopDecision = decision;
@@ -661,6 +761,7 @@ public sealed class Plugin : IDalamudPlugin
             if (now - pending.FirstObservedUtc >= TimeSpan.FromSeconds(FaloopLocationEnrichmentTimeoutSeconds))
             {
                 unresolvedFaloopAlerts.Remove(key);
+                faloopReportIdsByAlertKey.Remove(key);
                 var rawPoi = pending.FeedEvent.PoiId > 0
                     ? pending.FeedEvent.PoiId.ToString()
                     : "(missing)";
@@ -4126,6 +4227,8 @@ public sealed class Plugin : IDalamudPlugin
     private void ClearCurrent()
     {
         vnav.StopSafe();
+        if (current is not null)
+            faloopReportIdsByAlertKey.Remove(current.Key);
         current = null;
         mark = null;
         alertPoint = null;
@@ -4340,9 +4443,15 @@ public sealed class Plugin : IDalamudPlugin
         }
         var now = DateTime.UtcNow;
         foreach (var alert in removed)
+        {
             killedAlerts[alert.Key] = now;
+            faloopReportIdsByAlertKey.Remove(alert.Key);
+        }
         foreach (var key in unresolvedRemoved)
+        {
             unresolvedFaloopAlerts.Remove(key);
+            faloopReportIdsByAlertKey.Remove(key);
+        }
         PersistQueue();
         status = $"Removed {removed.Length + unresolvedRemoved.Length} queued/pending hunt(s) already reported killed";
     }
@@ -4366,7 +4475,10 @@ public sealed class Plugin : IDalamudPlugin
         var removed = pendingAlerts.Where(Matches).ToArray();
         var unresolvedRemoved = unresolvedFaloopAlerts.Where(pair => Matches(pair.Value.Alert)).Select(pair => pair.Key).ToArray();
         foreach (var key in unresolvedRemoved)
+        {
             unresolvedFaloopAlerts.Remove(key);
+            faloopReportIdsByAlertKey.Remove(key);
+        }
         if (removed.Length > 0)
         {
             var removedKeys = removed.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
@@ -4376,7 +4488,10 @@ public sealed class Plugin : IDalamudPlugin
                 pendingAlerts.Enqueue(alert);
             var now = DateTime.UtcNow;
             foreach (var alert in removed)
+            {
                 killedAlerts[alert.Key] = now;
+                faloopReportIdsByAlertKey.Remove(alert.Key);
+            }
             PersistQueue();
         }
 
@@ -4430,6 +4545,9 @@ public sealed class Plugin : IDalamudPlugin
             .ThenBy(candidate => candidate.ReceivedAtUtc)
             .ToArray();
         var skipped = queued.Length - valid.Length;
+        var validKeys = valid.Select(candidate => candidate.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var candidate in queued.Where(candidate => !validKeys.Contains(candidate.Key)))
+            faloopReportIdsByAlertKey.Remove(candidate.Key);
         pendingAlerts.Clear();
         alert = valid.FirstOrDefault()!;
         foreach (var remaining in valid.Skip(1))
@@ -4488,6 +4606,7 @@ public sealed class Plugin : IDalamudPlugin
     private void MarkKilled(HuntAlertSnapshot alert, DateTime killedAtUtc)
     {
         killedAlerts[alert.Key] = killedAtUtc;
+        faloopReportIdsByAlertKey.Remove(alert.Key);
         PersistQueue();
     }
 
@@ -4505,11 +4624,16 @@ public sealed class Plugin : IDalamudPlugin
     private void PruneUnresolvedFaloopAlerts()
     {
         var now = DateTime.UtcNow;
-        foreach (var key in unresolvedFaloopAlerts
-                     .Where(pair => !IsWithinFreshnessWindow(pair.Value.Alert.ReceivedAtUtc, now) ||
-                                    !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))
-                     .Select(pair => pair.Key).ToArray())
+        var expiredKeys = unresolvedFaloopAlerts
+            .Where(pair => !IsWithinFreshnessWindow(pair.Value.Alert.ReceivedAtUtc, now) ||
+                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))
+            .Select(pair => pair.Key)
+            .ToArray();
+        foreach (var key in expiredKeys)
+        {
             unresolvedFaloopAlerts.Remove(key);
+            faloopReportIdsByAlertKey.Remove(key);
+        }
     }
 
     private void PersistQueue()
@@ -4531,6 +4655,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         var removed = pendingAlerts.Count - survivors.Length;
+        var survivorKeys = survivors.Select(alert => alert.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var alert in pendingAlerts.Where(alert => !survivorKeys.Contains(alert.Key)))
+            faloopReportIdsByAlertKey.Remove(alert.Key);
         pendingAlerts.Clear();
         foreach (var alert in survivors)
             pendingAlerts.Enqueue(alert);

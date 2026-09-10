@@ -11,12 +11,14 @@ internal enum FaloopEventAction
 {
     Spawn,
     Death,
+    FutureTiming,
 }
 
 internal sealed record FaloopFeedEvent(
     FaloopEventAction Action,
     string EventType,
     string EventSubType,
+    string RawAction,
     string EventId,
     string MobSlug,
     string WorldSlug,
@@ -426,29 +428,17 @@ internal sealed class FaloopClient : IDisposable
                 if (string.IsNullOrWhiteSpace(nestedText))
                     return;
                 using var nested = JsonDocument.Parse(nestedText);
-                RecordRawFeedMessage(DescribeRawEvent(nested.RootElement));
                 if (TryParseFeedEvent(nested.RootElement, out var nestedEvent, out var nestedRejection))
-                {
-                    RecordRecognizedHuntEvent(nestedEvent);
                     Publish(nestedEvent);
-                }
                 else
-                {
                     RecordRejectedEvent(nested.RootElement, nestedRejection);
-                }
                 return;
             }
 
-            RecordRawFeedMessage(DescribeRawEvent(payload));
             if (TryParseFeedEvent(payload, out var feedEvent, out var rejection))
-            {
-                RecordRecognizedHuntEvent(feedEvent);
                 Publish(feedEvent);
-            }
             else
-            {
                 RecordRejectedEvent(payload, rejection);
-            }
         }
         catch (JsonException ex)
         {
@@ -456,29 +446,23 @@ internal sealed class FaloopClient : IDisposable
         }
     }
 
-    private void RecordRawFeedMessage(string summary)
+    public void RecordRelevantHuntEvent(FaloopFeedEvent feedEvent)
     {
+        if (feedEvent.Action == FaloopEventAction.Spawn)
+            RememberSpawn(feedEvent);
+
         lock (sync)
         {
             lastRawFeedMessageUtc = DateTime.UtcNow;
-            lastRawEventSummary = summary;
-            if (lastEventUtc == DateTime.MinValue)
-                status = "Faloop feed traffic received; waiting for a recognized hunt event";
-        }
-    }
-
-    private void RecordRecognizedHuntEvent(FaloopFeedEvent feedEvent)
-    {
-        lock (sync)
-        {
+            lastRawEventSummary = DescribeFeedEvent(feedEvent);
             lastEventUtc = DateTime.UtcNow;
             lastRejectedEventReason = "None";
-            status = "Faloop feed healthy; recognized hunt events received";
+            status = "Faloop feed healthy; relevant current-DC S/SS events received";
         }
         log.Debug(
-            "Raw Faloop hunt event recognized: type={Type}/{SubType}, action={Action}, mark={Mark}, world={World}, eventId={EventId}",
+            "Relevant current-DC Faloop hunt event recognized: type={Type}/{SubType}, action={Action}/{RawAction}, mark={Mark}, world={World}, eventId={EventId}",
             feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
-            feedEvent.Action, feedEvent.MobSlug, feedEvent.WorldSlug,
+            feedEvent.Action, feedEvent.RawAction, feedEvent.MobSlug, feedEvent.WorldSlug,
             string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId);
     }
 
@@ -487,15 +471,12 @@ internal sealed class FaloopClient : IDisposable
         if (!LooksLikeHuntEvent(payload))
             return;
         var summary = DescribeRawEvent(payload);
-        lock (sync) lastRejectedEventReason = $"{summary}: {reason}";
-        log.Warning("Rejected raw Faloop hunt event: {Summary}; reason={Reason}", summary, reason);
+        log.Debug("Ignored non-actionable raw Faloop event: {Summary}; reason={Reason}", summary, reason);
     }
 
     private void Publish(FaloopFeedEvent feedEvent)
     {
         feedEvent = FillMissingDeathLocation(feedEvent);
-        if (feedEvent.Action == FaloopEventAction.Spawn)
-            RememberSpawn(feedEvent);
 
         var now = DateTime.UtcNow;
         var fingerprint = $"{feedEvent.Action}|{feedEvent.WorldSlug}|{feedEvent.MobSlug}|" +
@@ -509,7 +490,6 @@ internal sealed class FaloopClient : IDisposable
             if (recentEvents.ContainsKey(fingerprint))
                 return;
             recentEvents[fingerprint] = now;
-            lastEventUtc = now;
         }
 
         EventReceived?.Invoke(feedEvent);
@@ -565,14 +545,20 @@ internal sealed class FaloopClient : IDisposable
             return false;
         }
 
+        type = type.Trim().ToLowerInvariant();
+        var rawAction = type;
         FaloopEventAction? action = type switch
         {
             "mobworldspawn" => FaloopEventAction.Spawn,
             "mobworldkill" => FaloopEventAction.Death,
             _ => null,
         };
+        if (action is null && IsFutureTimingAction(type))
+            action = FaloopEventAction.FutureTiming;
         if (action is null && type == "mob" && TryString(eventData, "action", out var actionText))
-            action = actionText switch
+        {
+            rawAction = actionText.Trim().ToLowerInvariant();
+            action = rawAction switch
             {
                 "spawn" => FaloopEventAction.Spawn,
                 // Current Faloop builds publish user-confirmed spawn locations as sighting_set.
@@ -583,6 +569,9 @@ internal sealed class FaloopClient : IDisposable
                 "death" => FaloopEventAction.Death,
                 _ => null,
             };
+            if (action is null && IsFutureTimingAction(rawAction))
+                action = FaloopEventAction.FutureTiming;
+        }
         if (action is null)
         {
             rejectionReason = type == "mob" && TryString(eventData, "action", out var unsupportedAction)
@@ -688,7 +677,7 @@ internal sealed class FaloopClient : IDisposable
             hasAuthoritativeTimestamp = true;
         }
 
-        feedEvent = new FaloopFeedEvent(action.Value, type, eventSubType, eventId,
+        feedEvent = new FaloopFeedEvent(action.Value, type, eventSubType, rawAction, eventId,
             mob.Trim(), world.Trim(), string.IsNullOrWhiteSpace(zone) ? null : zone.Trim(), rawMapId,
             poiId, rawPoiKey,
             directMapX, directMapY, rawLocation,
@@ -697,11 +686,25 @@ internal sealed class FaloopClient : IDisposable
         return true;
     }
 
+    private static bool IsFutureTimingAction(string action)
+    {
+        var normalized = new string(action.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        return normalized.Contains("timing", StringComparison.Ordinal) ||
+               normalized.Contains("timer", StringComparison.Ordinal) ||
+               normalized.Contains("window", StringComparison.Ordinal) ||
+               normalized.Contains("availability", StringComparison.Ordinal) ||
+               normalized.Contains("availableat", StringComparison.Ordinal) ||
+               normalized.Contains("cooldown", StringComparison.Ordinal) ||
+               normalized.Contains("maintenance", StringComparison.Ordinal) ||
+               normalized.Contains("resettime", StringComparison.Ordinal);
+    }
+
     private static bool LooksLikeHuntEvent(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object || !TryString(root, "type", out var type))
             return false;
-        return type is "mob" or "mobworldspawn" or "mobworldkill";
+        type = type.Trim().ToLowerInvariant();
+        return type is "mob" or "mobworldspawn" or "mobworldkill" || IsFutureTimingAction(type);
     }
 
     private static string DescribeRawEvent(JsonElement root)
@@ -729,6 +732,9 @@ internal sealed class FaloopClient : IDisposable
             world = FirstString(eventData, "worldId2", "worldId");
         return $"type={type}, action={action}, mark={(string.IsNullOrWhiteSpace(mob) ? "(missing)" : mob)}, world={(string.IsNullOrWhiteSpace(world) ? "(missing)" : world)}";
     }
+
+    private static string DescribeFeedEvent(FaloopFeedEvent feedEvent) =>
+        $"type={feedEvent.EventType}, action={feedEvent.RawAction}, mark={feedEvent.MobSlug}, world={feedEvent.WorldSlug}";
 
     private static bool TryResolveFromDatacenterState(
         JsonElement root,
