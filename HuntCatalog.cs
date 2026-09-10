@@ -199,6 +199,19 @@ internal static class HuntCatalog
             definition.TerritoryId == territoryId && Normalize(definition.Name) == normalized);
     }
 
+    /// <summary>
+    /// Resolves a supported regular S rank when Faloop's lightweight sighting event carries
+    /// mob/world identity and a POI but omits the redundant zone slug. Regular S-rank names are
+    /// unique in the supported catalog; shared expansion SS names intentionally do not resolve
+    /// here because their territory cannot be inferred safely from the name alone.
+    /// </summary>
+    public static SRankDefinition? ResolveUniqueName(string alertName)
+    {
+        var normalized = Normalize(alertName);
+        var matches = Definitions.Where(definition => Normalize(definition.Name) == normalized).Take(2).ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
+
     public static bool NamesMatch(string? left, string? right) =>
         Normalize(left ?? string.Empty) == Normalize(right ?? string.Empty);
 

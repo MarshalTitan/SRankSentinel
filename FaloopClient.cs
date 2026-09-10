@@ -69,7 +69,10 @@ internal sealed class FaloopClient : IDisposable
     private string status = "Disabled";
     private bool connected;
     private DateTime lastMessageUtc = DateTime.MinValue;
+    private DateTime lastRawFeedMessageUtc = DateTime.MinValue;
     private DateTime lastEventUtc = DateTime.MinValue;
+    private string lastRawEventSummary = "No Faloop feed message received yet";
+    private string lastRejectedEventReason = "None";
     private string activeSessionId = string.Empty;
 
     public FaloopClient(IPluginLog pluginLog) => log = pluginLog;
@@ -95,6 +98,21 @@ internal sealed class FaloopClient : IDisposable
     public DateTime LastEventUtc
     {
         get { lock (sync) return lastEventUtc; }
+    }
+
+    public DateTime LastRawFeedMessageUtc
+    {
+        get { lock (sync) return lastRawFeedMessageUtc; }
+    }
+
+    public string LastRawEventSummary
+    {
+        get { lock (sync) return lastRawEventSummary; }
+    }
+
+    public string LastRejectedEventReason
+    {
+        get { lock (sync) return lastRejectedEventReason; }
     }
 
     public async Task<FaloopAuthenticationResult> AuthenticateAsync(
@@ -223,7 +241,7 @@ internal sealed class FaloopClient : IDisposable
 
             var slug = new string(dataCenterSlug.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
             using var request = new HttpRequestMessage(HttpMethod.Get,
-                $"https://faloop.app/api/app/datacenter/{Uri.EscapeDataString(slug)}");
+                $"https://faloop.app/api/app/data-center/{Uri.EscapeDataString(slug)}");
             request.Headers.TryAddWithoutValidation("Authorization", token);
             request.Headers.TryAddWithoutValidation("Origin", "https://faloop.app");
             request.Headers.TryAddWithoutValidation("Referer", "https://faloop.app/");
@@ -233,8 +251,14 @@ internal sealed class FaloopClient : IDisposable
                 return FaloopLocationEnrichmentResult.Pending(feedEvent,
                     $"datacenter state returned HTTP {(int)response.StatusCode}");
 
-            using var stateJson = JsonDocument.Parse(
-                await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            var stateText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+            if (!mediaType.Contains("json", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(stateText) || stateText.TrimStart().StartsWith('<'))
+                return FaloopLocationEnrichmentResult.Pending(feedEvent,
+                    $"datacenter state returned {(string.IsNullOrWhiteSpace(mediaType) ? "an unknown content type" : mediaType)} instead of JSON");
+
+            using var stateJson = JsonDocument.Parse(stateText);
             return TryResolveFromDatacenterState(stateJson.RootElement, feedEvent, out var enriched, out var detail)
                 ? FaloopLocationEnrichmentResult.Resolved(enriched, detail)
                 : FaloopLocationEnrichmentResult.Pending(feedEvent, detail);
@@ -355,7 +379,7 @@ internal sealed class FaloopClient : IDisposable
                         if (!socketConnected)
                         {
                             socketConnected = true;
-                            SetStatus(true, "Connected to Faloop authenticated feed");
+                            SetStatus(true, "Faloop socket authenticated; waiting for feed traffic");
                             await SendAsync(socket, "42[\"ack\"]", cancellationToken).ConfigureAwait(false);
                         }
                         continue;
@@ -402,18 +426,69 @@ internal sealed class FaloopClient : IDisposable
                 if (string.IsNullOrWhiteSpace(nestedText))
                     return;
                 using var nested = JsonDocument.Parse(nestedText);
-                if (TryParseFeedEvent(nested.RootElement, out var nestedEvent))
+                RecordRawFeedMessage(DescribeRawEvent(nested.RootElement));
+                if (TryParseFeedEvent(nested.RootElement, out var nestedEvent, out var nestedRejection))
+                {
+                    RecordRecognizedHuntEvent(nestedEvent);
                     Publish(nestedEvent);
+                }
+                else
+                {
+                    RecordRejectedEvent(nested.RootElement, nestedRejection);
+                }
                 return;
             }
 
-            if (TryParseFeedEvent(payload, out var feedEvent))
+            RecordRawFeedMessage(DescribeRawEvent(payload));
+            if (TryParseFeedEvent(payload, out var feedEvent, out var rejection))
+            {
+                RecordRecognizedHuntEvent(feedEvent);
                 Publish(feedEvent);
+            }
+            else
+            {
+                RecordRejectedEvent(payload, rejection);
+            }
         }
         catch (JsonException ex)
         {
             log.Debug("Ignored malformed Faloop message: {Error}", ex.Message);
         }
+    }
+
+    private void RecordRawFeedMessage(string summary)
+    {
+        lock (sync)
+        {
+            lastRawFeedMessageUtc = DateTime.UtcNow;
+            lastRawEventSummary = summary;
+            if (lastEventUtc == DateTime.MinValue)
+                status = "Faloop feed traffic received; waiting for a recognized hunt event";
+        }
+    }
+
+    private void RecordRecognizedHuntEvent(FaloopFeedEvent feedEvent)
+    {
+        lock (sync)
+        {
+            lastEventUtc = DateTime.UtcNow;
+            lastRejectedEventReason = "None";
+            status = "Faloop feed healthy; recognized hunt events received";
+        }
+        log.Information(
+            "Raw Faloop hunt event recognized: type={Type}/{SubType}, action={Action}, mark={Mark}, world={World}, eventId={EventId}",
+            feedEvent.EventType, string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "(missing)" : feedEvent.EventSubType,
+            feedEvent.Action, feedEvent.MobSlug, feedEvent.WorldSlug,
+            string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId);
+    }
+
+    private void RecordRejectedEvent(JsonElement payload, string reason)
+    {
+        if (!LooksLikeHuntEvent(payload))
+            return;
+        var summary = DescribeRawEvent(payload);
+        lock (sync) lastRejectedEventReason = $"{summary}: {reason}";
+        log.Warning("Rejected raw Faloop hunt event: {Summary}; reason={Reason}", summary, reason);
     }
 
     private void Publish(FaloopFeedEvent feedEvent)
@@ -476,12 +551,19 @@ internal sealed class FaloopClient : IDisposable
     private static string SpawnKey(string world, string mob, int instance) =>
         $"{world.Trim().ToUpperInvariant()}|{mob.Trim().ToUpperInvariant()}|{instance}";
 
-    private static bool TryParseFeedEvent(JsonElement root, out FaloopFeedEvent feedEvent)
+    private static bool TryParseFeedEvent(
+        JsonElement root,
+        out FaloopFeedEvent feedEvent,
+        out string rejectionReason)
     {
         feedEvent = null!;
+        rejectionReason = string.Empty;
         if (root.ValueKind != JsonValueKind.Object || !TryString(root, "type", out var type) ||
             !root.TryGetProperty("data", out var eventData) || eventData.ValueKind != JsonValueKind.Object)
+        {
+            rejectionReason = "payload did not contain an object type/data envelope";
             return false;
+        }
 
         FaloopEventAction? action = type switch
         {
@@ -493,11 +575,21 @@ internal sealed class FaloopClient : IDisposable
             action = actionText switch
             {
                 "spawn" => FaloopEventAction.Spawn,
+                // Current Faloop builds publish user-confirmed spawn locations as sighting_set.
+                // spawn_location is retained as a compatible location-bearing notification.
+                "sighting_set" => FaloopEventAction.Spawn,
+                "spawn_location" => FaloopEventAction.Spawn,
+                "sighting" => FaloopEventAction.Spawn,
                 "death" => FaloopEventAction.Death,
                 _ => null,
             };
         if (action is null)
+        {
+            rejectionReason = type == "mob" && TryString(eventData, "action", out var unsupportedAction)
+                ? $"unsupported mob action '{unsupportedAction}'"
+                : $"unsupported event type '{type}'";
             return false;
+        }
 
         var eventSubType = FirstString(root, "subType", "subtype");
         var eventId = FirstPrimitiveString(root, "spawnId", "reportId", "eventId", "windowId");
@@ -521,7 +613,10 @@ internal sealed class FaloopClient : IDisposable
         if (string.IsNullOrWhiteSpace(world))
             world = FirstString(eventData, "worldId2", "worldId");
         if (string.IsNullOrWhiteSpace(mob) || string.IsNullOrWhiteSpace(world))
+        {
+            rejectionReason = $"recognized {type} event was missing mark or world identity";
             return false;
+        }
 
         var inner = eventData.TryGetProperty("data", out var nested) && nested.ValueKind == JsonValueKind.Object
             ? nested
@@ -600,6 +695,39 @@ internal sealed class FaloopClient : IDisposable
             coordinateEvidence.Count == 0 ? "(none)" : string.Join("; ", coordinateEvidence),
             Math.Max(0, instance), occurred, hasAuthoritativeTimestamp, timestampSource);
         return true;
+    }
+
+    private static bool LooksLikeHuntEvent(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !TryString(root, "type", out var type))
+            return false;
+        return type is "mob" or "mobworldspawn" or "mobworldkill";
+    }
+
+    private static string DescribeRawEvent(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+            return $"type=(non-object {root.ValueKind})";
+        var type = FirstString(root, "type");
+        if (string.IsNullOrWhiteSpace(type))
+            type = "(missing)";
+        if (!root.TryGetProperty("data", out var eventData) || eventData.ValueKind != JsonValueKind.Object)
+            return $"type={type}, action=(missing), mark=(missing), world=(missing)";
+        var action = FirstString(eventData, "action");
+        if (string.IsNullOrWhiteSpace(action))
+            action = "(missing)";
+        var mob = string.Empty;
+        var world = string.Empty;
+        if (eventData.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Object)
+        {
+            mob = FirstString(id, "mobId", "mobId2");
+            world = FirstString(id, "worldId", "worldId2");
+        }
+        if (string.IsNullOrWhiteSpace(mob))
+            mob = FirstString(eventData, "mobId2", "mobId");
+        if (string.IsNullOrWhiteSpace(world))
+            world = FirstString(eventData, "worldId2", "worldId");
+        return $"type={type}, action={action}, mark={(string.IsNullOrWhiteSpace(mob) ? "(missing)" : mob)}, world={(string.IsNullOrWhiteSpace(world) ? "(missing)" : world)}";
     }
 
     private static bool TryResolveFromDatacenterState(

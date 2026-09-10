@@ -148,6 +148,8 @@ public sealed class Plugin : IDalamudPlugin
     private string faloopUsername = string.Empty;
     private string faloopPassword = string.Empty;
     private string faloopLoginStatus = string.Empty;
+    private string lastFaloopDecision = "No recognized Faloop hunt event processed yet";
+    private DateTime lastFaloopDecisionUtc = DateTime.MinValue;
     private string status = "Idle";
 
     public Plugin(
@@ -448,11 +450,19 @@ public sealed class Plugin : IDalamudPlugin
         var world = ResolveFaloopWorld(feedEvent.WorldSlug);
         var creature = FaloopCatalog.DisplayName(feedEvent.MobSlug);
         var hasTerritory = FaloopCatalog.TryResolveTerritory(feedEvent.ZoneSlug, out var territory);
+        SetFaloopDecision(
+            $"Recognized {feedEvent.Action}: {creature} / {world} / " +
+            $"{(feedEvent.ZoneSlug ?? "territory missing")} / {feedEvent.EventType}/" +
+            $"{(string.IsNullOrWhiteSpace(feedEvent.EventSubType) ? "subtype missing" : feedEvent.EventSubType)}");
 
         if (feedEvent.Action == FaloopEventAction.Death)
         {
             if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+            {
+                SetFaloopDecision($"Rejected stale death event: {creature} on {world}");
                 return;
+            }
+            SetFaloopDecision($"Accepted death evidence: {creature} on {world}");
             InvalidateExternalDeath(world, creature, hasTerritory ? territory : 0,
                 feedEvent.Instance, feedEvent.OccurredAtUtc, "Faloop");
             return;
@@ -462,20 +472,55 @@ public sealed class Plugin : IDalamudPlugin
         if (precursorProfile is not null)
         {
             if (hasTerritory && SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
+            {
+                SetFaloopDecision($"Accepted SS precursor evidence: {creature} on {world}");
                 ObserveSsChain(precursorProfile,
                     $"Faloop reported a {precursorProfile.PrecursorName} precursor");
+            }
+            else
+            {
+                SetFaloopDecision($"Ignored unrelated SS precursor: {creature} on {world}");
+            }
             return;
         }
 
+        if (!hasTerritory && HuntCatalog.ResolveUniqueName(creature) is { } uniqueDefinition)
+        {
+            territory = uniqueDefinition.TerritoryId;
+            hasTerritory = true;
+            // Lightweight sighting_set reports may omit zoneId even though the mark identity is
+            // unambiguous. Preserve the inferred territory through POI resolution/enrichment.
+            feedEvent = feedEvent with { ZoneSlug = territory.ToString() };
+            SetFaloopDecision(
+                $"Inferred territory {territory} for {uniqueDefinition.Name} from its unique supported mark identity");
+        }
         if (!hasTerritory)
+        {
+            SetFaloopDecision($"Rejected {creature} on {world}: territory/zone was missing or unknown");
             return;
+        }
         var definition = HuntCatalog.ResolveStrict(territory, creature);
         if (definition is null)
+        {
+            SetFaloopDecision($"Ignored {creature} on {world}: not a configured S/SS for territory {territory}");
             return; // Faloop reports many ranks; only the strict configured S/SS catalog is eligible.
+        }
         var expansion = HuntCatalog.GetExpansion(territory);
-        if (!config.IsExpansionEnabled(expansion) || !travel.IsSameDataCenter(world) ||
-            !IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+        if (!config.IsExpansionEnabled(expansion))
+        {
+            SetFaloopDecision($"Ignored {definition.Name} on {world}: {HuntCatalog.ExpansionName(expansion)} hunting is disabled");
             return;
+        }
+        if (!travel.IsSameDataCenter(world))
+        {
+            SetFaloopDecision($"Ignored {definition.Name} on {world}: world is outside the current data center");
+            return;
+        }
+        if (!IsWithinFreshnessWindow(feedEvent.OccurredAtUtc, DateTime.UtcNow))
+        {
+            SetFaloopDecision($"Rejected stale spawn event: {definition.Name} on {world}");
+            return;
+        }
 
         var reportId = string.IsNullOrWhiteSpace(feedEvent.EventId) ? "(missing)" : feedEvent.EventId;
         log.Information(
@@ -516,6 +561,7 @@ public sealed class Plugin : IDalamudPlugin
                 ? $"POI id {feedEvent.PoiId}"
                 : feedEvent.RawPoiKey;
             status = $"Waiting for Faloop location enrichment: {definition.Name} on {world} ({rawPoi})";
+            SetFaloopDecision($"Location missing; waiting for enrichment: {definition.Name} on {world}");
             log.Information(
                 "Location missing; waiting for enrichment: {Mark} / {World} / {Territory} / reportId={ReportId}",
                 definition.Name, world, feedEvent.ZoneSlug ?? territory.ToString(), reportId);
@@ -544,6 +590,8 @@ public sealed class Plugin : IDalamudPlugin
             mapX, mapY, coordinateSource, feedEvent.RawCoordinateData);
         log.Information("Resolved destination: {Mark} / {World} / X{MapX:0.0} Y{MapY:0.0}; activating travel",
             definition.Name, world, mapX, mapY);
+        SetFaloopDecision(
+            $"Eligible {definition.Name} on {world}; destination X{mapX:0.0} Y{mapY:0.0} resolved; activating travel");
 
         var isSs = HuntCatalog.IsAnySsName(definition.Name);
         AcceptSRankAlert(
@@ -556,6 +604,13 @@ public sealed class Plugin : IDalamudPlugin
             mapY,
             "Faloop",
             feedEvent.OccurredAtUtc);
+    }
+
+    private void SetFaloopDecision(string decision)
+    {
+        lastFaloopDecision = decision;
+        lastFaloopDecisionUtc = DateTime.UtcNow;
+        log.Information("Faloop pipeline decision: {Decision}", decision);
     }
 
     private string ResolveFaloopWorld(string worldId)
@@ -4317,8 +4372,18 @@ public sealed class Plugin : IDalamudPlugin
             config.Save();
         }
         ImGui.TextWrapped($"Faloop: {faloop.Status}");
+        if (faloop.LastMessageUtc != DateTime.MinValue)
+            ImGui.TextWrapped($"Last socket packet: {(DateTime.UtcNow - faloop.LastMessageUtc).TotalSeconds:0}s ago");
+        if (faloop.LastRawFeedMessageUtc != DateTime.MinValue)
+            ImGui.TextWrapped($"Last raw Faloop message: {(DateTime.UtcNow - faloop.LastRawFeedMessageUtc).TotalSeconds:0}s ago");
         if (faloop.LastEventUtc != DateTime.MinValue)
-            ImGui.TextWrapped($"Last feed event: {(DateTime.UtcNow - faloop.LastEventUtc).TotalSeconds:0}s ago");
+            ImGui.TextWrapped($"Last recognized hunt event: {(DateTime.UtcNow - faloop.LastEventUtc).TotalSeconds:0}s ago");
+        ImGui.TextWrapped($"Last raw event: {faloop.LastRawEventSummary}");
+        if (!string.Equals(faloop.LastRejectedEventReason, "None", StringComparison.Ordinal))
+            ImGui.TextWrapped($"Last raw hunt rejection: {faloop.LastRejectedEventReason}");
+        ImGui.TextWrapped(lastFaloopDecisionUtc == DateTime.MinValue
+            ? $"Pipeline: {lastFaloopDecision}"
+            : $"Pipeline ({(DateTime.UtcNow - lastFaloopDecisionUtc).TotalSeconds:0}s ago): {lastFaloopDecision}");
         ImGui.SetNextItemWidth(250f);
         ImGui.InputText("Faloop username", ref faloopUsername, 128);
         ImGui.SetNextItemWidth(250f);
