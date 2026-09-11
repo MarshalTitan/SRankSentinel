@@ -36,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
     private const double ParkingRouteStallSeconds = 12;
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
+    private const float TagApproachClearance = 8f;
     private const double ReturnLandingDirectAttemptSeconds = 4;
     private const double ReturnLandingRouteStallSeconds = 10;
     private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
@@ -954,7 +955,7 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             var text = chatMessage.Message.TextValue;
-            var isSonar = chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.Ordinal);
+            var isSonar = chatMessage.Sender.TextValue.Equals("Sonar", StringComparison.OrdinalIgnoreCase);
             var mapLink = chatMessage.Message.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
 
             if (isSonar && !config.EnableSonarFallback)
@@ -993,7 +994,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             var directSsProfile = HuntCatalog.FindSsProfileInText(text);
-            if (!text.Contains("was just killed", StringComparison.OrdinalIgnoreCase) &&
+            if (!IsSonarKillNotice(text) &&
                 directSsProfile is not null &&
                 mapLink is not null)
             {
@@ -1012,7 +1013,7 @@ public sealed class Plugin : IDalamudPlugin
             if (!isSonar)
                 return;
 
-            if (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase))
+            if (IsSonarKillNotice(text))
             {
                 var killedWorld = ParseSonarWorld(text);
                 if (current is not null &&
@@ -1111,6 +1112,14 @@ public sealed class Plugin : IDalamudPlugin
             isSs ? "ssrank" : "srank", world, creature.Trim(), territory,
             definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
             instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);
+        if (!HasUsableMapCoordinates(incoming))
+        {
+            status = $"Ignored coordinate-less {source} report for {incoming.CreatureName}; waiting for a location-bearing report";
+            log.Warning(
+                "Ignored coordinate-less {Source} report for {Mark} on {World}; it cannot activate or enter the travel queue until coordinates arrive",
+                source, incoming.CreatureName, incoming.World);
+            return;
+        }
         if (mapX > 0f && mapY > 0f && unresolvedFaloopAlerts.Remove(incoming.Key))
             log.Information("{Source} enriched unresolved Faloop alert for {Mark} on {World} with coordinates ({MapX:0.0}, {MapY:0.0})",
                 source, incoming.CreatureName, incoming.World, mapX, mapY);
@@ -3454,7 +3463,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             combat.TargetMark(mark);
-            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + 18f;
+            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
             if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
             {
                 log.Information("Proper pull detected for {Mark}; attempting ranged tag for pull cycle {PullCycle}",
@@ -3500,7 +3509,7 @@ public sealed class Plugin : IDalamudPlugin
 
         combat.TargetMark(mark);
 
-        if (ClearanceFromMark(mark) <= 20f)
+        if (ClearanceFromMark(mark) <= TagApproachClearance + 1f)
         {
             vnav.StopSafe();
             if (now >= nextActionUtc)
@@ -3526,7 +3535,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if ((now - stateSinceUtc).TotalSeconds > 3 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
         {
-            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + 18f;
+            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
             vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange);
         }
     }
@@ -5069,6 +5078,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>
         IsWithinFreshnessWindow(alert.ReceivedAtUtc, now) &&
+        HasUsableMapCoordinates(alert) &&
         !killedAlerts.ContainsKey(alert.Key) &&
         travel.IsSameDataCenter(alert.World) &&
         HuntCatalog.IsSupportedTerritory(alert.TerritoryId) &&
@@ -5193,13 +5203,27 @@ public sealed class Plugin : IDalamudPlugin
         log.Information("State -> {State}: {Message}", next, message);
     }
 
+    private static bool IsSonarKillNotice(string text) =>
+        !string.IsNullOrWhiteSpace(text) &&
+        text.Contains(" on ", StringComparison.OrdinalIgnoreCase) &&
+        (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase) ||
+         text.Contains("was killed at", StringComparison.OrdinalIgnoreCase));
+
     private static string ParseSonarWorld(string text)
     {
         var start = text.LastIndexOf('<');
         var end = start >= 0 ? text.IndexOf('>', start + 1) : -1;
-        return start < 0 || end <= start
+        if (start >= 0 && end > start)
+            return new string(text[(start + 1)..end].Where(char.IsLetterOrDigit).ToArray());
+
+        var killedAt = text.IndexOf(" was killed", StringComparison.OrdinalIgnoreCase);
+        if (killedAt <= 0)
+            return string.Empty;
+        var prefix = text[..killedAt];
+        var onWorld = prefix.LastIndexOf(" on ", StringComparison.OrdinalIgnoreCase);
+        return onWorld < 0
             ? string.Empty
-            : new string(text[(start + 1)..end].Where(char.IsLetterOrDigit).ToArray());
+            : new string(prefix[(onWorld + 4)..].Where(char.IsLetterOrDigit).ToArray());
     }
 
     private static int ParseSonarInstance(string text)
