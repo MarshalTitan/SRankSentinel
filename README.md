@@ -1,25 +1,25 @@
 # S Rank Sentinel
 
-S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental primary source is Faloop's authenticated real-time feed; HuntAlerts and Sonar remain optional fallbacks. Every source supplies data only, while Sentinel owns the complete hunt lifecycle.
+S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sonar supply S-rank reports and map coordinates, while Sentinel owns the complete hunt lifecycle.
 
 ## Workflow
 
-1. Connect directly to Faloop's authenticated Socket.IO feed and consume spawn/death events. The username and resulting session ID are retained for automatic reconnect. Passwords are never logged or serialized as plaintext; the optional **Remember Faloop login on this PC** setting stores only Windows CurrentUser DPAPI ciphertext.
+1. Listen for HuntAlerts IPC reports and Sonar chat/map-link reports. Both production sources remain enabled so the first valid current-DC S-rank report can activate or enrich the same deduplicated hunt.
 2. Apply Sentinel's configurable expansion gate before queueing, reset, World Visit, or territory teleport. Centurio (ARR/HW/SB), Shadowbringers, Endwalker, and Dawntrail can be enabled independently; disabled-expansion alerts are ignored locally regardless of the source's website/UI filters. Evercold is reserved as a disabled future placeholder until hunt data exists.
-3. Prefer usable map/pixel coordinates carried directly by a Faloop event; otherwise translate either of Faloop's `zonePoiId` / `zonePoiIds` payload forms through a reviewed coordinate snapshot from the current web client. Convert the result to a local game-world destination and retain it across World Visit, teleport, zoning, and instance transitions. This feeds vnavmesh directly without creating or reading the game's global map flag and is never a direct player-position write.
-4. Optionally accept HuntAlerts IPC and Sonar chat/map-link alerts as fallback sources. Either fallback can be disabled independently after the direct feed is proven on the player's data center.
-5. Reject cross-data-center alerts, suppress duplicate feed events, deduplicate same-data-center alerts by world + territory + instance + mark, and persist the ordered queue without interrupting the active hunt. Matching Faloop death events immediately invalidate queued entries; historical deaths older than the freshness window cannot invalidate a newer spawn.
+3. Convert the supplied map coordinates to a local game-world destination and retain it across World Visit, teleport, zoning, and instance transitions. This feeds vnavmesh directly and is never a direct player-position write.
+4. Reconcile HuntAlerts and Sonar reports into one alert identity rather than creating duplicates when both providers report the same mark.
+5. Reject cross-data-center alerts, deduplicate same-data-center alerts by world + territory + instance + mark, and persist the ordered queue without interrupting the active hunt. Matching positive death reports invalidate queued entries; historical deaths older than the freshness window cannot invalidate a newer spawn.
 6. Reset through Ul'dah before every hunt.
 7. Use the Ul'dah aetheryte's normal World Visit menus when the alert is on another world.
 8. Once the hunt coordinates are resolved, rank the territory's attuned aetherytes by distance and teleport to the nearest usable one before local navigation. The Tempest has a centralized hard override to The Ondo Cups and never uses Macarenses Angle. If coordinate/map-marker ranking is unavailable, use the configured preferred-aetheryte fallback. The Dravanian Hinterlands uses its normal Idyllshire → Prologue Gate (Western Hinterlands) aethernet route because that field zone has no main teleport crystal.
 9. After arriving in the correct territory and instance, first wait for zoning and the local player state to settle, then wait indefinitely and motionless at the aetheryte until vnavmesh reports the mesh fully ready. Mesh generation/download is a blocking state, never a hunt failure; newer alerts remain queued and cannot replace the active hunt.
-10. Use the stored Faloop/HuntAlerts/Sonar coordinates directly as the initial vnavmesh flight destination. Direct Faloop operation does not depend on HuntAlerts, Sonar, or either fallback creating a map flag. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
+10. Use the stored HuntAlerts/Sonar coordinates directly as the initial vnavmesh flight destination. Do not require or scan for the S-rank entity at the aetheryte; begin resolving the actual battle object only after reaching the reported area.
 11. If the mark is not visible near the alert coordinates, remain there and rescan in repeated bounded windows. A missing entity, unavailable coordinate projection, interrupted path, or failed route never means the hunt is dead and never clears it.
 12. Once positively identified by stable battle-NPC ID (with a localized-name fallback), switch from the static alert coordinates to dynamic entity-based parking. Prefer a valid point beside the largest nearby player cluster, but reject any crowd route whose straight line or vnavmesh waypoints enter the mark's protected radius. Revalidate the live mark, crowd, clearances, and final approach before landing; if no safe crowd point remains, use the existing sampled geometric parking points.
 13. Maintain a 38-yalm emergency floor as the mark moves.
 14. Engage only after the active S/SS mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, move into range, make exactly one client action attempt for that pull cycle, close the attack gate, then retreat. Re-arm only when the same positively identified living mark remains out of combat at 99–100% HP for a stable confirmation interval, proving a genuine reset; disappearance or combat-data flicker never re-arms it.
-15. Mark a hunt cleared only from positive evidence: a matching Faloop/HuntAlerts/Sonar death event, a matching game hunt/reward kill message, or a previously identified live battle object becoming visibly dead. Object absence alone is never death evidence.
-16. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared two-second SS-evidence check. A matching zone message, Faloop/HuntAlerts/Sonar report, or visible precursor enters the five-minute SS watch.
+15. Mark a hunt cleared only from positive evidence: a matching HuntAlerts/Sonar death event, a matching game hunt/reward kill message, or a previously identified live battle object becoming visibly dead. Object absence alone is never death evidence.
+16. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared two-second SS-evidence check. A matching zone message, HuntAlerts/Sonar report, or visible precursor enters the five-minute SS watch.
 17. Keep each expansion's chain separate: Forgiven Gossip leads to Forgiven Rebellion, Ker Shroud leads to Ker, and Crystal Incarnation leads to Arch Aethereater. Precursors are observed only and never replace the active target, trigger navigation, or receive attacks.
 18. If the matching SS is announced, reported, queued, or visible, replace the completed S-rank context with that SS, navigate directly to it without an Ul'dah reset, then use the same safe parking and one-tag gates.
 19. If dead while an active mark or SS opportunity is alive, accept a Raise prompt and never use Return. If still dead after the completed opportunity, use the normal Return action.
@@ -41,19 +41,13 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. Its experimental pr
 - ShB/EW/DT SS check: **2 seconds** after each supported normal S-rank death, then **5 minutes** once that expansion's precursor chain is observed
 - Forgiven Gossip, Ker Shroud, and Crystal Incarnation: observation-only; never navigation or combat targets
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
-- Faloop transport: native Engine.IO v4 WebSocket with server-ping replies, heartbeat timeout, bounded messages, exponential reconnect backoff, event replay suppression, and no extra NuGet runtime
-- Faloop coordinate coverage is audited at plugin startup and in both build/release workflows against the current public web-client catalog. Unknown eligible events log the mark, world, territory, raw POI field/value, and any coordinate evidence; when a fallback is enabled, a matching HuntAlerts/Sonar alert may enrich the unresolved hunt without bypassing normal deduplication.
-- Faloop authentication: reconnect with the saved session first; if Faloop rejects it and remembered login is enabled, decrypt the local DPAPI credential and make one automatic re-authentication attempt. A failed automatic login stops and asks for credentials instead of looping.
-- **Forget saved session/login** clears the session, username, DPAPI ciphertext, and remembered-login setting together.
-- Dalamud repository updates preserve the plugin configuration file, including the session and user-bound ciphertext. The ciphertext intentionally cannot be decrypted after copying it to another Windows user or PC.
 - No coordinate writes or coordinate warping
 - Missing marks, unavailable coordinate projections, and unreachable local routes keep the active hunt reserved and are retried; they never produce a cleared/dead result
 
 ## Dependencies
 
 - **vnavmesh** is required for navigation.
-- A linked Faloop account is required for the direct authenticated feed. Faloop's own account/region visibility still determines which events the server sends; Sentinel does not bypass server-side access limits.
-- **HuntAlerts and Sonar are optional fallbacks** and may both be disabled.
+- **HuntAlerts and Sonar** are the production alert providers and should both be installed and enabled.
 - HuntTrainAssistant, Lifestream, Wrath Combo, and BossMod are **not required or used**.
 
 World Visit can only reach worlds on the character's current data center. Cross-data-center alerts are ignored and cross-data-center travel is intentionally not automated. After a hunt, Sentinel stays on the visited World in Ul'dah until another eligible alert requires a World change.
@@ -62,7 +56,7 @@ World Visit can only reach worlds on the character's current data center. Cross-
 
 `/sranksentinel` opens the status/settings window.
 
-The emergency control is **STOP + RESET THROUGH UL'DAH**. It clears the queue, stops vnavmesh, discards the active alert, and performs the same normal Ul'dah reset used by completed hunts.
+**SKIP CURRENT + KEEP QUEUE** discards only the current alert, returns through Ul'dah, and continues with the highest-priority valid queued hunt. The emergency **STOP + RESET THROUGH UL'DAH** control clears the entire queue, stops vnavmesh, discards the active alert, and performs the same normal Ul'dah reset used by completed hunts.
 
 ## Beta installation
 
@@ -84,7 +78,7 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 
 1. Change `<Version>` in `SRankSentinel.csproj` to a new four-part version and commit the development changes to `main`.
 2. Wait for the normal **Build** workflow to pass.
-3. Run the **Publish Beta** workflow from the Actions tab.
+3. The version bump automatically starts the **Publish Beta** workflow.
 4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
 5. If the `DALAMUD_CATALOG_TOKEN` repository secret is configured, the workflow also updates only the `SRankSentinel` object in `MarshalTitan/Sentinel/repo.json` and validates a fresh public install. Otherwise it emits a notice and the central repository's **Update Plugin Entry** workflow is the manual fallback.
 

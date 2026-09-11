@@ -5214,7 +5214,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!configOpen)
             return;
-        ImGui.SetNextWindowSize(new Vector2(680, 880), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(680, 720), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("S Rank Sentinel###SRankSentinel", ref configOpen))
         {
             ImGui.End();
@@ -5230,16 +5230,12 @@ public sealed class Plugin : IDalamudPlugin
                 vnav.StopSafe();
                 faloop.Stop("Sentinel disabled");
             }
-            else if (config.EnableFaloop)
-            {
-                StartFaloopWithSavedAuthentication();
-            }
             config.Save();
         }
 
         ImGui.Separator();
         ImGui.TextUnformatted("STANDALONE S-RANK ORCHESTRATOR");
-        ImGui.TextWrapped("Faloop, HuntAlerts, and Sonar supply alerts only. Sentinel owns Ul'dah reset, World Visit, teleport, instance selection, safe vnavmesh movement, one gated ranged tag, expansion-specific SS watch, and post-kill recovery.");
+        ImGui.TextWrapped("HuntAlerts and Sonar supply alerts. Sentinel handles World Visit, teleport, safe movement, one gated ranged tag, SS watch, and recovery.");
         ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
@@ -5247,78 +5243,6 @@ public sealed class Plugin : IDalamudPlugin
             ImGui.TextWrapped($"Current: {current.CreatureName} | {current.World} | territory {current.TerritoryId} | instance {current.Instance}");
         if (pendingAlerts.Count > 0)
             ImGui.TextWrapped($"Queued: {pendingAlerts.Count} | Next: {pendingAlerts.Peek().CreatureName}");
-
-        ImGui.Separator();
-        ImGui.TextUnformatted("ALERT SOURCES");
-        var enableFaloop = config.EnableFaloop;
-        if (ImGui.Checkbox("Direct Faloop feed (experimental primary)", ref enableFaloop))
-        {
-            config.EnableFaloop = enableFaloop;
-            if (enableFaloop && config.Enabled)
-                StartFaloopWithSavedAuthentication();
-            else
-                faloop.Stop("Direct Faloop feed disabled");
-            config.Save();
-        }
-        ImGui.TextWrapped($"Faloop: {faloop.Status}");
-        if (faloop.LastMessageUtc != DateTime.MinValue)
-            ImGui.TextWrapped($"Last socket packet: {(DateTime.UtcNow - faloop.LastMessageUtc).TotalSeconds:0}s ago");
-        if (faloop.LastRawFeedMessageUtc != DateTime.MinValue)
-            ImGui.TextWrapped($"Last raw Faloop message: {(DateTime.UtcNow - faloop.LastRawFeedMessageUtc).TotalSeconds:0}s ago");
-        if (faloop.LastEventUtc != DateTime.MinValue)
-            ImGui.TextWrapped($"Last recognized hunt event: {(DateTime.UtcNow - faloop.LastEventUtc).TotalSeconds:0}s ago");
-        ImGui.TextWrapped($"Last raw event: {faloop.LastRawEventSummary}");
-        if (!string.Equals(faloop.LastRejectedEventReason, "None", StringComparison.Ordinal))
-            ImGui.TextWrapped($"Last raw hunt rejection: {faloop.LastRejectedEventReason}");
-        ImGui.TextWrapped(lastFaloopDecisionUtc == DateTime.MinValue
-            ? $"Pipeline: {lastFaloopDecision}"
-            : $"Pipeline ({(DateTime.UtcNow - lastFaloopDecisionUtc).TotalSeconds:0}s ago): {lastFaloopDecision}");
-        ImGui.SetNextItemWidth(250f);
-        ImGui.InputText("Faloop username", ref faloopUsername, 128);
-        ImGui.SetNextItemWidth(250f);
-        ImGui.InputText("Faloop password (never stored as plaintext)", ref faloopPassword, 256,
-            ImGuiInputTextFlags.Password);
-        var rememberFaloopLogin = config.RememberFaloopLogin;
-        if (ImGui.Checkbox("Remember Faloop login on this PC", ref rememberFaloopLogin))
-        {
-            config.RememberFaloopLogin = rememberFaloopLogin;
-            if (!rememberFaloopLogin)
-                config.FaloopProtectedPassword = string.Empty;
-            config.Save();
-        }
-        if (config.RememberFaloopLogin)
-        {
-            ImGui.TextWrapped(string.IsNullOrWhiteSpace(config.FaloopProtectedPassword)
-                ? "Authenticate once to save a Windows-protected login."
-                : "Remembered login is protected by Windows for this user on this PC.");
-        }
-        if (ImGui.Button(faloopLoginTask is { IsCompleted: false } ? "Authenticating..." : "Authenticate / refresh session") &&
-            faloopLoginTask is not { IsCompleted: false })
-            BeginFaloopLogin();
-        if (!string.IsNullOrWhiteSpace(faloopLoginStatus))
-            ImGui.TextWrapped(faloopLoginStatus);
-        if (!string.IsNullOrWhiteSpace(config.FaloopSessionId) ||
-            !string.IsNullOrWhiteSpace(config.FaloopUsername) ||
-            !string.IsNullOrWhiteSpace(config.FaloopProtectedPassword))
-        {
-            ImGui.SameLine();
-            if (ImGui.Button("Forget saved session/login"))
-                ForgetFaloopLogin();
-        }
-        ImGui.TextWrapped("The session and username remain in the normal plugin configuration. Optional remembered passwords are stored only as Windows CurrentUser DPAPI ciphertext and are never logged or serialized as plaintext. Expansion eligibility is enforced locally before queueing or travel, regardless of website filters.");
-
-        var huntAlertsFallback = config.EnableHuntAlertsFallback;
-        if (ImGui.Checkbox("HuntAlerts fallback", ref huntAlertsFallback))
-        {
-            config.EnableHuntAlertsFallback = huntAlertsFallback;
-            config.Save();
-        }
-        var sonarFallback = config.EnableSonarFallback;
-        if (ImGui.Checkbox("Sonar fallback", ref sonarFallback))
-        {
-            config.EnableSonarFallback = sonarFallback;
-            config.Save();
-        }
 
         ImGui.Separator();
         ImGui.TextUnformatted("EXPANSION HUNTING");
@@ -5394,6 +5318,11 @@ public sealed class Plugin : IDalamudPlugin
         if (ImGui.Button("Save settings"))
             config.Save();
         ImGui.SameLine();
+        ImGui.BeginDisabled(current is null);
+        if (ImGui.Button("SKIP CURRENT + KEEP QUEUE"))
+            FailCurrent("Current hunt skipped manually");
+        ImGui.EndDisabled();
+        ImGui.SameLine();
         if (ImGui.Button("STOP + RESET THROUGH UL'DAH"))
         {
             pendingAlerts.Clear();
@@ -5404,8 +5333,6 @@ public sealed class Plugin : IDalamudPlugin
                 FailCurrent("Stopped manually");
         }
 
-        ImGui.Separator();
-        ImGui.TextWrapped("Safety gates: the active S/SS mark itself must already be in combat and at/below the configured HP threshold. Sentinel targets it, attempts one job-appropriate ranged action, closes the attack gate for that pull cycle, and never runs a rotation. The gate re-arms only after the same living mark remains out of combat at restored health long enough to prove a genuine reset. A missing entity or failed route never means cleared; only a positive death event/message or a visibly dead identified mark can complete the hunt. Forgiven Gossip, Ker Shroud, and Crystal Incarnation precursors are observation-only and are never targeted, approached, or attacked.");
         ImGui.End();
     }
 

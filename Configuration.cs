@@ -6,9 +6,9 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 10;
+    public int Version { get; set; } = 11;
     public bool Enabled { get; set; } = true;
-    public bool EnableFaloop { get; set; } = true;
+    public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
     public bool EnableSonarFallback { get; set; } = true;
     public bool EnableCenturio { get; set; }
@@ -153,6 +153,23 @@ public sealed class Configuration : IPluginConfiguration
             Version = 10;
             Save();
         }
+
+        if (Version < 11)
+        {
+            // HuntAlerts and Sonar are the production alert providers. Keep the direct Faloop
+            // implementation dormant for future development, but do not connect repository
+            // users to its evolving event feed or expose its credentials in the public UI.
+            EnableFaloop = false;
+            EnableHuntAlertsFallback = true;
+            EnableSonarFallback = true;
+            Version = 11;
+            Save();
+        }
+
+        // These source roles are intentionally fixed in the simplified public settings.
+        EnableFaloop = false;
+        EnableHuntAlertsFallback = true;
+        EnableSonarFallback = true;
 
         LegacyShadowbringersProfile ??= new HuntDistanceProfile();
         EndwalkerProfile ??= new HuntDistanceProfile();

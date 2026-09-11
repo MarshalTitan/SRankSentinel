@@ -3,7 +3,7 @@
     "Author": "MTitan",
     "Name": "S Rank Sentinel",
     "Punchline": "Standalone S-rank travel, parking, tagging, and recovery.",
-    "Description": "Consumes Faloop with optional HuntAlerts/Sonar fallbacks, maps POIs directly to local vnavmesh destinations without a game map flag, retries missing entities/routes without false-clearing, requires positive kill evidence, queues later hunts, and performs one gated ranged tag.",
+    "Description": "Consumes HuntAlerts and Sonar S-rank reports, travels safely through normal World Visit and vnavmesh, retries missing entities and routes without false-clearing, requires positive kill evidence, queues later hunts, and performs one gated ranged tag.",
     "InternalName": "SRankSentinel",
     "AssemblyVersion": "0.7.22.0",
     "TestingAssemblyVersion": "0.7.22.0",
