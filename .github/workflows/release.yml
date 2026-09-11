@@ -1,6 +1,11 @@
 name: Publish Beta
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - SRankSentinel.csproj
   workflow_dispatch:
 
 permissions:
