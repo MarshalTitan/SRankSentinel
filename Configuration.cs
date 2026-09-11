@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 11;
+    public int Version { get; set; } = 12;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -183,6 +183,24 @@ public sealed class Configuration : IPluginConfiguration
         FaloopUsername ??= string.Empty;
         FaloopSessionId ??= string.Empty;
         FaloopProtectedPassword ??= string.Empty;
+
+        if (Version < 12)
+        {
+            // Preserve every lower saved value while bringing all three distance controls under
+            // the simplified 35y UI/runtime maximum.
+            CloseSafeProfile.FlagApproachDistance = Math.Min(35f, CloseSafeProfile.FlagApproachDistance);
+            CloseSafeProfile.WaitingDistance = Math.Min(35f, CloseSafeProfile.WaitingDistance);
+            CloseSafeProfile.EmergencyDistance = Math.Min(35f, CloseSafeProfile.EmergencyDistance);
+            ProximitySensitiveProfile.FlagApproachDistance =
+                Math.Min(35f, ProximitySensitiveProfile.FlagApproachDistance);
+            ProximitySensitiveProfile.WaitingDistance =
+                Math.Min(35f, ProximitySensitiveProfile.WaitingDistance);
+            ProximitySensitiveProfile.EmergencyDistance =
+                Math.Min(35f, ProximitySensitiveProfile.EmergencyDistance);
+            Version = 12;
+            Save();
+        }
+
         CloseSafeProfile.EnforceClearanceInvariant();
         ProximitySensitiveProfile.EnforceClearanceInvariant();
     }
@@ -234,9 +252,9 @@ internal enum HuntBehaviorProfile
 [Serializable]
 public sealed class HuntDistanceProfile
 {
-    public float FlagApproachDistance { get; set; } = 60f;
-    public float WaitingDistance { get; set; } = 45f;
-    public float EmergencyDistance { get; set; } = 38f;
+    public float FlagApproachDistance { get; set; } = 35f;
+    public float WaitingDistance { get; set; } = 35f;
+    public float EmergencyDistance { get; set; } = 35f;
     public float EngageHpPercent { get; set; } = 95f;
 
     public HuntDistanceProfile Clone() => new()

@@ -5324,8 +5324,6 @@ public sealed class Plugin : IDalamudPlugin
             20f,
             20f,
             15f);
-        ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
-                          $"{config.SsChainTimeoutSeconds}s after a precursor is detected.");
         var freshnessMinutes = config.AlertFreshnessMinutes;
         if (ImGui.InputInt("Queued-alert freshness (minutes)", ref freshnessMinutes))
             config.AlertFreshnessMinutes = Math.Clamp(freshnessMinutes, 10, 180);
@@ -5369,10 +5367,10 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Spacing();
         ImGui.TextUnformatted(heading);
         profile.FlagApproachDistance = DrawFloat($"Initial coordinate stop##{id}",
-            profile.FlagApproachDistance, flagMinimum, 90f);
+            profile.FlagApproachDistance, flagMinimum, 35f);
         profile.WaitingDistance = DrawFloat($"Safe parking clearance##{id}",
-            profile.WaitingDistance, safeMinimum, 70f);
-        var emergencyMaximum = Math.Min(50f, profile.WaitingDistance);
+            profile.WaitingDistance, safeMinimum, 35f);
+        var emergencyMaximum = Math.Min(35f, profile.WaitingDistance);
         profile.EmergencyDistance = DrawFloat($"Emergency clearance##{id}",
             Math.Min(profile.EmergencyDistance, emergencyMaximum), emergencyMinimum, emergencyMaximum);
         profile.EngageHpPercent = DrawFloat($"Engage only at/below HP %##{id}",

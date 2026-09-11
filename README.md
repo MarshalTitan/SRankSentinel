@@ -27,13 +27,13 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 
 ## Safety defaults
 
-- Initial coordinate stop: **60y**
-- Safe parking clearance: **45y** plus player/mark hitboxes
-- Emergency clearance: **38y** plus player/mark hitboxes
+- Initial coordinate stop: **35y**
+- Safe parking clearance: **35y** plus player/mark hitboxes
+- Emergency clearance: **35y** plus player/mark hitboxes
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
 - Expansion checkboxes and distance-profile assignment are independent. Centurio and Shadowbringers currently share the **Close-safe** behavior profile; Endwalker and Dawntrail share the **Proximity-sensitive** profile. Evercold remains disabled but is reserved for the proximity-sensitive profile when support arrives.
 - Each behavior profile stores its own initial stop, safe clearance, emergency clearance, and HP gate. Existing settings migrate into the corresponding shared profiles without lowering valid saved clearances.
-- Close-safe ranges are **5–90y** initial stop, **5–70y** safe clearance, and **5–50y** emergency clearance. Proximity-sensitive ranges are **20–90y**, **20–70y**, and **15–50y** respectively. Yard values use one-yard increments and HP gates are displayed as percentages.
+- Close-safe ranges are **5–35y** for initial stop, safe clearance, and emergency clearance. Proximity-sensitive ranges are **20–35y** initial stop, **20–35y** safe clearance, and **15–35y** emergency clearance. Yard values use one-yard increments and HP gates are displayed as percentages.
 - Emergency clearance is constrained to the selected profile's safe parking clearance, so it cannot be configured to exceed the normal waiting radius.
 - Ranged tag action: always selected automatically from the current combat job and adjusted for learned upgrades; no user-facing selector is needed
 - Exactly one client action attempt per genuine combat/pull cycle, whether the client accepts or rejects it; a stable full-health reset may open a new cycle, but there is no attack retry loop or combat rotation
