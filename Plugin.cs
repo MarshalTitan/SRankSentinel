@@ -32,6 +32,12 @@ public sealed class Plugin : IDalamudPlugin
     private const float CrowdMovementTolerance = 10f;
     private const int CrowdMinimumPlayers = 3;
     private const double CrowdPathQueryTimeoutSeconds = 20;
+    private const float ParkingMaximumVerticalSeparation = 6f;
+    private const double ParkingRouteStallSeconds = 12;
+    private const float ParkingMeaningfulProgressDistance = 1f;
+    private const double LandingAttemptTimeoutSeconds = 10;
+    private const double ReturnLandingDirectAttemptSeconds = 4;
+    private const double ReturnLandingRouteStallSeconds = 10;
     private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
     private const double FaloopLocationEnrichmentInitialRetrySeconds = 5;
     private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
@@ -79,6 +85,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Dictionary<string, DateTime> killedAlerts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> faloopReportIdsByAlertKey = new(StringComparer.Ordinal);
     private readonly Queue<ParkingCandidate> parkingCandidates = new();
+    private readonly Queue<Vector3> returnLandingCandidates = new();
     private readonly Queue<SsStagingCandidate> ssStagingCandidates = new();
     private readonly Queue<Vector3> approachProjectionCandidates = new();
     private readonly Queue<Vector3> approachRouteCandidates = new();
@@ -115,6 +122,14 @@ public sealed class Plugin : IDalamudPlugin
     private bool crowdFallbackAnnounced;
     private bool postTagRetreatActive;
     private bool parkingPathUsesFlight;
+    private Vector3 parkingLastProgressPosition;
+    private DateTime parkingLastProgressUtc = DateTime.MinValue;
+    private Vector3? returnLandingPoint;
+    private Vector3 returnLandingLastProgressPosition;
+    private DateTime returnLandingStartedUtc = DateTime.MinValue;
+    private DateTime returnLandingRouteStartedUtc = DateTime.MinValue;
+    private DateTime returnLandingLastProgressUtc = DateTime.MinValue;
+    private int returnLandingAttempt;
     private uint territoryAetheryteId;
     private SentinelState state = SentinelState.Idle;
     private DateTime stateSinceUtc = DateTime.UtcNow;
@@ -1701,6 +1716,16 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // Teleport and Return cannot begin while mounted or in flight. A normal dismount is
+        // attempted first; if terrain or a wall prevents landing, relocate to one of several
+        // nearby projected floor points instead of pressing Dismount forever at the obstruction.
+        if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
+        {
+            TickReturnLandingRecovery(now);
+            return;
+        }
+        ResetReturnLandingRecovery();
+
         if (returnInitiatedBySentinel)
         {
             // The character can become conscious just before the loading flag is observable.
@@ -1737,6 +1762,154 @@ public sealed class Plugin : IDalamudPlugin
                 status = "Teleporting normally to Ul'dah for the mandatory reset";
             nextActionUtc = now.AddSeconds(8);
         }
+    }
+
+    private void TickReturnLandingRecovery(DateTime now)
+    {
+        if (!condition[ConditionFlag.InFlight])
+        {
+            vnav.StopSafe("dismounting before Ul'dah recovery");
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(1);
+            }
+            status = "Dismounting before returning to Ul'dah";
+            return;
+        }
+
+        if (returnLandingStartedUtc == DateTime.MinValue)
+        {
+            vnav.StopSafe("starting bounded post-kill landing recovery");
+            returnLandingStartedUtc = now;
+            returnLandingLastProgressPosition = PlayerPosition();
+            returnLandingLastProgressUtc = now;
+            returnLandingAttempt = 0;
+            nextActionUtc = now;
+            log.Warning("Ul'dah recovery is blocked by flight; starting bounded landing recovery");
+        }
+
+        if (returnLandingPoint is null &&
+            (now - returnLandingStartedUtc).TotalSeconds < ReturnLandingDirectAttemptSeconds)
+        {
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(1);
+            }
+            status = "Landing before returning to Ul'dah";
+            return;
+        }
+
+        if (returnLandingPoint is null)
+        {
+            if (returnLandingCandidates.Count == 0)
+                PrepareReturnLandingCandidates();
+
+            while (returnLandingCandidates.Count > 0)
+            {
+                var candidate = returnLandingCandidates.Dequeue();
+                if (!vnav.MoveToSafe(candidate, true))
+                    continue;
+
+                returnLandingPoint = candidate;
+                returnLandingRouteStartedUtc = now;
+                returnLandingLastProgressPosition = PlayerPosition();
+                returnLandingLastProgressUtc = now;
+                returnLandingAttempt++;
+                status = $"Flight obstructed; moving to alternate landing point {returnLandingAttempt} before Ul'dah";
+                log.Warning("Post-kill landing attempt {Attempt}: relocating {Distance:0}y to projected floor at Y={Y:0.0}",
+                    returnLandingAttempt, Vector3.Distance(PlayerPosition(), candidate), candidate.Y);
+                return;
+            }
+
+            // Projection can be temporarily unavailable while the mesh is changing. Continue
+            // ordinary landing attempts and resample rather than abandoning the confirmed kill.
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(2);
+                returnLandingStartedUtc = now.AddSeconds(-ReturnLandingDirectAttemptSeconds);
+            }
+            status = "No alternate landing point is projected yet; retrying before Ul'dah";
+            return;
+        }
+
+        var player = PlayerPosition();
+        if (Vector3.Distance(player, returnLandingLastProgressPosition) >= ParkingMeaningfulProgressDistance)
+        {
+            returnLandingLastProgressPosition = player;
+            returnLandingLastProgressUtc = now;
+        }
+
+        if (Vector3.Distance(player, returnLandingPoint.Value) <= 5f)
+        {
+            vnav.StopSafe("alternate post-kill landing point reached");
+            returnLandingPoint = null;
+            returnLandingStartedUtc = now;
+            nextActionUtc = now;
+            status = "Alternate landing point reached; landing before Ul'dah";
+            return;
+        }
+
+        var routeStopped = (now - returnLandingRouteStartedUtc).TotalSeconds >= 4 &&
+                           !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe();
+        var routeStalled = (now - returnLandingLastProgressUtc).TotalSeconds >= ReturnLandingRouteStallSeconds;
+        if (routeStopped || routeStalled)
+        {
+            vnav.StopSafe(routeStalled
+                ? "post-kill alternate landing route stalled"
+                : "post-kill alternate landing route stopped");
+            log.Warning("Post-kill landing attempt {Attempt} {Reason}; trying another projected floor point",
+                returnLandingAttempt, routeStalled ? "stalled" : "stopped");
+            returnLandingPoint = null;
+            returnLandingRouteStartedUtc = DateTime.MinValue;
+            returnLandingLastProgressUtc = now;
+            status = "Alternate landing route was obstructed; trying another before Ul'dah";
+            return;
+        }
+
+        status = $"Moving to alternate landing point {returnLandingAttempt} before returning to Ul'dah";
+    }
+
+    private void PrepareReturnLandingCandidates()
+    {
+        var player = PlayerPosition();
+        var candidates = new List<Vector3>();
+        float[] radii = [18f, 30f, 45f];
+        for (var angle = 0; angle < 360; angle += 45)
+        {
+            var radians = angle * MathF.PI / 180f;
+            var direction = new Vector3(MathF.Cos(radians), 0f, MathF.Sin(radians));
+            foreach (var radius in radii)
+            {
+                var query = player + direction * radius;
+                query.Y = 1024f;
+                var projected = vnav.PointOnFloorSafe(query, 10f);
+                if (projected is null || HorizontalDistance(player, projected.Value) < 12f ||
+                    candidates.Any(existing => HorizontalDistance(existing, projected.Value) < 5f))
+                    continue;
+                candidates.Add(projected.Value);
+            }
+        }
+
+        foreach (var candidate in candidates
+                     .OrderBy(point => MathF.Abs(point.Y - player.Y))
+                     .ThenBy(point => HorizontalDistance(point, player)))
+            returnLandingCandidates.Enqueue(candidate);
+
+        log.Information("Prepared {Count} alternate floor point(s) for post-kill landing recovery",
+            returnLandingCandidates.Count);
+    }
+
+    private void ResetReturnLandingRecovery()
+    {
+        returnLandingCandidates.Clear();
+        returnLandingPoint = null;
+        returnLandingStartedUtc = DateTime.MinValue;
+        returnLandingRouteStartedUtc = DateTime.MinValue;
+        returnLandingLastProgressUtc = DateTime.MinValue;
+        returnLandingAttempt = 0;
     }
 
     private bool ShouldBeginIncidentalAggroAvoidance(out IBattleChara? nearestThreat)
@@ -3098,7 +3271,7 @@ public sealed class Plugin : IDalamudPlugin
             PollCrowdParkingPath(mark, now);
             return;
         }
-        if (safePoint is not null && HorizontalDistance(PlayerPosition(), safePoint.Value) <= 5f)
+        if (safePoint is not null && Vector3.Distance(PlayerPosition(), safePoint.Value) <= 5f)
         {
             vnav.StopSafe();
             if (!RevalidateParkingForLanding(mark, out var reason))
@@ -3108,6 +3281,32 @@ public sealed class Plugin : IDalamudPlugin
             }
             SetState(SentinelState.Landing, "At the safe parking point; landing normally");
             return;
+        }
+        if (safePoint is not null)
+        {
+            var player = PlayerPosition();
+            if (Vector3.Distance(player, parkingLastProgressPosition) >= ParkingMeaningfulProgressDistance)
+            {
+                parkingLastProgressPosition = player;
+                parkingLastProgressUtc = now;
+            }
+            else if (parkingLastProgressUtc != DateTime.MinValue &&
+                     (now - parkingLastProgressUtc).TotalSeconds >= ParkingRouteStallSeconds)
+            {
+                vnav.StopSafe("safe parking route stalled without movement");
+                log.Warning("Safe parking route stalled for {Seconds}s; trying another candidate",
+                    ParkingRouteStallSeconds);
+                if (!TryStartNextParkingRoute(true, mark))
+                {
+                    nextActionUtc = now.AddSeconds(3);
+                    SetState(SentinelState.LocateMark,
+                        "Safe parking was obstructed; keeping the hunt active and resampling another route");
+                    return;
+                }
+                SetState(SentinelState.MoveToSafePoint,
+                    $"Safe parking route was obstructed; trying another ({parkingCandidates.Count} alternatives remain)");
+                return;
+            }
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
         {
@@ -3148,6 +3347,22 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
         {
+            if ((now - stateSinceUtc).TotalSeconds >= LandingAttemptTimeoutSeconds)
+            {
+                vnav.StopSafe("safe parking landing attempt timed out");
+                log.Warning("Landing at the selected parking point did not complete within {Seconds}s; trying another candidate",
+                    LandingAttemptTimeoutSeconds);
+                if (TryStartNextParkingRoute(true, mark))
+                {
+                    SetState(SentinelState.MoveToSafePoint,
+                        $"Landing was obstructed; trying another safe point ({parkingCandidates.Count} alternatives remain)");
+                    return;
+                }
+                nextActionUtc = now.AddSeconds(3);
+                SetState(SentinelState.LocateMark,
+                    "Landing was obstructed and no alternate remains; keeping the hunt active and resampling");
+                return;
+            }
             UseGeneralAction(23);
             nextActionUtc = now.AddSeconds(1);
             return;
@@ -3904,6 +4119,7 @@ public sealed class Plugin : IDalamudPlugin
                     candidate.Y = 1024f;
                     var projected = vnav.PointOnFloorSafe(candidate, 12f);
                     if (projected is null ||
+                        VerticalSeparation(projected.Value, target.Position) > ParkingMaximumVerticalSeparation ||
                         ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
                         HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
                         crowdCandidates.Any(existing => HorizontalDistance(existing.Candidate.Position, projected.Value) < 2f))
@@ -3948,6 +4164,7 @@ public sealed class Plugin : IDalamudPlugin
                 candidate.Y = 1024f;
                 var projected = vnav.PointOnFloorSafe(candidate, 12f);
                 if (projected is null ||
+                    VerticalSeparation(projected.Value, target.Position) > ParkingMaximumVerticalSeparation ||
                     HorizontalDistance(projected.Value, target.Position) < minimumCenterDistance ||
                     ClearanceAtPoint(projected.Value, target) < clearance - 0.5f)
                     continue;
@@ -3980,6 +4197,8 @@ public sealed class Plugin : IDalamudPlugin
                 selectedParkingCandidate = candidate;
                 safePoint = candidate.Position;
                 selectedParkingPath = null;
+                parkingLastProgressPosition = PlayerPosition();
+                parkingLastProgressUtc = DateTime.UtcNow;
                 return true;
             }
 
@@ -4104,6 +4323,8 @@ public sealed class Plugin : IDalamudPlugin
 
         safePoint = candidate.Position;
         selectedParkingPath = path;
+        parkingLastProgressPosition = PlayerPosition();
+        parkingLastProgressUtc = now;
         parkingPathStartedUtc = DateTime.MinValue;
         var clearance = ClearanceAtPoint(candidate.Position, target);
         if (candidate.IsRandomizedRetreat)
@@ -4155,9 +4376,10 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
+            VerticalSeparation(candidate.Position, target.Position) > ParkingMaximumVerticalSeparation ||
             ClearanceFromMark(target) < ActiveDistanceProfile.EmergencyDistance)
         {
-            reason = "Mark movement invalidated the configured parking clearance; resampling safely";
+            reason = "Mark movement invalidated parking clearance or vertical reach; resampling safely";
             return false;
         }
 
@@ -4466,6 +4688,7 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetReturnLandingRecovery();
         ResetIncidentalAggroTracking();
         parkingCandidates.Clear();
         ResetApproachRouteTracking(clearProjectionCandidates: true);
@@ -4908,6 +5131,8 @@ public sealed class Plugin : IDalamudPlugin
         var dz = a.Z - b.Z;
         return MathF.Sqrt(dx * dx + dz * dz);
     }
+
+    private static float VerticalSeparation(Vector3 a, Vector3 b) => MathF.Abs(a.Y - b.Y);
 
     private void SetState(SentinelState next, string message)
     {
