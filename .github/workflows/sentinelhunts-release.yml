@@ -3,7 +3,7 @@ name: Publish Sentinel Hunts Beta
 on:
   push:
     tags:
-      - 'sentinelhunts-v*'
+      - 'v*-sentinelhunts'
   workflow_dispatch:
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
             throw "Version must contain four numeric components: $version"
           }
-          $expectedTag = "sentinelhunts-v$version"
+          $expectedTag = "v$version-sentinelhunts"
           if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne $expectedTag) {
             throw "Release tag '${{ github.ref_name }}' does not match project version '$expectedTag'."
           }
