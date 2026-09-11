@@ -52,6 +52,7 @@ public sealed class Plugin : IDalamudPlugin
     private const double SsStagingPathQueryTimeoutSeconds = 20;
     private const double SsStagingRouteRetrySeconds = 3;
     private const float SsStagingArrivalDistance = 5f;
+    private const double SsChainKillTransitionLatchSeconds = 30;
     private const double ApproachRouteRetrySeconds = 3;
     private const double ApproachRouteStallSeconds = 15;
     private const double ApproachMovementStartGraceSeconds = 8;
@@ -164,6 +165,9 @@ public sealed class Plugin : IDalamudPlugin
     private bool ssStagingProjectionFailureLogged;
     private DateTime postKillSsGraceDeadlineUtc = DateTime.MinValue;
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
+    private DateTime pendingSsChainEvidenceUtc = DateTime.MinValue;
+    private string pendingSsChainAlertKey = string.Empty;
+    private string pendingSsChainReason = string.Empty;
     private DateTime playerReadySinceUtc = DateTime.MinValue;
     private DateTime lastMarkSeenUtc = DateTime.MinValue;
     private DateTime returnRecoveryStartedUtc = DateTime.MinValue;
@@ -586,7 +590,7 @@ public sealed class Plugin : IDalamudPlugin
             if (hasTerritory && SsAlertMatchesCurrent(world, territory, feedEvent.Instance))
             {
                 log.Debug("Accepted current-DC SS precursor evidence: {Mark} / {World}", creature, world);
-                ObserveSsChain(precursorProfile,
+                ObserveOrLatchSsChain(precursorProfile,
                     $"Faloop reported a {precursorProfile.PrecursorName} precursor");
             }
             else
@@ -932,7 +936,7 @@ public sealed class Plugin : IDalamudPlugin
         if (precursorProfile is not null)
         {
             if (SsAlertMatchesCurrent(payload.huntWorld, payload.startTerritoryTypeId, payload.instance))
-                ObserveSsChain(precursorProfile,
+                ObserveOrLatchSsChain(precursorProfile,
                     $"HuntAlerts reported a {precursorProfile.PrecursorName} precursor");
             return;
         }
@@ -968,11 +972,18 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
+            if (HuntCatalog.IsSsChainStartMessage(text))
+            {
+                var currentSsProfile = current is null
+                    ? null
+                    : HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
+                if (currentSsProfile is not null)
+                    ObserveOrLatchSsChain(currentSsProfile,
+                        $"The {currentSsProfile.ExpansionName} SS precursor chain started");
+            }
+
             if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) && activeSsProfile is not null)
             {
-                if (HuntCatalog.IsSsChainStartMessage(text))
-                    ObserveSsChain(activeSsProfile,
-                        $"The {activeSsProfile.ExpansionName} SS precursor chain started");
                 if (HuntCatalog.IsSsChainWithdrawnMessage(text))
                 {
                     ssWatchDeadlineUtc = DateTime.UtcNow;
@@ -1224,6 +1235,7 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ClearPendingSsChainEvidence();
         ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
@@ -1261,6 +1273,7 @@ public sealed class Plugin : IDalamudPlugin
                           HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ClearPendingSsChainEvidence();
         ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
@@ -4670,13 +4683,61 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool SsAlertMatchesCurrent(string? world, uint territoryId, int instance)
     {
-        if (state is not (SentinelState.PostKillSsGrace or SentinelState.SsWatch) || current is null ||
+        if (current is null ||
             (territoryId != 0 && current.TerritoryId != territoryId))
             return false;
         var alertWorld = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
         var currentInstance = travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance;
         return current.World.Equals(alertWorld, StringComparison.OrdinalIgnoreCase) &&
                (instance <= 0 || currentInstance == Math.Max(1, instance));
+    }
+
+    private void ObserveOrLatchSsChain(SsProfile profile, string reason)
+    {
+        if (current is null ||
+            HuntCatalog.GetSsProfileForTerritory(current.TerritoryId) != profile)
+            return;
+
+        if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) && activeSsProfile == profile)
+        {
+            ObserveSsChain(profile, reason);
+            return;
+        }
+
+        // The zone-wide precursor line can be delivered before the reward/death line that closes
+        // the normal S hunt. Reserve it briefly across that callback ordering boundary. Territory,
+        // World, instance/provider matching, and normal-S identity prevent unrelated chains from
+        // being carried into another hunt; positive kill evidence is still required before SS watch.
+        if (!HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName) ||
+            clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        pendingSsChainEvidenceUtc = DateTime.UtcNow;
+        pendingSsChainAlertKey = current.Key;
+        pendingSsChainReason = reason;
+        status = $"{reason}; reserving this SS follow-up until the S-rank kill is confirmed";
+        log.Information(
+            "Latched SS precursor evidence across the kill transition: {Ss}; alert={AlertKey}; reason={Reason}",
+            profile.SsName, current.Key, reason);
+    }
+
+    private bool TryConsumePendingSsChainEvidence(DateTime now, out string reason)
+    {
+        reason = pendingSsChainReason;
+        var matches = current is not null &&
+                      pendingSsChainAlertKey == current.Key &&
+                      pendingSsChainEvidenceUtc != DateTime.MinValue &&
+                      now - pendingSsChainEvidenceUtc <= TimeSpan.FromSeconds(SsChainKillTransitionLatchSeconds);
+        ClearPendingSsChainEvidence();
+        return matches;
+    }
+
+    private void ClearPendingSsChainEvidence()
+    {
+        pendingSsChainEvidenceUtc = DateTime.MinValue;
+        pendingSsChainAlertKey = string.Empty;
+        pendingSsChainReason = string.Empty;
     }
 
     private void ObserveSsChain(SsProfile profile, string reason)
@@ -4714,6 +4775,7 @@ public sealed class Plugin : IDalamudPlugin
             clientState.TerritoryType == current.TerritoryId &&
             travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
         {
+            var hadLatchedSsEvidence = TryConsumePendingSsChainEvidence(now, out var latchedSsReason);
             activeSsProfile = HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
             ssChainObserved = false;
             ssSpawnAnnounced = false;
@@ -4724,9 +4786,12 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.PostKillSsGrace,
                 $"{reason}; checking for {activeSsProfile!.PrecursorName}/{activeSsProfile.SsName} evidence for " +
                 $"{config.PostKillSsGraceSeconds}s");
+            if (hadLatchedSsEvidence)
+                ObserveSsChain(activeSsProfile, latchedSsReason);
             return;
         }
 
+        ClearPendingSsChainEvidence();
         nextActionUtc = now.AddSeconds(2);
         SetState(SentinelState.ResetToUldah,
             $"{reason}; returning to Ul'dah on the current visited world");
@@ -4777,6 +4842,7 @@ public sealed class Plugin : IDalamudPlugin
         activeSsProfile = null;
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ClearPendingSsChainEvidence();
         ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;

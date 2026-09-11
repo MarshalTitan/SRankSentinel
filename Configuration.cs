@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 12;
+    public int Version { get; set; } = 13;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -40,7 +40,7 @@ public sealed class Configuration : IPluginConfiguration
     public uint TagActionId { get; set; } = 46;
     public int TravelTimeoutSeconds { get; set; } = 300;
     public int LocateTimeoutSeconds { get; set; } = 90;
-    public int PostKillSsGraceSeconds { get; set; } = 2;
+    public int PostKillSsGraceSeconds { get; set; } = 10;
     public int SsChainTimeoutSeconds { get; set; } = 300;
     public int AlertFreshnessMinutes { get; set; } = 45;
     public List<PersistedHuntAlert> PendingAlerts { get; set; } = [];
@@ -198,6 +198,15 @@ public sealed class Configuration : IPluginConfiguration
             ProximitySensitiveProfile.EmergencyDistance =
                 Math.Min(35f, ProximitySensitiveProfile.EmergencyDistance);
             Version = 12;
+            Save();
+        }
+
+        if (Version < 13)
+        {
+            // Keep the ordinary queue reserved long enough for a slightly delayed zone-wide
+            // precursor message to arrive after the normal S-rank kill is confirmed.
+            PostKillSsGraceSeconds = Math.Max(10, PostKillSsGraceSeconds);
+            Version = 13;
             Save();
         }
 
