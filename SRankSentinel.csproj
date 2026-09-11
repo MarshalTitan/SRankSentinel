@@ -9,4 +9,9 @@
   <ItemGroup>
     <None Update="images\icon.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Keep the separate Sentinel Hunts project out of S Rank Sentinel's default recursive compile glob. -->
+    <Compile Remove="SentinelHunts\**\*.cs" />
+  </ItemGroup>
 </Project>

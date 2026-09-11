@@ -1,0 +1,75 @@
+name: Build Sentinel Hunts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SentinelHunts/**'
+      - 'SRankSentinel.csproj'
+      - '.github/scripts/Validate-SentinelHuntsPackage.ps1'
+      - '.github/workflows/sentinelhunts-build.yml'
+      - '.github/workflows/sentinelhunts-release.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'SentinelHunts/**'
+      - 'SRankSentinel.csproj'
+      - '.github/scripts/Validate-SentinelHuntsPackage.ps1'
+      - '.github/workflows/sentinelhunts-build.yml'
+      - '.github/workflows/sentinelhunts-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud development files
+        shell: pwsh
+        run: |
+          $dalamudDir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Path $dalamudDir -Force | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $dalamudDir -Force
+
+      - name: Run core tests
+        run: dotnet run --project SentinelHunts/SentinelHunts.Core.Tests/SentinelHunts.Core.Tests.csproj -c Release
+
+      - name: Restore plugin
+        run: dotnet restore SentinelHunts/SentinelHunts.csproj
+
+      - name: Build release package
+        run: dotnet build SentinelHunts/SentinelHunts.csproj -c Release --no-restore
+
+      - name: Read package version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath 'SentinelHunts/SentinelHunts.csproj' -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Validate installable ZIP
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Validate-SentinelHuntsPackage.ps1
+          -PackagePath 'SentinelHunts/bin/Release/SentinelHunts/latest.zip'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SentinelHunts-${{ steps.version.outputs.value }}
+          path: SentinelHunts/bin/Release/SentinelHunts/latest.zip
+          if-no-files-found: error

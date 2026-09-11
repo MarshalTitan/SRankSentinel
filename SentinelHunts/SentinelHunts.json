@@ -1,0 +1,10 @@
+{
+  "Name": "Sentinel Hunts",
+  "InternalName": "SentinelHunts",
+  "Author": "MTitan",
+  "Punchline": "A clean, safety-first S-rank hunting orchestrator.",
+  "Description": "Queues S-rank reports from Sonar and HuntAlerts, applies expansion filters, travels through Ul'dah with Lifestream, navigates with vnavmesh, parks at a protected hitbox clearance, tags once with WAR Tomahawk at the configured HP threshold, and recovers safely.",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "Tags": ["hunts", "s-rank", "navigation", "sentinel"]
+}

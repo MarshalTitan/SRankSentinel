@@ -1,0 +1,19 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <AssemblyName>SentinelHunts</AssemblyName>
+    <RootNamespace>SentinelHunts</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="SentinelHunts.Core\SentinelHunts.Core.csproj" />
+    <Compile Remove="SentinelHunts.Core\**\*.cs" />
+    <Compile Remove="SentinelHunts.Core.Tests\**\*.cs" />
+    <EmbeddedResource Remove="SentinelHunts.Core\**\*" />
+    <EmbeddedResource Remove="SentinelHunts.Core.Tests\**\*" />
+    <None Remove="SentinelHunts.Core\**\*" />
+    <None Remove="SentinelHunts.Core.Tests\**\*" />
+  </ItemGroup>
+</Project>

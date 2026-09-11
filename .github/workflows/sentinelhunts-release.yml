@@ -1,0 +1,92 @@
+name: Publish Sentinel Hunts Beta
+
+on:
+  push:
+    tags:
+      - 'sentinelhunts-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-sentinelhunts-beta
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud development files
+        shell: pwsh
+        run: |
+          $dalamudDir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          New-Item -ItemType Directory -Path $dalamudDir -Force | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $dalamudDir -Force
+
+      - name: Read and validate version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath 'SentinelHunts/SentinelHunts.csproj' -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "Version must contain four numeric components: $version"
+          }
+          $expectedTag = "sentinelhunts-v$version"
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne $expectedTag) {
+            throw "Release tag '${{ github.ref_name }}' does not match project version '$expectedTag'."
+          }
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$expectedTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Run core tests
+        run: dotnet run --project SentinelHunts/SentinelHunts.Core.Tests/SentinelHunts.Core.Tests.csproj -c Release
+
+      - name: Restore plugin
+        run: dotnet restore SentinelHunts/SentinelHunts.csproj
+
+      - name: Build release package
+        run: dotnet build SentinelHunts/SentinelHunts.csproj -c Release --no-restore
+
+      - name: Validate installable ZIP
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Validate-SentinelHuntsPackage.ps1
+          -PackagePath 'SentinelHunts/bin/Release/SentinelHunts/latest.zip'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Prepare named release asset
+        shell: pwsh
+        run: Copy-Item -LiteralPath 'SentinelHunts/bin/Release/SentinelHunts/latest.zip' -Destination "$env:RUNNER_TEMP\SentinelHunts.zip" -Force
+
+      - name: Create or repair GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $asset = "$env:RUNNER_TEMP\SentinelHunts.zip"
+          gh release view $tag --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber --repo '${{ github.repository }}'
+          }
+          else {
+            gh release create $tag $asset `
+              --repo '${{ github.repository }}' `
+              --target '${{ github.sha }}' `
+              --title "Sentinel Hunts ${{ steps.version.outputs.value }} beta" `
+              --notes "First installable Sentinel Hunts beta. Automation is off by default. Requires Lifestream and vnavmesh for live travel; Sonar and HuntAlerts inputs are available. Direct Faloop input remains planned." `
+              --prerelease
+          }
