@@ -3455,7 +3455,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!tagAttempted && inCombat && hp <= ActiveDistanceProfile.EngageHpPercent)
         {
-            activeTagActionId = combat.ResolveTagActionId(config.AutomaticTagAction, config.TagActionId);
+            activeTagActionId = combat.ResolveTagActionId();
             if (activeTagActionId == 0)
             {
                 status = "Combat/HP gate passed, but this job has no supported ranged tag; waiting without attacking";
@@ -5314,14 +5314,14 @@ public sealed class Plugin : IDalamudPlugin
             "Close-safe profile — Centurio + Shadowbringers",
             "close-safe",
             config.CloseSafeProfile,
-            25f,
+            5f,
             5f,
             5f);
         DrawDistanceProfile(
             "Proximity-sensitive profile — Endwalker + Dawntrail (Evercold future)",
             "proximity-sensitive",
             config.ProximitySensitiveProfile,
-            35f,
+            20f,
             20f,
             15f);
         ImGui.TextWrapped($"ShB/EW/DT SS watch: {config.PostKillSsGraceSeconds}s post-kill evidence check, " +
@@ -5329,15 +5329,6 @@ public sealed class Plugin : IDalamudPlugin
         var freshnessMinutes = config.AlertFreshnessMinutes;
         if (ImGui.InputInt("Queued-alert freshness (minutes)", ref freshnessMinutes))
             config.AlertFreshnessMinutes = Math.Clamp(freshnessMinutes, 10, 180);
-        var automaticTag = config.AutomaticTagAction;
-        if (ImGui.Checkbox("Choose ranged tag from current job", ref automaticTag))
-            config.AutomaticTagAction = automaticTag;
-        if (!config.AutomaticTagAction)
-        {
-            var tagAction = (int)config.TagActionId;
-            if (ImGui.InputInt("Manual ranged tag action ID", ref tagAction))
-                config.TagActionId = (uint)Math.Max(0, tagAction);
-        }
 
         if (ImGui.Button("Save settings"))
             config.Save();

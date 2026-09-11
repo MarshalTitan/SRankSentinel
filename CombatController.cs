@@ -23,9 +23,9 @@ internal sealed class CombatController(
     public static float HpPercent(IBattleChara mark) =>
         mark.MaxHp == 0 ? 100f : mark.CurrentHp * 100f / mark.MaxHp;
 
-    public unsafe uint ResolveTagActionId(bool automatic, uint configuredActionId)
+    public unsafe uint ResolveTagActionId()
     {
-        var actionId = automatic ? GetBaseRangedTagAction(objects.LocalPlayer?.ClassJob.RowId ?? 0) : configuredActionId;
+        var actionId = GetBaseRangedTagAction(objects.LocalPlayer?.ClassJob.RowId ?? 0);
         if (actionId == 0)
             return 0;
 

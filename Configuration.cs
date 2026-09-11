@@ -34,8 +34,10 @@ public sealed class Configuration : IPluginConfiguration
     public HuntDistanceProfile EvercoldProfile { get; set; } = new();
     public HuntDistanceProfile CloseSafeProfile { get; set; } = new();
     public HuntDistanceProfile ProximitySensitiveProfile { get; set; } = new();
+    // Retained for schema compatibility with older installs. Runtime tagging now always selects
+    // the current job's supported ranged action and no longer exposes a manual UI override.
     public bool AutomaticTagAction { get; set; } = true;
-    public uint TagActionId { get; set; } = 46; // Manual override when automatic selection is disabled.
+    public uint TagActionId { get; set; } = 46;
     public int TravelTimeoutSeconds { get; set; } = 300;
     public int LocateTimeoutSeconds { get; set; } = 90;
     public int PostKillSsGraceSeconds { get; set; } = 2;

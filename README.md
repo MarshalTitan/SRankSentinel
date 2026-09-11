@@ -33,11 +33,11 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - Engagement gate: mark reports **in combat** and is **<=95% HP**
 - Expansion checkboxes and distance-profile assignment are independent. Centurio and Shadowbringers currently share the **Close-safe** behavior profile; Endwalker and Dawntrail share the **Proximity-sensitive** profile. Evercold remains disabled but is reserved for the proximity-sensitive profile when support arrives.
 - Each behavior profile stores its own initial stop, safe clearance, emergency clearance, and HP gate. Existing settings migrate into the corresponding shared profiles without lowering valid saved clearances.
-- Close-safe ranges are **25–90y** initial stop, **5–70y** safe clearance, and **5–50y** emergency clearance. Proximity-sensitive ranges remain **35–90y**, **20–70y**, and **15–50y** respectively. Yard values use one-yard increments and HP gates are displayed as percentages.
+- Close-safe ranges are **5–90y** initial stop, **5–70y** safe clearance, and **5–50y** emergency clearance. Proximity-sensitive ranges are **20–90y**, **20–70y**, and **15–50y** respectively. Yard values use one-yard increments and HP gates are displayed as percentages.
 - Emergency clearance is constrained to the selected profile's safe parking clearance, so it cannot be configured to exceed the normal waiting radius.
-- Ranged tag action: selected automatically from the current combat job and adjusted for learned upgrades
+- Ranged tag action: always selected automatically from the current combat job and adjusted for learned upgrades; no user-facing selector is needed
 - Exactly one client action attempt per genuine combat/pull cycle, whether the client accepts or rejects it; a stable full-health reset may open a new cycle, but there is no attack retry loop or combat rotation
-- Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking; a manual action-ID override remains available
+- Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking
 - ShB/EW/DT SS check: **2 seconds** after each supported normal S-rank death, then **5 minutes** once that expansion's precursor chain is observed
 - Forgiven Gossip, Ker Shroud, and Crystal Incarnation: observation-only; never navigation or combat targets
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
