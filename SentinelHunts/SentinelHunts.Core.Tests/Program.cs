@@ -12,6 +12,7 @@ var tests = new (string Name, Action Run)[]
     ("queue remains FIFO", QueueRemainsFifo),
     ("disabled expansion is pruned before dequeue", DisabledExpansionIsPruned),
     ("parking ring preserves hitbox clearance", ParkingRingIsSafe),
+    ("parking is not ready until grounded at the selected point", GroundParkingRequiresLanding),
     ("unsafe protected path is rejected", UnsafePathIsRejected),
     ("retreat path may leave the protected area outward", RetreatPathEscapesSafely),
 };
@@ -126,6 +127,14 @@ static void ParkingRingIsSafe()
     var points = SafeParkingPlanner.CreateCandidates(mark, new Vector3(5, 0, 0), 0.5f, 3f, 25f);
     Equal(16, points.Count);
     True(points.All(point => SafeParkingPlanner.Clearance(point, mark, 0.5f, 3f) >= 25f));
+}
+
+static void GroundParkingRequiresLanding()
+{
+    var parking = new Vector3(10f, 5f, -4f);
+    True(!SafeParkingPlanner.IsGroundParkingReady(new Vector3(10f, 15f, -4f), parking, true));
+    True(!SafeParkingPlanner.IsGroundParkingReady(new Vector3(10f, 8f, -4f), parking, false));
+    True(SafeParkingPlanner.IsGroundParkingReady(new Vector3(11f, 5.5f, -4f), parking, false));
 }
 
 static void UnsafePathIsRejected()

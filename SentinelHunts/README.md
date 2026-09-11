@@ -10,7 +10,12 @@ Sentinel Hunts is a clean, independent Dalamud S-rank orchestrator in the Sentin
 
 Installing or testing this project does not replace `SRankSentinel`.
 
-## Current test build: 0.1.0.0
+## Current test build: 0.1.1.0
+
+The 0.1.1 field update tightens the report approach from the original 55-yalm stop,
+continues a bounded close-range scan instead of hovering in place, resolves marks by
+data ID or exact name, and requires a projected ground parking point followed by a
+confirmed landing and dismount before the 95% Tomahawk gate can open.
 
 Implemented:
 

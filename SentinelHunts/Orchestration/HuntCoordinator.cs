@@ -9,8 +9,8 @@ namespace SentinelHunts.Orchestration;
 
 internal sealed class HuntCoordinator
 {
-    private static readonly TimeSpan ActionRetry = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan LongActionRetry = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ActionRetry = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan LongActionRetry = TimeSpan.FromSeconds(5);
 
     private readonly Configuration config;
     private readonly GameState game;
@@ -30,6 +30,7 @@ internal sealed class HuntCoordinator
     private Vector3? safePoint;
     private Task<List<Vector3>>? parkingPathTask;
     private bool parkingMoveIssued;
+    private DateTimeOffset parkingMoveIssuedAt = DateTimeOffset.MinValue;
     private bool tagAttempted;
     private bool tagged;
     private bool activeKillConfirmed;
@@ -57,6 +58,7 @@ internal sealed class HuntCoordinator
     public DateTimeOffset StateSince => stateSince;
     public bool VNavmeshReady => vnav.IsReady;
     public bool LifestreamBusy => lifestream.IsBusy;
+    public string LifestreamActivity => lifestream.Activity;
 
     public event Action? Changed;
 
@@ -177,13 +179,13 @@ internal sealed class HuntCoordinator
                 TickChangeInstance(now);
                 break;
             case SentinelState.WaitForPlayerReady:
-                TickWaitForPlayerReady();
+                TickWaitForPlayerReady(now);
                 break;
             case SentinelState.ApproachReportedArea:
                 TickApproach(now);
                 break;
             case SentinelState.LocateMark:
-                TickLocate();
+                TickLocate(now);
                 break;
             case SentinelState.ParkSafely:
                 TickPark(now);
@@ -376,11 +378,19 @@ internal sealed class HuntCoordinator
             Status = $"Waiting for Lifestream to accept instance {Active.Key.Instance}";
     }
 
-    private void TickWaitForPlayerReady()
+    private void TickWaitForPlayerReady(DateTimeOffset now)
     {
         if (!game.IsReady)
         {
             Status = "Waiting for the player and zone to become ready";
+            return;
+        }
+
+        if (!game.IsMounted)
+        {
+            if (CanAct(now, ActionRetry))
+                actions.TryMount();
+            Status = "Mounting immediately while the hunt territory finishes preparing";
             return;
         }
 
@@ -393,10 +403,17 @@ internal sealed class HuntCoordinator
         if (Active is null)
             return;
 
-        reportPoint = game.MapToWorld(Active.Key.TerritoryId, Active.MapX, Active.MapY);
-        if (reportPoint is null)
+        var mappedPoint = game.MapToWorld(Active.Key.TerritoryId, Active.MapX, Active.MapY);
+        if (mappedPoint is null)
         {
             Pause("The alert did not contain usable map coordinates");
+            return;
+        }
+
+        reportPoint = vnav.PointOnFloor(mappedPoint.Value, 8f);
+        if (reportPoint is null)
+        {
+            Status = $"Waiting for vnavmesh to project {Active.MarkName}'s report onto the ground";
             return;
         }
 
@@ -416,10 +433,12 @@ internal sealed class HuntCoordinator
         }
 
         var distance = SafeParkingPlanner.HorizontalDistance(game.PlayerPosition, reportPoint.Value);
-        if (distance <= config.InitialApproachDistance + 3f)
+        var initialScanRange = Math.Max(config.InitialApproachDistance, config.SafeHitboxClearance + 17f);
+        if (distance <= initialScanRange + 2f)
         {
             vnav.Stop();
-            SetState(SentinelState.LocateMark, "Reached the outer edge of the reported area; locating the S rank");
+            SetState(SentinelState.LocateMark,
+                "Reached actor-loading range; resolving the S rank before protected landing");
             return;
         }
 
@@ -432,13 +451,13 @@ internal sealed class HuntCoordinator
         }
 
         if (!vnav.IsRunning && CanAct(now, ActionRetry) &&
-            !vnav.MoveCloseTo(reportPoint.Value, true, config.InitialApproachDistance))
+            !vnav.MoveCloseTo(reportPoint.Value, true, initialScanRange))
             Status = "Waiting for vnavmesh to accept the flight path";
         else
             Status = $"Flying toward {Active.MarkName}; {distance:0} yalms from the report point";
     }
 
-    private void TickLocate()
+    private void TickLocate(DateTimeOffset now)
     {
         if (activeKillConfirmed)
         {
@@ -450,6 +469,34 @@ internal sealed class HuntCoordinator
         {
             BeginParking($"Located {mark.Name.TextValue}; calculating protected parking");
             return;
+        }
+
+        if (reportPoint is { } point)
+        {
+            // Close the small final scan gap around the report center until the actor's
+            // real position and hitbox become available. The first build stopped at 55y.
+            var closeScanRange = Math.Max(39f, config.SafeHitboxClearance + 14f);
+            var distance = SafeParkingPlanner.HorizontalDistance(game.PlayerPosition, point);
+            if (distance > closeScanRange + 1f)
+            {
+                if (!game.IsMounted)
+                {
+                    if (CanAct(now, ActionRetry))
+                        actions.TryMount();
+                    Status = "Remounting to finish the reported-area scan";
+                    return;
+                }
+
+                if (!vnav.IsRunning && CanAct(now, ActionRetry) &&
+                    !vnav.MoveCloseTo(point, true, closeScanRange))
+                    Status = "Waiting for vnavmesh to accept the close-range scan path";
+                else
+                    Status = $"Closing carefully on {Active?.MarkName}; {distance:0} yalms from the report";
+                return;
+            }
+
+            if (vnav.IsRunning)
+                vnav.Stop();
         }
 
         if (DateTimeOffset.UtcNow - stateSince > TimeSpan.FromSeconds(90))
@@ -474,16 +521,36 @@ internal sealed class HuntCoordinator
         }
 
         var clearance = Clearance(mark);
-        if (clearance >= config.SafeHitboxClearance &&
-            (safePoint is null || SafeParkingPlanner.HorizontalDistance(game.PlayerPosition, safePoint.Value) <= 4f))
+        if (safePoint is not null && clearance < config.SafeHitboxClearance)
         {
+            BeginParking($"{mark.Name.TextValue} moved inside the protected radius during landing; re-planning");
+            return;
+        }
+
+        if (safePoint is { } parkingPoint && clearance >= config.SafeHitboxClearance &&
+            SafeParkingPlanner.HorizontalDistance(game.PlayerPosition, parkingPoint) <= 3f)
+        {
+            if (!SafeParkingPlanner.IsGroundParkingReady(
+                    game.PlayerPosition, parkingPoint, game.IsInFlight))
+            {
+                if (!vnav.IsRunning && CanAct(now, TimeSpan.FromSeconds(1)))
+                    vnav.MoveCloseTo(parkingPoint, game.IsMounted || game.IsInFlight, 0.5f);
+                Status = $"Descending to protected ground parking; {clearance:0.0} yalms clear";
+                return;
+            }
+
             vnav.Stop();
-            if (game.IsMounted && CanAct(now, ActionRetry))
-                actions.TryDismount();
-            if (!game.IsMounted)
-                SetState(tagged ? SentinelState.TaggedWait : SentinelState.WaitForPull,
-                    tagged ? "Tagged; waiting safely for positive death confirmation" :
-                    $"Parked with {clearance:0.0} yalms of hitbox clearance");
+            if (game.IsMounted)
+            {
+                if (CanAct(now, TimeSpan.FromSeconds(1)))
+                    actions.TryDismount();
+                Status = $"Landed safely; dismounting {clearance:0.0} yalms clear of the hitbox";
+                return;
+            }
+
+            SetState(tagged ? SentinelState.TaggedWait : SentinelState.WaitForPull,
+                tagged ? "Tagged; waiting safely on the ground for positive death confirmation" :
+                $"Grounded and unmounted with {clearance:0.0} yalms of hitbox clearance");
             return;
         }
 
@@ -495,9 +562,21 @@ internal sealed class HuntCoordinator
                 return;
             }
 
+            if (now - parkingMoveIssuedAt < TimeSpan.FromSeconds(1.5))
+            {
+                Status = "Protected parking route accepted; waiting for movement to begin";
+                return;
+            }
+
             parkingMoveIssued = false;
             if (safePoint is not null && CanAct(now, ActionRetry))
-                vnav.MoveCloseTo(safePoint.Value, game.IsMounted || game.IsInFlight, 2f);
+            {
+                parkingMoveIssued = vnav.MoveCloseTo(
+                    safePoint.Value, game.IsMounted || game.IsInFlight, 0.75f);
+                if (parkingMoveIssued)
+                    parkingMoveIssuedAt = now;
+                Status = "Finishing the protected route at ground level";
+            }
             return;
         }
 
@@ -512,7 +591,7 @@ internal sealed class HuntCoordinator
             if (parkingPathTask.IsCompletedSuccessfully && safePoint is not null)
             {
                 var path = parkingPathTask.Result;
-                var safe = tagged
+                var safe = tagged || Clearance(mark) < config.SafeHitboxClearance
                     ? SafeParkingPlanner.PathEscapesProtectedArea(path, mark.Position, game.PlayerHitboxRadius,
                         mark.HitboxRadius, config.SafeHitboxClearance)
                     : SafeParkingPlanner.PathRespectsClearance(path, mark.Position, game.PlayerHitboxRadius,
@@ -520,6 +599,7 @@ internal sealed class HuntCoordinator
                 if (safe && vnav.MovePath(path, game.IsMounted || game.IsInFlight))
                 {
                     parkingMoveIssued = true;
+                    parkingMoveIssuedAt = now;
                     parkingPathTask = null;
                     Status = "Following a route that respects the protected hitbox radius";
                     return;
@@ -568,6 +648,12 @@ internal sealed class HuntCoordinator
         }
 
         var clearance = Clearance(mark);
+        if (game.IsMounted || game.IsInFlight)
+        {
+            BeginParking("Grounded, unmounted waiting is required before the Tomahawk gate opens");
+            return;
+        }
+
         if (clearance < config.SafeHitboxClearance)
         {
             BeginParking($"{mark.Name.TextValue} moved inside the protected radius; re-parking");
@@ -762,7 +848,7 @@ internal sealed class HuntCoordinator
             return;
         }
 
-        var found = game.FindMark(Active.Key.MarkDataId);
+        var found = game.FindMark(Active.Key.MarkDataId, Active.MarkName);
         if (found is null)
         {
             mark = null;
@@ -783,6 +869,9 @@ internal sealed class HuntCoordinator
 
         vnav.Stop();
         parkingCandidates.Clear();
+        var current = game.PlayerPosition;
+        if (Clearance(mark) <= config.SafeHitboxClearance + 4f)
+            parkingCandidates.Enqueue(new Vector3(current.X, 1024f, current.Z));
         foreach (var candidate in SafeParkingPlanner.CreateCandidates(
                      mark.Position,
                      game.PlayerPosition,
@@ -792,6 +881,7 @@ internal sealed class HuntCoordinator
             parkingCandidates.Enqueue(candidate);
         parkingPathTask = null;
         parkingMoveIssued = false;
+        parkingMoveIssuedAt = DateTimeOffset.MinValue;
         safePoint = null;
         SetState(SentinelState.ParkSafely, reason);
     }
@@ -859,6 +949,7 @@ internal sealed class HuntCoordinator
         parkingCandidates.Clear();
         parkingPathTask = null;
         parkingMoveIssued = false;
+        parkingMoveIssuedAt = DateTimeOffset.MinValue;
         tagAttempted = false;
         tagged = false;
         activeKillConfirmed = false;

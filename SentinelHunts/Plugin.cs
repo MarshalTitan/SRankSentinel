@@ -234,7 +234,7 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextUnformatted($"State: {coordinator.State}");
         ImGui.TextWrapped($"Status: {coordinator.Status}");
         ImGui.TextUnformatted($"vnavmesh: {(coordinator.VNavmeshReady ? "ready" : "not ready")}");
-        ImGui.TextUnformatted($"Lifestream: {(coordinator.LifestreamBusy ? "busy" : "idle/unavailable")}");
+        ImGui.TextUnformatted($"Lifestream: {coordinator.LifestreamActivity}");
         if (coordinator.Active is { } active)
             ImGui.TextWrapped($"Active: {active.MarkName} | {active.WorldName} | territory {active.Key.TerritoryId} | instance {active.Key.Instance}");
         ImGui.TextUnformatted($"Queued hunts: {coordinator.Queue.Entries.Count}");

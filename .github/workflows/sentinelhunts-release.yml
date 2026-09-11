@@ -87,6 +87,6 @@ jobs:
               --repo '${{ github.repository }}' `
               --target '${{ github.sha }}' `
               --title "Sentinel Hunts ${{ steps.version.outputs.value }} beta" `
-              --notes "First installable Sentinel Hunts beta. Automation is off by default. Requires Lifestream and vnavmesh for live travel; Sonar and HuntAlerts inputs are available. Direct Faloop input remains planned." `
+              --notes "Sentinel Hunts beta ${{ steps.version.outputs.value }}. This field update tightens report-coordinate approach, strengthens mark detection, and requires confirmed ground landing plus dismount before the 95% Tomahawk gate. Requires Lifestream and vnavmesh for live travel; direct Faloop input remains planned." `
               --prerelease
           }

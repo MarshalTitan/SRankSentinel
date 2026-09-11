@@ -43,9 +43,12 @@ internal sealed class GameState(
         }
     }
 
-    public IBattleChara? FindMark(uint dataId) => objects
+    public IBattleChara? FindMark(uint dataId, string? expectedName) => objects
         .OfType<IBattleChara>()
-        .Where(actor => actor.ObjectKind == ObjectKind.BattleNpc && actor.BaseId == dataId)
+        .Where(actor => actor.ObjectKind == ObjectKind.BattleNpc &&
+                        (actor.BaseId == dataId ||
+                         (!string.IsNullOrWhiteSpace(expectedName) &&
+                          actor.Name.TextValue.Equals(expectedName, StringComparison.OrdinalIgnoreCase))))
         .OrderBy(actor => actor.IsDead || actor.CurrentHp == 0 ? 1 : 0)
         .ThenBy(actor => SafeParkingPlanner.HorizontalDistance(PlayerPosition, actor.Position))
         .FirstOrDefault();
@@ -116,6 +119,8 @@ internal sealed class GameState(
             return null;
 
         var link = new MapLinkPayload(territoryId, map.RowId, mapX, mapY);
-        return new Vector3(link.RawX / 1000f, Player.Position.Y, link.RawY / 1000f);
+        // Use an intentionally high probe altitude. vnavmesh projects this X/Z anchor
+        // onto the local floor before movement starts, avoiding a stale aetheryte Y value.
+        return new Vector3(link.RawX / 1000f, 1024f, link.RawY / 1000f);
     }
 }

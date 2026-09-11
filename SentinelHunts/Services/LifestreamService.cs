@@ -30,6 +30,15 @@ internal sealed class LifestreamService
         }
     }
 
+    public string Activity
+    {
+        get
+        {
+            try { return isBusy.InvokeFunc() ? "busy" : "ready (idle)"; }
+            catch { return "unavailable"; }
+        }
+    }
+
     public bool ChangeWorld(string world)
     {
         try { return changeWorld.InvokeFunc(world); }

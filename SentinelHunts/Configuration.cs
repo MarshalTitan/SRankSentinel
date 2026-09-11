@@ -7,7 +7,7 @@ namespace SentinelHunts;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public bool AutomationEnabled { get; set; }
     public bool EnableSonar { get; set; } = true;
     public bool EnableHuntAlerts { get; set; } = true;
@@ -19,7 +19,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool EnableEndwalker { get; set; } = true;
     public bool EnableDawntrail { get; set; } = true;
     public float SafeHitboxClearance { get; set; } = 25f;
-    public float InitialApproachDistance { get; set; } = 55f;
+    public float InitialApproachDistance { get; set; } = 42f;
     public float EngageHpPercent { get; set; } = 95f;
     public int AlertFreshnessMinutes { get; set; } = 45;
     public List<PersistedHunt> PendingHunts { get; set; } = [];
@@ -29,11 +29,23 @@ public sealed class Configuration : IPluginConfiguration
     public void Initialize(IDalamudPluginInterface pi)
     {
         pluginInterface = pi;
+        var migrated = false;
+        if (Version < 2)
+        {
+            // The first public build stopped 55 yalms from the report and could remain
+            // outside the game's actor-loading radius. Move existing installs to the
+            // tighter scan envelope used by the revised approach state machine.
+            InitialApproachDistance = 42f;
+            Version = 2;
+            migrated = true;
+        }
         SafeHitboxClearance = Math.Clamp(SafeHitboxClearance, 20f, 40f);
-        InitialApproachDistance = Math.Clamp(InitialApproachDistance, SafeHitboxClearance + 10f, 100f);
+        InitialApproachDistance = Math.Clamp(InitialApproachDistance, SafeHitboxClearance + 17f, 100f);
         EngageHpPercent = Math.Clamp(EngageHpPercent, 1f, 99f);
         AlertFreshnessMinutes = Math.Clamp(AlertFreshnessMinutes, 10, 120);
         PendingHunts ??= [];
+        if (migrated)
+            Save();
     }
 
     public bool IsEnabled(HuntDefinition definition) => definition.Expansion switch

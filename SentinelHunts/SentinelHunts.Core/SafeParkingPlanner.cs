@@ -18,6 +18,16 @@ public static class SafeParkingPlanner
         float markHitboxRadius) =>
         HorizontalDistance(player, mark) - playerHitboxRadius - markHitboxRadius;
 
+    public static bool IsGroundParkingReady(
+        Vector3 player,
+        Vector3 parkingPoint,
+        bool inFlight,
+        float horizontalTolerance = 3f,
+        float verticalTolerance = 1.5f) =>
+        !inFlight &&
+        HorizontalDistance(player, parkingPoint) <= horizontalTolerance &&
+        MathF.Abs(player.Y - parkingPoint.Y) <= verticalTolerance;
+
     public static IReadOnlyList<Vector3> CreateCandidates(
         Vector3 mark,
         Vector3 player,
