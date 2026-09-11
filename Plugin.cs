@@ -48,7 +48,6 @@ public sealed class Plugin : IDalamudPlugin
     private const double ApproachRouteStallSeconds = 15;
     private const double ApproachMovementStartGraceSeconds = 8;
     private const double ApproachSlowPathfindNoticeSeconds = 20;
-    private const float ApproachSegmentLength = 180f;
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
@@ -2664,7 +2663,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             var waypointText = approachRouteIsSegment && approachRouteTarget is not null
-                ? $" via a segmented waypoint {HorizontalDistance(playerPosition, approachRouteTarget.Value):0}y away"
+                ? $" via a recovery waypoint {HorizontalDistance(playerPosition, approachRouteTarget.Value):0}y away"
                 : string.Empty;
             status = $"Approaching {current.CreatureName}'s reported coordinates ({distance:0}y remaining); " +
                      $"not scanning for the entity until nearby{waypointText}";
@@ -2845,26 +2844,11 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var segmentDistance = remaining > ApproachSegmentLength + ActiveDistanceProfile.FlagApproachDistance
-            ? ApproachSegmentLength
-            : remaining;
-        var intendedTarget = player + direction * segmentDistance;
-        intendedTarget.Y = 1024f;
-        foreach (var radius in new[] { 0f, 8f, 16f, 24f })
-        foreach (var multiplier in radius == 0f ? new[] { 0f } : new[] { -1f, 1f })
-        {
-            var sample = intendedTarget + tangent * radius * multiplier;
-            sample.Y = 1024f;
-            var projected = vnav.PointOnFloorSafe(sample, 16f);
-            if (projected is null ||
-                HorizontalDistance(projected.Value, destination) > remaining + 2f ||
-                accepted.Any(point => HorizontalDistance(point, projected.Value) < 3f))
-                continue;
-            accepted.Add(projected.Value);
-        }
-
-        foreach (var point in accepted.OrderBy(point => HorizontalDistance(point, intendedTarget)))
-            approachRouteCandidates.Enqueue(point);
+        // The destination was already projected onto the current territory mesh. Submit one
+        // continuous flight path to it instead of inventing floor-projected 180y midpoints.
+        // Midpoint projection caused visible pauses at every handoff and could reject otherwise
+        // valid flights across water, cliffs, or sparse ground mesh (notably Western/Outer La Noscea).
+        approachRouteCandidates.Enqueue(destination);
     }
 
     private void UpdateApproachProgress(DateTime now, Vector3 player, float remaining)
@@ -2909,7 +2893,7 @@ public sealed class Plugin : IDalamudPlugin
             approachEarlyStops = 0;
             approachStartingEgressActive = false;
             approachRouteCandidates.Clear();
-            status = $"Route stopped after {destinationProgress:0.0}y progress; resuming {current.CreatureName}'s segmented approach " +
+            status = $"Route stopped after {destinationProgress:0.0}y progress; resuming {current.CreatureName}'s continuous approach " +
                      "after a short backoff";
             return;
         }
