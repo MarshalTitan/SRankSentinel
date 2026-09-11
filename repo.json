@@ -26,5 +26,34 @@
       "navigation",
       "automation"
     ]
+  },
+  {
+    "Author": "MTitan",
+    "Name": "Sentinel Hunts",
+    "Punchline": "A clean, safety-first S-rank hunting beta.",
+    "Description": "Independent Sentinel hunt plugin with Sonar and HuntAlerts intake, expansion filters, a persistent FIFO queue, Ul'dah world travel through Lifestream, vnavmesh flight and protected 25-yalm parking, WAR Tomahawk tagging at 95% HP, incidental-aggro handling, and death recovery. Automation is off by default; direct Faloop input is planned.",
+    "InternalName": "SentinelHunts",
+    "AssemblyVersion": "0.1.0.0",
+    "TestingAssemblyVersion": "0.1.0.0",
+    "RepoUrl": "https://github.com/MarshalTitan/SRankSentinel",
+    "IconUrl": "https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/assets/icon.png",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "TestingDalamudApiLevel": 15,
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "DownloadCount": 0,
+    "LastUpdate": 1789093447,
+    "LoadPriority": 0,
+    "DownloadLinkInstall": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.1.0.0-sentinelhunts/SentinelHunts.zip",
+    "DownloadLinkUpdate": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.1.0.0-sentinelhunts/SentinelHunts.zip",
+    "DownloadLinkTesting": "https://github.com/MarshalTitan/SRankSentinel/releases/download/v0.1.0.0-sentinelhunts/SentinelHunts.zip",
+    "Tags": [
+      "hunts",
+      "s-rank",
+      "navigation",
+      "sentinel",
+      "beta"
+    ]
   }
 ]
