@@ -37,6 +37,7 @@ public sealed class Plugin : IDalamudPlugin
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
     private const float TagApproachClearance = 8f;
+    private const float MaximumParkingClearance = 35f;
     private const double ReturnLandingDirectAttemptSeconds = 4;
     private const double ReturnLandingRouteStallSeconds = 10;
     private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
@@ -2803,9 +2804,11 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (TryStartApproachRoute(now))
         {
+            var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
+                ActiveDistanceProfile.WaitingDistance);
             SetState(SentinelState.ApproachAlertCoordinates,
                 $"Flying toward {current.CreatureName}'s reported coordinates; " +
-                $"entity resolution waits until within about {ActiveDistanceProfile.FlagApproachDistance:0}y");
+                $"entity resolution waits until within about {scanRange:0}y");
             return;
         }
 
@@ -2844,7 +2847,9 @@ public sealed class Plugin : IDalamudPlugin
 
         var playerPosition = PlayerPosition();
         var distance = HorizontalDistance(playerPosition, approachPoint.Value);
-        if (distance <= ActiveDistanceProfile.FlagApproachDistance + 8f)
+        var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
+            ActiveDistanceProfile.WaitingDistance);
+        if (distance <= scanRange + 8f)
         {
             vnav.StopSafe("reported-coordinate scan range reached");
             log.Information(
@@ -3459,18 +3464,26 @@ public sealed class Plugin : IDalamudPlugin
             if (activeTagActionId == 0)
             {
                 status = "Combat/HP gate passed, but this job has no supported ranged tag; waiting without attacking";
-                return;
             }
-
-            combat.TargetMark(mark);
-            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
-            if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
+            else
             {
-                log.Information("Proper pull detected for {Mark}; attempting ranged tag for pull cycle {PullCycle}",
-                    mark.Name.TextValue, pullCycle);
-                SetState(SentinelState.TagApproach,
-                    $"Proper pull detected; attempting ranged tag for pull cycle {pullCycle} at {hp:0.0}% HP");
+                combat.TargetMark(mark);
+                var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
+                if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
+                {
+                    log.Information("Proper pull detected for {Mark}; attempting ranged tag for pull cycle {PullCycle}",
+                        mark.Name.TextValue, pullCycle);
+                    SetState(SentinelState.TagApproach,
+                        $"Proper pull detected; attempting ranged tag for pull cycle {pullCycle} at {hp:0.0}% HP");
+                    return;
+                }
             }
+        }
+
+        if (clearance > MaximumParkingClearance + 0.5f)
+        {
+            BeginSafeParking(mark, fly: false);
+            status = $"Mark moved {clearance:0}y away; returning to the safe waiting envelope within {MaximumParkingClearance:0}y";
         }
     }
 
@@ -4159,8 +4172,8 @@ public sealed class Plugin : IDalamudPlugin
                 var tangent = new Vector3(-towardCrowd.Z, 0f, towardCrowd.X);
                 var crowdCenterRadius = HorizontalDistance(cluster.Center, target.Position);
 
-                // Park beside the crowd instead of on its centroid. Safe parking is a minimum,
-                // so retain the crowd's natural radius whenever it is already farther out.
+                // Park beside the crowd instead of on its centroid. Retain the crowd's natural
+                // radius only when the resulting point remains inside the 35y waiting envelope.
                 float[] lateralOffsets = randomizedRetreat
                     ? Enumerable.Range(0, 4)
                         .Select(_ => (Random.Shared.NextSingle() * 6f + 4f) *
@@ -4181,6 +4194,7 @@ public sealed class Plugin : IDalamudPlugin
                     if (projected is null ||
                         VerticalSeparation(projected.Value, target.Position) > ParkingMaximumVerticalSeparation ||
                         ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
+                        ClearanceAtPoint(projected.Value, target) > MaximumParkingClearance + 0.5f ||
                         HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
                         crowdCandidates.Any(existing => HorizontalDistance(existing.Candidate.Position, projected.Value) < 2f))
                         continue;
@@ -4226,13 +4240,14 @@ public sealed class Plugin : IDalamudPlugin
                 if (projected is null ||
                     VerticalSeparation(projected.Value, target.Position) > ParkingMaximumVerticalSeparation ||
                     HorizontalDistance(projected.Value, target.Position) < minimumCenterDistance ||
-                    ClearanceAtPoint(projected.Value, target) < clearance - 0.5f)
+                    ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
+                    ClearanceAtPoint(projected.Value, target) > MaximumParkingClearance + 0.5f)
                     continue;
                 if (accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
                     continue;
                 accepted.Add(projected.Value);
                 parkingCandidates.Enqueue(new ParkingCandidate(projected.Value, false, 0, Vector3.Zero,
-                    randomizedRetreat, randomizedRetreat));
+                    true, randomizedRetreat));
             }
         }
         if (randomizedRetreat)
@@ -4263,19 +4278,20 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             var protectedRadius = ProtectedCenterRadius(target);
+            var startDistance = HorizontalDistance(PlayerPosition(), target.Position);
+            var allowOutwardEscape = startDistance < protectedRadius;
             if (!ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, target.Position, protectedRadius,
-                    candidate.IsRandomizedRetreat))
+                    allowOutwardEscape))
             {
                 var rejection = candidate.IsRandomizedRetreat
                     ? "Retreat candidate rejected: crosses safety radius"
-                    : "Rejected crowd candidate: route crosses mark safety radius";
+                    : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: route crosses mark safety radius";
                 log.Information("{Rejection}", rejection);
                 status = rejection;
                 continue;
             }
 
-            var startDistance = HorizontalDistance(PlayerPosition(), target.Position);
-            var queryAvoidRadius = candidate.IsRandomizedRetreat && startDistance < protectedRadius
+            var queryAvoidRadius = allowOutwardEscape
                 ? MathF.Max(1f, startDistance - 1f)
                 : protectedRadius;
             var pathTask = vnav.PathfindAvoidSafe(
@@ -4284,7 +4300,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 log.Information(candidate.IsRandomizedRetreat
                     ? "Retreat candidate rejected: vnavmesh could not start a protected path query"
-                    : "Rejected crowd candidate: vnavmesh could not start a protected path query");
+                    : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: vnavmesh could not start a protected path query");
                 continue;
             }
 
@@ -4296,7 +4312,9 @@ public sealed class Plugin : IDalamudPlugin
             selectedParkingPath = null;
             status = candidate.IsRandomizedRetreat
                 ? "Validating randomized post-tag retreat route"
-                : $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd";
+                : candidate.IsCrowd
+                    ? $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd"
+                    : "Validating a protected geometric parking route";
             return true;
         }
         safePoint = null;
@@ -4319,7 +4337,9 @@ public sealed class Plugin : IDalamudPlugin
             {
                 status = candidate.IsRandomizedRetreat
                     ? "Validating randomized post-tag retreat route"
-                    : $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd";
+                    : candidate.IsCrowd
+                        ? $"Validating a protected route toward a {candidate.CrowdPopulation}-player crowd"
+                        : "Validating a protected geometric parking route";
                 return;
             }
 
@@ -4327,7 +4347,7 @@ public sealed class Plugin : IDalamudPlugin
             selectedParkingCandidate = null;
             log.Information(candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: protected vnavmesh path query timed out"
-                : "Rejected crowd candidate: protected vnavmesh path query timed out");
+                : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: protected vnavmesh path query timed out");
             ContinueParkingAfterCrowdRejection(target, now);
             return;
         }
@@ -4349,21 +4369,23 @@ public sealed class Plugin : IDalamudPlugin
             selectedParkingCandidate = null;
             log.Information(candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: vnavmesh found no protected route"
-                : "Rejected crowd candidate: vnavmesh found no protected route");
+                : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: vnavmesh found no protected route");
             ContinueParkingAfterCrowdRejection(target, now);
             return;
         }
 
         var protectedRadius = ProtectedCenterRadius(target);
+        var startDistance = HorizontalDistance(PlayerPosition(), target.Position);
+        var allowOutwardEscape = startDistance < protectedRadius;
         if (!ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, target.Position, protectedRadius,
-                candidate.IsRandomizedRetreat) ||
+                allowOutwardEscape) ||
             !PathStaysOutsideProtectedRadius(PlayerPosition(), path, target.Position, protectedRadius,
-                candidate.IsRandomizedRetreat))
+                allowOutwardEscape))
         {
             selectedParkingCandidate = null;
             var rejection = candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: crosses safety radius"
-                : "Rejected crowd candidate: route crosses mark safety radius";
+                : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: route crosses mark safety radius";
             log.Information("{Rejection}", rejection);
             status = rejection;
             ContinueParkingAfterCrowdRejection(target, now);
@@ -4371,12 +4393,13 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
+            ClearanceAtPoint(candidate.Position, target) > MaximumParkingClearance + 0.5f ||
             !vnav.MovePathSafe(path, parkingPathUsesFlight))
         {
             selectedParkingCandidate = null;
             log.Information(candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: destination or protected route became unavailable"
-                : "Rejected crowd candidate: destination or protected route became unavailable");
+                : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: destination or protected route became unavailable");
             ContinueParkingAfterCrowdRejection(target, now);
             return;
         }
@@ -4393,11 +4416,16 @@ public sealed class Plugin : IDalamudPlugin
             log.Information("Post-tag retreat: {CandidateType} candidate selected; target {Clearance:0}y from mark",
                 candidate.IsCrowd ? "crowd" : "standard", clearance);
         }
-        else
+        else if (candidate.IsCrowd)
         {
             status = $"Selected crowd parking candidate: {candidate.CrowdPopulation} players, {clearance:0}y from mark";
             log.Information("Selected crowd parking candidate: {Players} players, {Clearance:0}y from mark",
                 candidate.CrowdPopulation, clearance);
+        }
+        else
+        {
+            status = $"Selected protected geometric parking candidate: {clearance:0}y from mark";
+            log.Information("Selected protected geometric parking candidate: {Clearance:0}y from mark", clearance);
         }
     }
 
@@ -4436,6 +4464,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
+            ClearanceAtPoint(candidate.Position, target) > MaximumParkingClearance + 0.5f ||
             VerticalSeparation(candidate.Position, target.Position) > ParkingMaximumVerticalSeparation ||
             ClearanceFromMark(target) < ActiveDistanceProfile.EmergencyDistance)
         {
@@ -4443,18 +4472,19 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
+        var protectedRadius = ProtectedCenterRadius(target);
+        if (candidate.RequiresProtectedRoute &&
+            (HorizontalSegmentDistance(PlayerPosition(), candidate.Position, target.Position) < protectedRadius ||
+             !FinalApproachStaysOutsideProtectedRadius(selectedParkingPath, target.Position, protectedRadius)))
+        {
+            reason = "Parking final approach now crosses the mark safety radius; resampling safely";
+            return false;
+        }
+
         if (!candidate.IsCrowd)
         {
             reason = string.Empty;
             return true;
-        }
-
-        var protectedRadius = ProtectedCenterRadius(target);
-        if (HorizontalSegmentDistance(PlayerPosition(), candidate.Position, target.Position) < protectedRadius ||
-            !FinalApproachStaysOutsideProtectedRadius(selectedParkingPath, target.Position, protectedRadius))
-        {
-            reason = "Crowd parking final approach now crosses the mark safety radius; resampling safely";
-            return false;
         }
 
         var liveCluster = DetectPlayerClusters(target)
@@ -4552,7 +4582,8 @@ public sealed class Plugin : IDalamudPlugin
     private float ProtectedCenterRadius(IBattleChara target)
     {
         var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
-        return ActiveDistanceProfile.EmergencyDistance + target.HitboxRadius + playerRadius + 3f;
+        return Math.Max(0f, ActiveDistanceProfile.WaitingDistance - 0.5f) +
+               target.HitboxRadius + playerRadius;
     }
 
     private static bool PathStaysOutsideProtectedRadius(
@@ -4836,7 +4867,10 @@ public sealed class Plugin : IDalamudPlugin
             stableSeconds, completedCycle);
         log.Information("Tag gate re-armed for pull cycle {PullCycle}", pullCycle);
 
-        if (ClearanceFromMark(target) < ActiveDistanceProfile.WaitingDistance || state != SentinelState.SafeWait)
+        var resetClearance = ClearanceFromMark(target);
+        if (resetClearance < ActiveDistanceProfile.WaitingDistance ||
+            resetClearance > MaximumParkingClearance + 0.5f ||
+            state != SentinelState.SafeWait)
         {
             BeginSafeParking(target, fly: false);
             status = $"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle} and returning to safe parking";
