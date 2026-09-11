@@ -617,7 +617,10 @@ public sealed class Plugin : IDalamudPlugin
                 world, definition.Name, territory, definition.DataId, definition.PreferredAetheryteId,
                 Math.Max(1, feedEvent.Instance), 0, 0, feedEvent.OccurredAtUtc);
             RememberFaloopReportId(unresolved.Key, feedEvent.EventId);
-            if (current?.Key != unresolved.Key && pendingAlerts.All(alert => alert.Key != unresolved.Key))
+            var trackedAlertHasCoordinates =
+                current is not null && current.Key == unresolved.Key && HasUsableMapCoordinates(current) ||
+                pendingAlerts.Any(alert => alert.Key == unresolved.Key && HasUsableMapCoordinates(alert));
+            if (!trackedAlertHasCoordinates)
             {
                 if (unresolvedFaloopAlerts.TryGetValue(unresolved.Key, out var existing))
                 {
@@ -1051,9 +1054,43 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         PruneKilledAlerts();
-        if (killedAlerts.ContainsKey(incoming.Key) || current?.Key == incoming.Key ||
-            pendingAlerts.Any(alert => alert.Key == incoming.Key))
+        if (killedAlerts.ContainsKey(incoming.Key))
             return;
+
+        if (current is not null && current.Key == incoming.Key)
+        {
+            if (HasUsableMapCoordinates(incoming) && !HasUsableMapCoordinates(current))
+            {
+                current = current with { MapX = incoming.MapX, MapY = incoming.MapY };
+                PrepareCurrentTravel();
+                status = $"{source} supplied the missing destination for {current.CreatureName}; resuming the active hunt";
+                log.Information(
+                    "Enriched active {Mark} from {Source} with destination ({MapX:0.0}, {MapY:0.0}); rebuilding local travel coordinates",
+                    current.CreatureName, source, current.MapX, current.MapY);
+            }
+            return;
+        }
+
+        var queuedDuplicate = pendingAlerts.FirstOrDefault(alert => alert.Key == incoming.Key);
+        if (queuedDuplicate is not null)
+        {
+            if (HasUsableMapCoordinates(incoming) && !HasUsableMapCoordinates(queuedDuplicate))
+            {
+                var updatedQueue = pendingAlerts
+                    .Select(alert => alert.Key == incoming.Key
+                        ? alert with { MapX = incoming.MapX, MapY = incoming.MapY }
+                        : alert)
+                    .ToArray();
+                pendingAlerts.Clear();
+                foreach (var alert in updatedQueue)
+                    pendingAlerts.Enqueue(alert);
+                PersistQueue();
+                log.Information(
+                    "Enriched queued {Mark} from {Source} with destination ({MapX:0.0}, {MapY:0.0})",
+                    incoming.CreatureName, source, incoming.MapX, incoming.MapY);
+            }
+            return;
+        }
 
         log.Information(
             "New {Source} alert accepted: {Mark} on {World}, territory {Territory}, instance {Instance}, destination ({MapX:0.0}, {MapY:0.0})",
@@ -1194,10 +1231,30 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null)
             return;
 
-        var map = data.GetExcelSheet<Map>()
-            .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
-        if (map.RowId != 0 && current.MapX > 0f && current.MapY > 0f)
+        TryPrepareAlertPoint();
+
+        // Aetheryte data can contain sparse/invalid linked Level rows. Resolution is isolated
+        // so one bad game-data reference can never unwind alert acceptance or discard the hunt.
+        TryResolveTerritoryAetheryte();
+    }
+
+    private bool TryPrepareAlertPoint()
+    {
+        if (current is null || !HasUsableMapCoordinates(current))
+            return false;
+
+        try
         {
+            var map = data.GetExcelSheet<Map>()
+                .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
+            if (map.RowId == 0)
+            {
+                log.Debug(
+                    "No current Map row was available for {Mark} in territory {Territory}; local destination conversion will retry",
+                    current.CreatureName, current.TerritoryId);
+                return false;
+            }
+
             // MapLinkPayload performs Dalamud's canonical map-coordinate conversion. Its RawX/RawY
             // values are local game-world X/Z positions scaled by 1000. Preserve that destination
             // independently of the game's global map flag so direct Faloop navigation survives
@@ -1207,12 +1264,19 @@ public sealed class Plugin : IDalamudPlugin
             log.Information(
                 "Preserved alert destination for {Mark}: map ({MapX:0.0}, {MapY:0.0}) -> local ({LocalX:0.0}, {LocalZ:0.0})",
                 current.CreatureName, current.MapX, current.MapY, alertPoint.Value.X, alertPoint.Value.Z);
+            return true;
         }
-
-        // Aetheryte data can contain sparse/invalid linked Level rows. Resolution is isolated
-        // so one bad game-data reference can never unwind alert acceptance or discard the hunt.
-        TryResolveTerritoryAetheryte();
+        catch (Exception ex)
+        {
+            log.Warning(ex,
+                "Could not convert {Mark}'s map destination in territory {Territory}; retaining the hunt and retrying",
+                current.CreatureName, current.TerritoryId);
+            return false;
+        }
     }
+
+    private static bool HasUsableMapCoordinates(HuntAlertSnapshot alert) =>
+        alert.MapX > 0f && alert.MapY > 0f;
 
     private bool TryResolveTerritoryAetheryte()
     {
@@ -2460,8 +2524,16 @@ public sealed class Plugin : IDalamudPlugin
 
         if (alertPoint is null)
         {
-            status = $"Waiting for a usable mapped local destination for {current.CreatureName}; the hunt remains active";
-            return;
+            if (now < nextActionUtc)
+                return;
+            if (!TryPrepareAlertPoint())
+            {
+                nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+                status = HasUsableMapCoordinates(current)
+                    ? $"Waiting for current game map data to convert {current.CreatureName}'s X{current.MapX:0.0} Y{current.MapY:0.0} destination; retrying"
+                    : $"Waiting for a usable mapped destination for {current.CreatureName}; the hunt remains active while alert sources enrich it";
+                return;
+            }
         }
 
         if (approachPoint is null)
