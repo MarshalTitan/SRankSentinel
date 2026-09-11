@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 13;
+    public int Version { get; set; } = 14;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -40,7 +40,7 @@ public sealed class Configuration : IPluginConfiguration
     public uint TagActionId { get; set; } = 46;
     public int TravelTimeoutSeconds { get; set; } = 300;
     public int LocateTimeoutSeconds { get; set; } = 90;
-    public int PostKillSsGraceSeconds { get; set; } = 10;
+    public int PostKillSsGraceSeconds { get; set; } = 5;
     public int SsChainTimeoutSeconds { get; set; } = 300;
     public int AlertFreshnessMinutes { get; set; } = 45;
     public List<PersistedHuntAlert> PendingAlerts { get; set; } = [];
@@ -207,6 +207,15 @@ public sealed class Configuration : IPluginConfiguration
             // precursor message to arrive after the normal S-rank kill is confirmed.
             PostKillSsGraceSeconds = Math.Max(10, PostKillSsGraceSeconds);
             Version = 13;
+            Save();
+        }
+
+        if (Version < 14)
+        {
+            // Five seconds is enough to bridge delayed kill/add message ordering without
+            // unnecessarily holding the ordinary queue when no SS chain starts.
+            PostKillSsGraceSeconds = 5;
+            Version = 14;
             Save();
         }
 
