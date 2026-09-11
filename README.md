@@ -19,10 +19,10 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 13. Maintain the configured emergency clearance as the mark moves.
 14. Engage only after the active S/SS mark itself is in combat and at or below 95% HP. Target it, choose an appropriate native ranged action for the current job, use a close ground approach so vnavmesh routes around intervening rocks or trees before the one attempt, make exactly one client action attempt for that pull cycle, close the attack gate, then retreat. Re-arm only when the same positively identified living mark remains out of combat at 99–100% HP for a stable confirmation interval, proving a genuine reset; disappearance or combat-data flicker never re-arms it.
 15. Mark a hunt cleared only from positive evidence: a matching HuntAlerts/Sonar death event, a matching game hunt/reward kill message, or a previously identified live battle object becoming visibly dead. Object absence alone is never death evidence.
-16. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared five-second SS-evidence check. A matching zone message received immediately before or after kill confirmation, a HuntAlerts/Sonar report, or a visible precursor enters the five-minute SS watch.
+16. After a normal Shadowbringers, Endwalker, or Dawntrail S rank dies, remain in its territory for a shared four-second SS-evidence check. A matching zone message received immediately before or after kill confirmation, a HuntAlerts/Sonar report, or a visible precursor enters the five-minute SS watch.
 17. Keep each expansion's chain separate: Forgiven Gossip leads to Forgiven Rebellion, Ker Shroud leads to Ker, and Crystal Incarnation leads to Arch Aethereater. Precursors are observed only and never replace the active target, trigger navigation, or receive attacks.
 18. If the matching SS is announced, reported, queued, or visible, replace the completed S-rank context with that SS, navigate directly to it without an Ul'dah reset, then use the same safe parking and one-tag gates.
-19. If dead while an active mark or SS opportunity is alive, accept a Raise prompt and never use Return. If still dead after the completed opportunity, use the normal Return action.
+19. If dead while an active mark or SS opportunity is alive, accept a Raise prompt and never use Return. If still dead after the completed opportunity, use the normal Return action; an already-open prompt may be adopted only after positive completion and only when it explicitly names Return to Ul'dah/Steps of Nald.
 20. Once the hunt and any SS opportunity finish, teleport normally to Ul'dah on the **current visited World**. Remove kill-reported or stale queue entries, recheck freshness immediately before departure, and start the next valid queued S rank in arrival order. Sentinel never World Visits back to the character's Home World automatically.
 
 ## Safety defaults
@@ -38,7 +38,7 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - Ranged tag action: always selected automatically from the current combat job and adjusted for learned upgrades; no user-facing selector is needed
 - Exactly one client action attempt per genuine combat/pull cycle, whether the client accepts or rejects it; a stable full-health reset may open a new cycle, but there is no attack retry loop or combat rotation
 - Pugilist/Monk, non-combat jobs, and other unsupported jobs wait without attacking
-- ShB/EW/DT SS check: **5 seconds** after each supported normal S-rank death, then **5 minutes** once that expansion's precursor chain is observed
+- ShB/EW/DT SS check: **4 seconds** after each supported normal S-rank death, then **5 minutes** once that expansion's precursor chain is observed
 - Forgiven Gossip, Ker Shroud, and Crystal Incarnation: observation-only; never navigation or combat targets
 - Pending queue: saved in plugin configuration, kept in arrival order, deduplicated, kill-invalidated, and stale after **45 minutes** by default
 - No coordinate writes or coordinate warping

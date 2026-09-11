@@ -6,7 +6,7 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 14;
+    public int Version { get; set; } = 15;
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -40,7 +40,7 @@ public sealed class Configuration : IPluginConfiguration
     public uint TagActionId { get; set; } = 46;
     public int TravelTimeoutSeconds { get; set; } = 300;
     public int LocateTimeoutSeconds { get; set; } = 90;
-    public int PostKillSsGraceSeconds { get; set; } = 5;
+    public int PostKillSsGraceSeconds { get; set; } = 4;
     public int SsChainTimeoutSeconds { get; set; } = 300;
     public int AlertFreshnessMinutes { get; set; } = 45;
     public List<PersistedHuntAlert> PendingAlerts { get; set; } = [];
@@ -216,6 +216,15 @@ public sealed class Configuration : IPluginConfiguration
             // unnecessarily holding the ordinary queue when no SS chain starts.
             PostKillSsGraceSeconds = 5;
             Version = 14;
+            Save();
+        }
+
+        if (Version < 15)
+        {
+            // Keep the no-chain handoff brief while retaining the separate five-minute watch
+            // whenever matching precursor or SS evidence is actually observed.
+            PostKillSsGraceSeconds = 4;
+            Version = 15;
             Save();
         }
 

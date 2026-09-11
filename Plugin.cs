@@ -1645,9 +1645,31 @@ public sealed class Plugin : IDalamudPlugin
     {
         UpdateReturnRecoveryWatchdog(now);
 
-        // Return uses SelectYesno, but only touch that dialog after Sentinel itself has
-        // requested Return while this state is active. This must never become a generic
-        // Yes/No-dialog accepter.
+        // The game can open its normal death Return prompt before positive kill evidence moves
+        // Sentinel into recovery. Adopt only that exact Ul'dah prompt, only while dead, and only
+        // after the active hunt is positively confirmed dead. This preserves the live-hunt Return
+        // lock without leaving a pre-existing valid prompt unowned forever.
+        if (!returnInitiatedBySentinel && killConfirmed && combat.IsPlayerDead &&
+            travel.ReturnConfirmationIsOpen(out var existingReturnPrompt))
+        {
+            if (returnRecoveryStartedUtc == DateTime.MinValue)
+            {
+                returnRecoveryStartedUtc = now;
+                returnExpectedWorld = travel.CurrentWorld;
+            }
+            returnInitiatedBySentinel = true;
+            returnActionIssuedUtc = now;
+            nextReturnConfirmationAttemptUtc = now;
+            returnConfirmationObserved = false;
+            returnConfirmed = false;
+            status = "Adopting the existing post-kill Return confirmation";
+            log.Information(
+                "Adopting existing post-death Return confirmation after positive kill evidence: {Prompt}",
+                existingReturnPrompt);
+        }
+
+        // Return uses SelectYesno, but only touch a prompt Sentinel requested or safely adopted
+        // while this recovery state is active. This must never become a generic dialog accepter.
         if (returnInitiatedBySentinel && travel.ReturnConfirmationIsOpen(out var returnPrompt))
         {
             if (!returnConfirmationObserved)
@@ -3633,6 +3655,15 @@ public sealed class Plugin : IDalamudPlugin
         if (state != SentinelState.PostKillSsGrace)
             return;
 
+        if (now >= postKillSsGraceDeadlineUtc)
+        {
+            nextActionUtc = now;
+            SetState(SentinelState.ResetToUldah,
+                $"No {activeSsProfile!.ExpansionName} SS evidence within {config.PostKillSsGraceSeconds}s; " +
+                "returning to Ul'dah on the current world");
+            return;
+        }
+
         if (combat.IsPlayerDead)
         {
             status = combat.TryAcceptRaise()
@@ -3641,17 +3672,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (now < postKillSsGraceDeadlineUtc)
-        {
-            var remaining = Math.Max(0, (postKillSsGraceDeadlineUtc - now).TotalSeconds);
-            status = $"Post-kill SS check: {activeSsProfile!.ExpansionName}, {remaining:0.0}s remaining";
-            return;
-        }
-
-        nextActionUtc = now;
-        SetState(SentinelState.ResetToUldah,
-            $"No {activeSsProfile!.ExpansionName} SS evidence within {config.PostKillSsGraceSeconds}s; " +
-            "returning to Ul'dah on the current world");
+        var remaining = Math.Max(0, (postKillSsGraceDeadlineUtc - now).TotalSeconds);
+        status = $"Post-kill SS check: {activeSsProfile!.ExpansionName}, {remaining:0.0}s remaining";
     }
 
     private void TickSsWatch(DateTime now)
