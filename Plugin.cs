@@ -1017,6 +1017,8 @@ public sealed class Plugin : IDalamudPlugin
             if (IsSonarKillNotice(text))
             {
                 var killedWorld = ParseSonarWorld(text);
+                log.Information("Sonar kill notice parsed for world {World}: {Text}",
+                    string.IsNullOrWhiteSpace(killedWorld) ? "(unresolved)" : killedWorld, text);
                 if (current is not null &&
                     HuntCatalog.TextMentionsMark(text, current.CreatureName) &&
                     KillNoticeMatchesWorld(killedWorld, current))
@@ -5239,25 +5241,46 @@ public sealed class Plugin : IDalamudPlugin
 
     private static bool IsSonarKillNotice(string text) =>
         !string.IsNullOrWhiteSpace(text) &&
-        text.Contains(" on ", StringComparison.OrdinalIgnoreCase) &&
         (text.Contains("was just killed", StringComparison.OrdinalIgnoreCase) ||
-         text.Contains("was killed at", StringComparison.OrdinalIgnoreCase));
+         text.Contains("was killed at", StringComparison.OrdinalIgnoreCase)) &&
+        (text.Contains(" on ", StringComparison.OrdinalIgnoreCase) || text.Contains('@') || text.Contains('<'));
 
     private static string ParseSonarWorld(string text)
     {
-        var start = text.LastIndexOf('<');
-        var end = start >= 0 ? text.IndexOf('>', start + 1) : -1;
-        if (start >= 0 && end > start)
-            return new string(text[(start + 1)..end].Where(char.IsLetterOrDigit).ToArray());
+        var killedAt = text.IndexOf(" was just killed", StringComparison.OrdinalIgnoreCase);
+        if (killedAt < 0)
+            killedAt = text.IndexOf(" was killed at", StringComparison.OrdinalIgnoreCase);
+        var prefix = text[..(killedAt > 0 ? killedAt : text.Length)].TrimEnd();
 
-        var killedAt = text.IndexOf(" was killed", StringComparison.OrdinalIgnoreCase);
-        if (killedAt <= 0)
-            return string.Empty;
-        var prefix = text[..killedAt];
+        // Current Sonar messages use two @ fields: territory first and World last, for example:
+        // Rank S: Tyger @Lakeland <11.2, 13.0> @Coeurl was just killed
+        var atWorld = prefix.LastIndexOf('@');
+        if (atWorld >= 0)
+        {
+            var world = new string(prefix[(atWorld + 1)..].Where(char.IsLetterOrDigit).ToArray());
+            if (!string.IsNullOrWhiteSpace(world))
+                return world;
+        }
+
+        // The compact notification format instead uses "on <World> was killed at".
         var onWorld = prefix.LastIndexOf(" on ", StringComparison.OrdinalIgnoreCase);
-        return onWorld < 0
+        if (onWorld >= 0)
+        {
+            var world = new string(prefix[(onWorld + 4)..].Where(char.IsLetterOrDigit).ToArray());
+            if (!string.IsNullOrWhiteSpace(world))
+                return world;
+        }
+
+        // Retain compatibility with older <World> formatting, but never mistake a coordinate
+        // pair such as <11.2, 13.0> for the World name.
+        var start = prefix.LastIndexOf('<');
+        var end = start >= 0 ? prefix.IndexOf('>', start + 1) : -1;
+        if (start < 0 || end <= start)
+            return string.Empty;
+        var bracketed = prefix[(start + 1)..end];
+        return bracketed.Any(char.IsDigit) || bracketed.Contains(',') || bracketed.Contains('.')
             ? string.Empty
-            : new string(prefix[(onWorld + 4)..].Where(char.IsLetterOrDigit).ToArray());
+            : new string(bracketed.Where(char.IsLetterOrDigit).ToArray());
     }
 
     private static int ParseSonarInstance(string text)
