@@ -549,6 +549,28 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (feedEvent.Action == FaloopEventAction.LocationUpdate)
+        {
+            if (!hasTerritory ||
+                !IsTrackedFaloopAlertAwaitingLocation(feedEvent, world, creature, territory))
+            {
+                // A Faloop sighting is a map-location update, not proof of a current spawn.
+                // In particular, users can set one while the website still shows "In HH:MM".
+                log.Debug(
+                    "Ignored untracked Faloop sighting without live spawn evidence: {Mark} / {World}; action={Action}",
+                    creature, world, feedEvent.RawAction);
+                return;
+            }
+
+            log.Information(
+                "Using Faloop {Action} only to enrich the missing location of an already tracked live {Mark} alert on {World}",
+                feedEvent.RawAction, creature, world);
+            // Promotion is deliberately local to this already-tracked alert. The raw action is
+            // retained in diagnostics, while the normal spawn pipeline performs coordinate,
+            // freshness, expansion, duplicate, and killed-alert validation again.
+            feedEvent = feedEvent with { Action = FaloopEventAction.Spawn };
+        }
+
         if (!IsPositiveCurrentSpawnEvidence(feedEvent))
         {
             log.Debug("Ignored non-spawn Faloop event: {Mark} / {World}; type={Type}, action={Action}",
@@ -712,6 +734,35 @@ public sealed class Plugin : IDalamudPlugin
         if (!feedEvent.EventType.Equals("mob", StringComparison.OrdinalIgnoreCase))
             return false;
         return feedEvent.RawAction is "spawn" or "sighting_set" or "spawn_location" or "sighting";
+    }
+
+    private bool IsTrackedFaloopAlertAwaitingLocation(
+        FaloopFeedEvent feedEvent,
+        string world,
+        string creature,
+        uint territory)
+    {
+        var definition = HuntCatalog.ResolveStrict(territory, creature);
+        if (definition is null)
+            return false;
+
+        var identity = new HuntAlertSnapshot(
+            HuntCatalog.IsAnySsName(definition.Name) ? "ssrank" : "srank",
+            world,
+            definition.Name,
+            territory,
+            definition.DataId,
+            definition.PreferredAetheryteId,
+            Math.Max(1, feedEvent.Instance),
+            0f,
+            0f,
+            feedEvent.OccurredAtUtc);
+
+        if (unresolvedFaloopAlerts.ContainsKey(identity.Key))
+            return true;
+        if (current is not null && current.Key == identity.Key && !HasUsableMapCoordinates(current))
+            return true;
+        return pendingAlerts.Any(alert => alert.Key == identity.Key && !HasUsableMapCoordinates(alert));
     }
 
     private bool TryMatchTrackedFaloopDeath(

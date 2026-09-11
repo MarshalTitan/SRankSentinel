@@ -12,6 +12,7 @@ internal enum FaloopEventAction
     Spawn,
     Death,
     FutureTiming,
+    LocationUpdate,
 }
 
 internal sealed record FaloopFeedEvent(
@@ -561,11 +562,12 @@ internal sealed class FaloopClient : IDisposable
             action = rawAction switch
             {
                 "spawn" => FaloopEventAction.Spawn,
-                // Current Faloop builds publish user-confirmed spawn locations as sighting_set.
-                // spawn_location is retained as a compatible location-bearing notification.
-                "sighting_set" => FaloopEventAction.Spawn,
+                // A sighting_set updates the map marker but does not prove the S rank is
+                // currently spawned. Faloop permits sightings while the spawn window is still
+                // in the future, so this can only enrich a separately tracked live spawn.
+                "sighting_set" => FaloopEventAction.LocationUpdate,
                 "spawn_location" => FaloopEventAction.Spawn,
-                "sighting" => FaloopEventAction.Spawn,
+                "sighting" => FaloopEventAction.LocationUpdate,
                 "death" => FaloopEventAction.Death,
                 _ => null,
             };
