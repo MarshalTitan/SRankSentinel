@@ -24,6 +24,7 @@ public sealed class Plugin : IDalamudPlugin
     private const double ReturnDialogTimeoutSeconds = 6;
     private const double ReturnConfirmationRetrySeconds = 2;
     private const double ReturnActionRetrySeconds = 10;
+    private const double ReturnTeleportRetrySeconds = 3;
     private const double ReturnTransitionTimeoutSeconds = 45;
     private const double ReturnRecoveryWatchdogSeconds = 120;
     private const float CrowdSearchRadius = 90f;
@@ -37,9 +38,14 @@ public sealed class Plugin : IDalamudPlugin
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
     private const float TagApproachClearance = 8f;
+    private const double TagDispatchConfirmationTimeoutSeconds = 5;
     private const float MaximumParkingClearance = 35f;
+    private const float MaximumGroundPathDetourRatio = 2.5f;
+    private const float MaximumGroundPathDetourAllowance = 30f;
+    private const float MaximumGroundPathEndpointGap = 12f;
     private const double ReturnLandingDirectAttemptSeconds = 4;
     private const double ReturnLandingRouteStallSeconds = 10;
+    private const int ReturnTeleportAttemptsBeforeLandingFallback = 2;
     private const double FaloopLocationEnrichmentTimeoutSeconds = 300;
     private const double FaloopLocationEnrichmentInitialRetrySeconds = 5;
     private const double FaloopLocationEnrichmentMaximumRetrySeconds = 30;
@@ -52,6 +58,9 @@ public sealed class Plugin : IDalamudPlugin
     private const double SsStagingPathQueryTimeoutSeconds = 20;
     private const double SsStagingRouteRetrySeconds = 3;
     private const float SsStagingArrivalDistance = 5f;
+    private const float SsStagingTargetRadius = 25f;
+    private const float SsStagingRadiusTolerance = 4f;
+    private const float SsStagingProtectedRadius = 18f;
     private const double SsChainKillTransitionLatchSeconds = 30;
     private const string ReservedSsWatchHuntType = "sswatch";
     private const double ApproachRouteRetrySeconds = 3;
@@ -121,7 +130,10 @@ public sealed class Plugin : IDalamudPlugin
     private Vector3? safePoint;
     private ParkingCandidate? selectedParkingCandidate;
     private Task<List<Vector3>>? parkingPathTask;
+    private Task<List<Vector3>>? parkingGroundPathTask;
     private DateTime parkingPathStartedUtc = DateTime.MinValue;
+    private List<Vector3>? pendingParkingFlightPath;
+    private Vector3 parkingGroundPathGoal;
     private List<Vector3>? selectedParkingPath;
     private bool crowdFallbackAnnounced;
     private bool postTagRetreatActive;
@@ -149,6 +161,7 @@ public sealed class Plugin : IDalamudPlugin
     private int pullCycle = 1;
     private DateTime pullResetCandidateSinceUtc = DateTime.MinValue;
     private uint activeTagActionId;
+    private TagDispatch? pendingTagDispatch;
     private bool discardAtUldah;
     private string discardReason = string.Empty;
     private bool ssChainObserved;
@@ -159,10 +172,14 @@ public sealed class Plugin : IDalamudPlugin
     private Vector3? ssStagingDestination;
     private SsStagingCandidate? selectedSsStagingCandidate;
     private Task<List<Vector3>>? ssStagingPathTask;
+    private Task<List<Vector3>>? ssStagingGroundPathTask;
     private List<Vector3>? selectedSsStagingPath;
+    private List<Vector3>? pendingSsStagingFlightPath;
+    private Vector3 ssStagingGroundPathGoal;
     private DateTime ssStagingPathStartedUtc = DateTime.MinValue;
     private DateTime nextSsStagingAttemptUtc = DateTime.MinValue;
     private bool ssStagingArrived;
+    private DateTime ssStagingLandingStartedUtc = DateTime.MinValue;
     private bool ssStagingProjectionFailureLogged;
     private DateTime postKillSsGraceDeadlineUtc = DateTime.MinValue;
     private DateTime ssWatchDeadlineUtc = DateTime.MinValue;
@@ -182,6 +199,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool returnWatchdogWarning;
     private int returnActionAttempts;
     private int returnConfirmationAttempts;
+    private int returnTeleportAttempts;
     private SentinelState incidentalAggroResumeState = SentinelState.Idle;
     private DateTime incidentalAggroStartedUtc = DateTime.MinValue;
     private DateTime incidentalAggroClearSinceUtc = DateTime.MinValue;
@@ -1060,13 +1078,15 @@ public sealed class Plugin : IDalamudPlugin
             if (IsSonarKillNotice(text))
             {
                 var killedWorld = ParseSonarWorld(text);
+                var killedTerritory = mapLink?.TerritoryType.RowId ?? 0;
+                var killedInstance = ParseSonarInstance(text);
                 log.Information("Sonar kill notice parsed for world {World}: {Text}",
                     string.IsNullOrWhiteSpace(killedWorld) ? "(unresolved)" : killedWorld, text);
                 if (current is not null &&
                     HuntCatalog.TextMentionsMark(text, current.CreatureName) &&
-                    KillNoticeMatchesWorld(killedWorld, current))
+                    KillNoticeMatchesAlert(killedWorld, killedTerritory, killedInstance, current))
                     ConfirmKill($"Sonar confirmed {current.CreatureName} was killed");
-                RemoveKilledQueuedAlerts(text, killedWorld);
+                RemoveKilledQueuedAlerts(text, killedWorld, killedTerritory, killedInstance);
                 return;
             }
 
@@ -1158,6 +1178,18 @@ public sealed class Plugin : IDalamudPlugin
             isSs ? "ssrank" : "srank", world, creature.Trim(), territory,
             definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
             instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);
+        if (isSs && HuntCatalog.TryGetSsStagingLocation(territory, out var ssLocation))
+        {
+            if (Math.Abs(incoming.MapX - ssLocation.MapX) >= 0.1f ||
+                Math.Abs(incoming.MapY - ssLocation.MapY) >= 0.1f)
+            {
+                log.Information(
+                    "Normalized {Source} {Ss} coordinates ({SourceX:0.0}, {SourceY:0.0}) to documented {Territory} spawn ({MapX:0.0}, {MapY:0.0})",
+                    source, incoming.CreatureName, incoming.MapX, incoming.MapY,
+                    ssLocation.TerritoryName, ssLocation.MapX, ssLocation.MapY);
+            }
+            incoming = incoming with { MapX = ssLocation.MapX, MapY = ssLocation.MapY };
+        }
         if (!HasUsableMapCoordinates(incoming))
         {
             status = $"Ignored coordinate-less {source} report for {incoming.CreatureName}; waiting for a location-bearing report";
@@ -1183,14 +1215,16 @@ public sealed class Plugin : IDalamudPlugin
             if (isSs && IsReservedSsWatch(current))
             {
                 var reserved = current;
-                current = incoming;
+                current = reserved with
+                {
+                    HuntType = "ssrank",
+                    ReceivedAtUtc = incoming.ReceivedAtUtc,
+                };
                 ssSpawnAnnounced = true;
                 log.Information(
-                    "Promoted reserved SS opportunity to a confirmed spawn: {Ss} on {World}; source={Source}",
-                    incoming.CreatureName, incoming.World, source);
-                status = $"{source} confirmed {incoming.CreatureName}; continuing the reserved SS hunt";
-                if (!ApproximatelySameMapPoint(reserved, incoming))
-                    PrepareCurrentTravel();
+                    "Promoted reserved SS opportunity while preserving its documented spawn destination: {Ss} on {World}; source={Source}, ignored provider point=({MapX:0.0}, {MapY:0.0})",
+                    incoming.CreatureName, incoming.World, source, incoming.MapX, incoming.MapY);
+                status = $"{source} confirmed {incoming.CreatureName}; continuing toward its documented spawn location";
             }
             if (HasUsableMapCoordinates(incoming) && !HasUsableMapCoordinates(current))
             {
@@ -1210,7 +1244,9 @@ public sealed class Plugin : IDalamudPlugin
             if (isSs && IsReservedSsWatch(queuedDuplicate))
             {
                 var updatedQueue = pendingAlerts
-                    .Select(alert => alert.Key == incoming.Key ? incoming : alert)
+                    .Select(alert => alert.Key == incoming.Key
+                        ? alert with { HuntType = "ssrank", ReceivedAtUtc = incoming.ReceivedAtUtc }
+                        : alert)
                     .ToArray();
                 pendingAlerts.Clear();
                 foreach (var alert in updatedQueue)
@@ -1218,8 +1254,8 @@ public sealed class Plugin : IDalamudPlugin
                 ReorderPendingQueue();
                 PersistQueue();
                 log.Information(
-                    "Promoted queued SS reservation to a confirmed spawn: {Ss} on {World}; source={Source}",
-                    incoming.CreatureName, incoming.World, source);
+                    "Promoted queued SS reservation while preserving its documented spawn destination: {Ss} on {World}; source={Source}, ignored provider point=({MapX:0.0}, {MapY:0.0})",
+                    incoming.CreatureName, incoming.World, source, incoming.MapX, incoming.MapY);
             }
             else if (HasUsableMapCoordinates(incoming) && !HasUsableMapCoordinates(queuedDuplicate))
             {
@@ -1261,7 +1297,12 @@ public sealed class Plugin : IDalamudPlugin
                     $"{source} confirmed {incoming.CreatureName} while the completed S-rank player is dead");
                 return;
             }
-            StartSsAlertDirect(incoming, source);
+            EnqueuePersistent(incoming);
+            ssSpawnAnnounced = true;
+            ObserveSsChain(ssProfile,
+                $"{source} reported {incoming.CreatureName}; staging at its documented spawn until the entity is detectable");
+            ssWatchDeadlineUtc = DateTime.MaxValue;
+            status = $"{incoming.CreatureName} reported; navigating to its documented spawn location before entity tracking";
             return;
         }
 
@@ -1279,6 +1320,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void StartAlert(HuntAlertSnapshot alert, string source)
     {
+        if (HuntCatalog.IsAnySsName(alert.CreatureName) &&
+            HuntCatalog.TryGetSsStagingLocation(alert.TerritoryId, out var ssLocation))
+            alert = alert with { MapX = ssLocation.MapX, MapY = ssLocation.MapY };
         current = alert;
         mark = null;
         killConfirmed = false;
@@ -1292,11 +1336,12 @@ public sealed class Plugin : IDalamudPlugin
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
+        ResetPendingTagDispatch();
         discardAtUldah = false;
         discardReason = string.Empty;
-        ssChainObserved = false;
-        ssSpawnAnnounced = false;
-        activeSsProfile = null;
+        activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName);
+        ssChainObserved = activeSsProfile is not null;
+        ssSpawnAnnounced = activeSsProfile is not null && !IsReservedSsWatch(alert);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
         ClearPendingSsChainEvidence();
@@ -1329,6 +1374,7 @@ public sealed class Plugin : IDalamudPlugin
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
+        ResetPendingTagDispatch();
         discardAtUldah = false;
         discardReason = string.Empty;
         ssChainObserved = true;
@@ -1345,10 +1391,10 @@ public sealed class Plugin : IDalamudPlugin
         ResetIncidentalAggroTracking();
         PrepareCurrentTravel();
 
-        // Prefer the alert coordinates whenever they exist. Object resolution starts only near
-        // those coordinates; the local scan fallback is reserved for an in-zone SS that was
-        // discovered directly from the game object table and therefore has no map coordinates.
-        var visibleSs = alertPoint is null ? FindMark() : null;
+        // A real loaded SS entity always supersedes static/provider coordinates. Provider links
+        // can arrive during the prey phase and must not pull staging away from the documented
+        // territory spawn location.
+        var visibleSs = FindMark();
         if (visibleSs is not null)
         {
             mark = visibleSs;
@@ -1376,7 +1422,10 @@ public sealed class Plugin : IDalamudPlugin
         safePoint = null;
         selectedParkingCandidate = null;
         parkingPathTask = null;
+        parkingGroundPathTask = null;
         parkingPathStartedUtc = DateTime.MinValue;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         selectedParkingPath = null;
         crowdFallbackAnnounced = false;
         parkingCandidates.Clear();
@@ -1886,15 +1935,11 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // Teleport and Return cannot begin while mounted or in flight. A normal dismount is
-        // attempted first; if terrain or a wall prevents landing, relocate to one of several
-        // nearby projected floor points instead of pressing Dismount forever at the obstruction.
-        if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
+        if (returnRecoveryStartedUtc == DateTime.MinValue)
         {
-            TickReturnLandingRecovery(now);
-            return;
+            returnRecoveryStartedUtc = now;
+            returnExpectedWorld = travel.CurrentWorld;
         }
-        ResetReturnLandingRecovery();
 
         if (returnInitiatedBySentinel)
         {
@@ -1926,12 +1971,38 @@ public sealed class Plugin : IDalamudPlugin
 
         if (now >= nextActionUtc)
         {
-            if (condition[ConditionFlag.Mounted])
-                UseGeneralAction(23);
-            else if (travel.Teleport(NativeTravel.UldahAetheryteId))
+            returnTeleportAttempts++;
+            vnav.StopSafe("attempting direct Ul'dah teleport recovery");
+            if (travel.Teleport(NativeTravel.UldahAetheryteId))
+            {
+                ResetReturnLandingRecovery();
                 status = "Teleporting normally to Ul'dah for the mandatory reset";
-            nextActionUtc = now.AddSeconds(8);
+                log.Information(
+                    "Direct Ul'dah teleport accepted on attempt {Attempt}; mounted={Mounted}, inFlight={InFlight}",
+                    returnTeleportAttempts, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+                nextActionUtc = now.AddSeconds(8);
+                return;
+            }
+
+            log.Information(
+                "Direct Ul'dah teleport was not accepted on attempt {Attempt}; mounted={Mounted}, inFlight={InFlight}, inCombat={InCombat}",
+                returnTeleportAttempts, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight],
+                condition[ConditionFlag.InCombat]);
+            nextActionUtc = now.AddSeconds(ReturnTeleportRetrySeconds);
         }
+
+        // Landing is a fallback only after concrete Teleport rejections while mounted/flying.
+        // It is never the prerequisite for the first normal Ul'dah teleport attempt.
+        if ((condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted]) &&
+            returnTeleportAttempts >= ReturnTeleportAttemptsBeforeLandingFallback)
+        {
+            TickReturnLandingRecovery(now);
+            return;
+        }
+
+        status = returnTeleportAttempts == 0
+            ? "Preparing a direct normal Teleport to Ul'dah"
+            : "Direct Ul'dah teleport is not available yet; retrying before any landing fallback";
     }
 
     private void TickReturnLandingRecovery(DateTime now)
@@ -2119,6 +2190,9 @@ public sealed class Plugin : IDalamudPlugin
         incidentalAggroEscapeAttempt = 0;
         vnav.StopSafe();
         parkingPathTask = null;
+        parkingGroundPathTask = null;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         selectedParkingPath = null;
         safePoint = null;
         var threatName = threat?.Name.TextValue ?? "an out-of-range overworld enemy";
@@ -2318,10 +2392,14 @@ public sealed class Plugin : IDalamudPlugin
         ssStagingDestination = null;
         selectedSsStagingCandidate = null;
         ssStagingPathTask = null;
+        ssStagingGroundPathTask = null;
         selectedSsStagingPath = null;
+        pendingSsStagingFlightPath = null;
+        ssStagingGroundPathGoal = default;
         ssStagingPathStartedUtc = DateTime.MinValue;
         nextSsStagingAttemptUtc = DateTime.MinValue;
         ssStagingArrived = false;
+        ssStagingLandingStartedUtc = DateTime.MinValue;
         ssStagingProjectionFailureLogged = false;
         ssStagingCandidates.Clear();
     }
@@ -2434,6 +2512,7 @@ public sealed class Plugin : IDalamudPlugin
         returnWatchdogWarning = false;
         returnActionAttempts = 0;
         returnConfirmationAttempts = 0;
+        returnTeleportAttempts = 0;
     }
 
     private void TickWorldVisit(DateTime now)
@@ -2851,6 +2930,26 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (HuntCatalog.IsAnySsName(current.CreatureName))
+        {
+            activeSsProfile = HuntCatalog.GetSsProfileForSsName(current.CreatureName) ??
+                              HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
+            if (activeSsProfile is null)
+            {
+                status = $"Could not resolve the SS profile for {current.CreatureName}; retaining the hunt at the aetheryte";
+                return;
+            }
+
+            ssChainObserved = true;
+            ssWatchDeadlineUtc = ssSpawnAnnounced
+                ? DateTime.MaxValue
+                : current.ReceivedAtUtc.AddSeconds(config.SsChainTimeoutSeconds);
+            ResetSsStagingTracking();
+            SetState(SentinelState.SsWatch,
+                $"vnavmesh is ready; staging about {SsStagingTargetRadius:0}y from the documented {activeSsProfile.SsName} spawn until the entity is detectable");
+            return;
+        }
+
         SetState(SentinelState.PrepareApproachDestination,
             "vnavmesh mesh is fully ready; resolving the active hunt's stored alert coordinates");
     }
@@ -2884,7 +2983,12 @@ public sealed class Plugin : IDalamudPlugin
             if (now < nextActionUtc)
                 return;
             if (approachProjectionCandidates.Count == 0)
-                PrepareApproachProjectionCandidates(alertPoint.Value);
+            {
+                var resolvedAlertPoint = alertPoint;
+                if (resolvedAlertPoint is null)
+                    return;
+                PrepareApproachProjectionCandidates(resolvedAlertPoint.Value);
+            }
             approachPoint = approachProjectionCandidates.Count > 0
                 ? approachProjectionCandidates.Dequeue()
                 : null;
@@ -3432,6 +3536,9 @@ public sealed class Plugin : IDalamudPlugin
             safePoint = null;
             selectedParkingCandidate = null;
             parkingPathTask = null;
+            parkingGroundPathTask = null;
+            pendingParkingFlightPath = null;
+            parkingGroundPathGoal = default;
             selectedParkingPath = null;
             parkingCandidates.Clear();
             nextActionUtc = now.AddSeconds(1);
@@ -3440,7 +3547,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         MarkWasIdentified(mark);
-        if (parkingPathTask is not null)
+        if (parkingPathTask is not null || parkingGroundPathTask is not null)
         {
             PollCrowdParkingPath(mark, now);
             return;
@@ -3605,18 +3712,81 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.SafeWait, "Mark lost during tag approach; holding safely");
             return;
         }
+        MarkWasIdentified(mark);
+        if (mark.IsDead || mark.CurrentHp == 0)
+        {
+            ConfirmKill($"Positively identified {mark.Name.TextValue} is visibly dead during tag approach");
+            return;
+        }
+
+        if (pendingTagDispatch is not null)
+        {
+            var pending = pendingTagDispatch;
+            var actionState = combat.ReadTagActionState(pending.ActionId, pending.TargetId);
+            if (pending.Sequence is null && pending.DeferredForTarget &&
+                actionState.LastUsedSequence != pending.BaselineSequence)
+            {
+                pending = pending with { Sequence = actionState.LastUsedSequence };
+                pendingTagDispatch = pending;
+                log.Information(
+                    "Tag action sequence emitted: action={ActionId}, target={TargetId}, sequence={Sequence}",
+                    pending.ActionId, pending.TargetId, pending.Sequence.Value);
+            }
+
+            if (pending.Sequence is ushort sequence &&
+                ActionSequenceWasHandled(pending.BaselineSequence, sequence, actionState.LastHandledSequence))
+            {
+                tagAttempted = true;
+                pullCycleTagged = true;
+                pendingTagDispatch = null;
+                nextActionUtc = now.AddSeconds(3);
+                status = $"Tag confirmed for {mark.Name.TextValue}, pull cycle {pullCycle} " +
+                         $"(action {activeTagActionId}, sequence {sequence}); attack cutoff is active";
+                log.Information(
+                    "Tag confirmed by handled action sequence: {Mark}, pull cycle={PullCycle}, action={ActionId}, target={TargetId}, sequence={Sequence}",
+                    mark.Name.TextValue, pullCycle, activeTagActionId, mark.GameObjectId, sequence);
+                return;
+            }
+
+            if ((now - pending.SubmittedAtUtc).TotalSeconds < TagDispatchConfirmationTimeoutSeconds)
+            {
+                status = actionState.QueuedForTarget
+                    ? $"Ranged tag is queued for {mark.Name.TextValue}; waiting for server handling"
+                    : $"Ranged tag was submitted to {mark.Name.TextValue}; waiting for server handling";
+                return;
+            }
+
+            log.Warning(
+                "Tag submission was not confirmed within {Seconds}s; retaining the live hunt and retrying: action={ActionId}, target={TargetId}, baseline={Baseline}, observedUsed={Used}, observedHandled={Handled}",
+                TagDispatchConfirmationTimeoutSeconds, pending.ActionId, pending.TargetId,
+                pending.BaselineSequence, actionState.LastUsedSequence, actionState.LastHandledSequence);
+            pendingTagDispatch = null;
+            nextActionUtc = now.AddSeconds(1);
+        }
 
         if (tagAttempted)
         {
             if (now >= nextActionUtc)
             {
                 BeginGroundRetreat(mark, postTag: true);
-                status = $"Attack cutoff active; retreating to {ActiveDistanceProfile.WaitingDistance:0}y after the one tag attempt";
+                status = $"Attack cutoff active; retreating to {ActiveDistanceProfile.WaitingDistance:0}y after the confirmed tag";
             }
             else
             {
-                status = $"One tag attempt sent (action {activeTagActionId}); holding still briefly so casted tags are not cancelled";
+                status = $"Tag confirmed (action {activeTagActionId}); holding still briefly so casted tags are not cancelled";
             }
+            return;
+        }
+
+        if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
+        {
+            vnav.StopSafe("dismounting before the ranged tag");
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(1);
+            }
+            status = $"Dismounting before tagging {mark.Name.TextValue}; the live hunt remains active";
             return;
         }
 
@@ -3629,7 +3799,11 @@ public sealed class Plugin : IDalamudPlugin
         }
 
 
-        combat.TargetMark(mark);
+        if (!combat.TargetMark(mark))
+        {
+            status = $"Acquiring {mark.Name.TextValue} as the confirmed tag target";
+            return;
+        }
 
         if (ClearanceFromMark(mark) <= TagApproachClearance + 1f)
         {
@@ -3637,20 +3811,28 @@ public sealed class Plugin : IDalamudPlugin
             if (now >= nextActionUtc)
             {
                 var attempt = combat.TrySingleTag(activeTagActionId, mark);
-                if (attempt.Attempted)
+                if (attempt.Submitted && attempt.ClientAccepted)
                 {
-                    tagAttempted = true;
-                    pullCycleTagged = true;
-                    nextActionUtc = now.AddSeconds(3);
-                    status = $"Tagged {mark.Name.TextValue} for pull cycle {pullCycle} (action {activeTagActionId}); client " +
-                             (attempt.Accepted ? "accepted it" : "did not accept it") +
-                             "; attack cutoff is active and no further attacks will be issued";
+                    pendingTagDispatch = new TagDispatch(
+                        activeTagActionId,
+                        mark.GameObjectId,
+                        attempt.SequenceBefore,
+                        attempt.SequenceAfter == attempt.SequenceBefore ? null : attempt.SequenceAfter,
+                        attempt.DeferredForTarget,
+                        now);
+                    nextActionUtc = now.AddSeconds(1);
+                    status = $"Ranged tag submitted to {mark.Name.TextValue}; waiting for server handling before closing the tag gate";
                     log.Information(
-                        "Tagged {Mark} for pull cycle {PullCycle}; one action attempt sent, client accepted={Accepted}",
-                        mark.Name.TextValue, pullCycle, attempt.Accepted);
+                        "Tag action submitted: {Mark}, pull cycle={PullCycle}, action={ActionId}, target={TargetId}, sequenceBefore={Before}, sequenceAfter={After}, deferredForTarget={Deferred}; awaiting handled sequence",
+                        mark.Name.TextValue, pullCycle, activeTagActionId, mark.GameObjectId,
+                        attempt.SequenceBefore, attempt.SequenceAfter, attempt.DeferredForTarget);
                     return;
                 }
 
+                if (attempt.Submitted)
+                    log.Information(
+                        "Tag action was rejected before dispatch; retaining the live hunt and retrying: {Mark}, action={ActionId}",
+                        mark.Name.TextValue, activeTagActionId);
                 nextActionUtc = now.AddSeconds(1);
             }
         }
@@ -3671,7 +3853,7 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.SafeWait, "Mark lost during retreat; stopped safely");
             return;
         }
-        if (parkingPathTask is not null)
+        if (parkingPathTask is not null || parkingGroundPathTask is not null)
         {
             PollCrowdParkingPath(mark, now);
             return;
@@ -3702,7 +3884,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!postTagRetreatActive && ClearanceFromMark(mark) >= ActiveDistanceProfile.WaitingDistance - 2f)
         {
             vnav.StopSafe();
-            SetState(SentinelState.SafeWait, tagAttempted ? "One tag attempt completed; safe radius restored" : "Safe radius restored");
+            SetState(SentinelState.SafeWait, tagAttempted ? "Confirmed tag completed; safe radius restored" : "Safe radius restored");
             return;
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
@@ -3828,28 +4010,37 @@ public sealed class Plugin : IDalamudPlugin
         if (current is null || activeSsProfile is null)
             return;
 
-        if (TryFindQueuedSsForActiveContext(out var queuedSs))
-        {
-            var survivors = pendingAlerts.Where(alert => alert.Key != queuedSs.Key).ToArray();
-            pendingAlerts.Clear();
-            foreach (var survivor in survivors)
-                pendingAlerts.Enqueue(survivor);
-            PersistQueue();
-            StartSsAlertDirect(queuedSs, "queued direct SS alert");
-            return;
-        }
-
         var visibleSs = FindBattleNpc(activeSsProfile.SsDataId, activeSsProfile.SsName);
         if (visibleSs is not null)
         {
-            var ss = new HuntAlertSnapshot(
-                "ssrank", current.World, activeSsProfile.SsName, current.TerritoryId,
-                activeSsProfile.SsDataId, current.PreferredAetheryteId,
-                travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance,
-                0f, 0f, now);
+            HuntAlertSnapshot ss;
+            if (TryFindQueuedSsForActiveContext(out var queuedSs))
+            {
+                var survivors = pendingAlerts.Where(alert => alert.Key != queuedSs.Key).ToArray();
+                pendingAlerts.Clear();
+                foreach (var survivor in survivors)
+                    pendingAlerts.Enqueue(survivor);
+                PersistQueue();
+                ss = queuedSs;
+            }
+            else
+            {
+                ss = new HuntAlertSnapshot(
+                    "ssrank", current.World, activeSsProfile.SsName, current.TerritoryId,
+                    activeSsProfile.SsDataId, current.PreferredAetheryteId,
+                    travel.CurrentInstance > 0 ? travel.CurrentInstance : current.Instance,
+                    0f, 0f, now);
+            }
             log.Information("Actual SS detected; switching to entity tracking: {Ss}", activeSsProfile.SsName);
             StartSsAlertDirect(ss, "game object scan");
             return;
+        }
+
+        if (TryFindQueuedSsForActiveContext(out var reportedSs))
+        {
+            ssSpawnAnnounced = true;
+            ssWatchDeadlineUtc = DateTime.MaxValue;
+            status = $"{reportedSs.CreatureName} was reported; holding its reservation and staging at the documented spawn until the entity is detectable";
         }
 
         var precursorCount = objects.OfType<IBattleChara>().Count(actor =>
@@ -3883,6 +4074,16 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
             {
+                if (ssStagingLandingStartedUtc != DateTime.MinValue &&
+                    (now - ssStagingLandingStartedUtc).TotalSeconds >= LandingAttemptTimeoutSeconds)
+                {
+                    log.Information(
+                        "SS staging landing did not complete within {Seconds}s; rejecting the candidate and preserving the SS watch",
+                        LandingAttemptTimeoutSeconds);
+                    InvalidateSsStagingRoute(now);
+                    status = "SS staging landing was obstructed; trying another connected-ground point";
+                    return;
+                }
                 if (now >= nextActionUtc)
                 {
                     UseGeneralAction(23);
@@ -3898,7 +4099,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (ssStagingPathTask is not null)
+        if (ssStagingPathTask is not null || ssStagingGroundPathTask is not null)
         {
             PollSsStagingPath(now, anchor);
             return;
@@ -3919,6 +4120,7 @@ public sealed class Plugin : IDalamudPlugin
                 }
 
                 ssStagingArrived = true;
+                ssStagingLandingStartedUtc = now;
                 nextActionUtc = now;
                 log.Information(
                     "SS staging candidate selected and reached: {Ss} in {Territory}, {Distance:0.0}y from fixed spawn",
@@ -3983,6 +4185,9 @@ public sealed class Plugin : IDalamudPlugin
         ssStagingCandidates.Clear();
         selectedSsStagingCandidate = null;
         ssStagingPathTask = null;
+        ssStagingGroundPathTask = null;
+        pendingSsStagingFlightPath = null;
+        ssStagingGroundPathGoal = default;
         selectedSsStagingPath = null;
         ssStagingDestination = null;
 
@@ -3993,9 +4198,6 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var player = PlayerPosition();
-        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
-        var safeRadius = ActiveDistanceProfile.WaitingDistance + playerRadius + 2f;
-        var minimumRadius = ActiveDistanceProfile.EmergencyDistance + playerRadius + 3f;
         var accepted = new List<Vector3>();
 
         var crowdCandidates = new List<(SsStagingCandidate Candidate, float Score)>();
@@ -4007,15 +4209,18 @@ public sealed class Plugin : IDalamudPlugin
                 continue;
             towardCrowd = Vector3.Normalize(towardCrowd);
             var tangent = new Vector3(-towardCrowd.Z, 0f, towardCrowd.X);
-            var clusterRadius = HorizontalDistance(cluster.Center, anchor);
-            foreach (var lateral in new[] { 6f, -6f, 10f, -10f })
+            foreach (var lateral in new[] { 2f, -2f, 4f, -4f })
             {
-                var candidate = anchor + towardCrowd * MathF.Max(safeRadius, clusterRadius + 2f) + tangent * lateral;
+                var offset = towardCrowd * SsStagingTargetRadius + tangent * lateral;
+                offset = Vector3.Normalize(offset) * SsStagingTargetRadius;
+                var candidate = anchor + offset;
                 candidate.Y = 1024f;
-                var projected = vnav.PointOnFloorSafe(candidate, 18f);
+                var projected = vnav.PointOnFloorSafe(candidate, 8f);
+                var anchorDistance = projected is null
+                    ? 0f
+                    : HorizontalDistance(projected.Value, anchor);
                 if (projected is null ||
-                    HorizontalDistance(projected.Value, anchor) < safeRadius - 0.5f ||
-                    HorizontalDistance(projected.Value, anchor) < minimumRadius ||
+                    MathF.Abs(anchorDistance - SsStagingTargetRadius) > SsStagingRadiusTolerance ||
                     HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
                     accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
                     continue;
@@ -4039,7 +4244,7 @@ public sealed class Plugin : IDalamudPlugin
         if (away.LengthSquared() < 0.01f)
             away = Vector3.UnitX;
         away = Vector3.Normalize(away);
-        foreach (var extraRadius in new[] { 0f, 6f, 12f, 18f })
+        foreach (var radius in new[] { SsStagingTargetRadius, SsStagingTargetRadius - 1f, SsStagingTargetRadius + 1f })
         {
             foreach (var angle in new[] { 0f, 25f, -25f, 50f, -50f, 80f, -80f, 110f, -110f, 145f, -145f, 180f })
             {
@@ -4048,12 +4253,14 @@ public sealed class Plugin : IDalamudPlugin
                     away.X * MathF.Cos(radians) - away.Z * MathF.Sin(radians),
                     0f,
                     away.X * MathF.Sin(radians) + away.Z * MathF.Cos(radians));
-                var candidate = anchor + direction * (safeRadius + extraRadius);
+                var candidate = anchor + direction * radius;
                 candidate.Y = 1024f;
-                var projected = vnav.PointOnFloorSafe(candidate, 18f);
+                var projected = vnav.PointOnFloorSafe(candidate, 8f);
+                var anchorDistance = projected is null
+                    ? 0f
+                    : HorizontalDistance(projected.Value, anchor);
                 if (projected is null ||
-                    HorizontalDistance(projected.Value, anchor) < safeRadius - 0.5f ||
-                    HorizontalDistance(projected.Value, anchor) < minimumRadius ||
+                    MathF.Abs(anchorDistance - SsStagingTargetRadius) > SsStagingRadiusTolerance ||
                     accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
                     continue;
                 accepted.Add(projected.Value);
@@ -4062,14 +4269,14 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         log.Information(
-            "Prepared {Count} safely projected SS staging candidates near {Ss} ({CrowdCount} crowd-aware)",
-            ssStagingCandidates.Count, activeSsProfile?.SsName ?? "SS", crowdCandidates.Count);
+            "Prepared {Count} SS staging candidates in the documented {Radius:0}y spawn envelope near {Ss} ({CrowdCount} crowd-aware)",
+            ssStagingCandidates.Count, SsStagingTargetRadius,
+            activeSsProfile?.SsName ?? "SS", crowdCandidates.Count);
     }
 
     private bool TryStartNextSsStagingRoute(DateTime now, Vector3 anchor)
     {
-        var protectedRadius = ActiveDistanceProfile.EmergencyDistance +
-                              (objects.LocalPlayer?.HitboxRadius ?? 0f) + 3f;
+        var protectedRadius = SsStagingProtectedRadius;
         while (ssStagingCandidates.Count > 0)
         {
             var candidate = ssStagingCandidates.Dequeue();
@@ -4089,6 +4296,9 @@ public sealed class Plugin : IDalamudPlugin
 
             selectedSsStagingCandidate = candidate;
             ssStagingPathTask = pathTask;
+            ssStagingGroundPathTask = null;
+            pendingSsStagingFlightPath = null;
+            ssStagingGroundPathGoal = default;
             ssStagingPathStartedUtc = now;
             status = candidate.IsCrowd
                 ? $"Validating an SS staging route near a {candidate.CrowdPopulation}-player crowd"
@@ -4100,9 +4310,69 @@ public sealed class Plugin : IDalamudPlugin
 
     private void PollSsStagingPath(DateTime now, Vector3 anchor)
     {
-        var task = ssStagingPathTask;
         var candidate = selectedSsStagingCandidate;
-        if (task is null || candidate is null)
+        if (candidate is null)
+            return;
+
+        if (ssStagingGroundPathTask is not null)
+        {
+            var groundTask = ssStagingGroundPathTask;
+            if (!groundTask.IsCompleted)
+            {
+                if ((now - ssStagingPathStartedUtc).TotalSeconds <= SsStagingPathQueryTimeoutSeconds)
+                {
+                    status = "Checking that the SS staging ground is connected to the documented spawn side";
+                    return;
+                }
+                RejectSsStagingCandidate(now, anchor,
+                    "SS staging candidate rejected: ground-connectivity query timed out");
+                return;
+            }
+
+            List<Vector3>? groundPath = null;
+            try
+            {
+                if (groundTask.IsCompletedSuccessfully)
+                    groundPath = groundTask.Result;
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "SS staging ground-connectivity query failed");
+            }
+            ssStagingGroundPathTask = null;
+
+            if (!IsReasonableGroundConnection(candidate.Position, ssStagingGroundPathGoal, groundPath,
+                    out var groundReason))
+            {
+                RejectSsStagingCandidate(now, anchor,
+                    $"SS staging candidate rejected: {groundReason}");
+                return;
+            }
+
+            var flightPath = pendingSsStagingFlightPath;
+            if (flightPath is null || flightPath.Count == 0 || !vnav.MovePathSafe(flightPath, true))
+            {
+                RejectSsStagingCandidate(now, anchor,
+                    "SS staging candidate rejected: validated flight route became unavailable");
+                return;
+            }
+
+            pendingSsStagingFlightPath = null;
+            ssStagingDestination = candidate.Position;
+            selectedSsStagingPath = flightPath;
+            nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+            status = candidate.IsCrowd
+                ? $"Navigating to connected-ground SS staging near {candidate.CrowdPopulation} players"
+                : "Navigating to connected-ground SS staging area";
+            log.Information(
+                "SS staging candidate selected after flight and ground-connectivity validation: {Type}, {Distance:0.0}y from documented spawn",
+                candidate.IsCrowd ? $"crowd ({candidate.CrowdPopulation} players)" : "standard",
+                HorizontalDistance(candidate.Position, anchor));
+            return;
+        }
+
+        var task = ssStagingPathTask;
+        if (task is null)
             return;
         if (!task.IsCompleted)
         {
@@ -4111,10 +4381,8 @@ public sealed class Plugin : IDalamudPlugin
                 status = "Validating a protected vnavmesh route to the fixed SS staging area";
                 return;
             }
-            log.Information("SS staging candidate rejected: vnavmesh path query timed out");
-            ssStagingPathTask = null;
-            selectedSsStagingCandidate = null;
-            TryStartNextSsStagingRoute(now, anchor);
+            RejectSsStagingCandidate(now, anchor,
+                "SS staging candidate rejected: protected flight-path query timed out");
             return;
         }
 
@@ -4130,30 +4398,46 @@ public sealed class Plugin : IDalamudPlugin
         }
         ssStagingPathTask = null;
 
-        var protectedRadius = ActiveDistanceProfile.EmergencyDistance +
-                              (objects.LocalPlayer?.HitboxRadius ?? 0f) + 3f;
+        var protectedRadius = SsStagingProtectedRadius;
         if (path is null || path.Count == 0 ||
             !ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, anchor, protectedRadius, true) ||
-            !PathStaysOutsideProtectedRadius(PlayerPosition(), path, anchor, protectedRadius, true) ||
-            !vnav.MovePathSafe(path, true))
+            !PathStaysOutsideProtectedRadius(PlayerPosition(), path, anchor, protectedRadius, true))
         {
-            log.Information("SS staging candidate rejected: no safely reachable vnavmesh route");
-            selectedSsStagingCandidate = null;
-            if (!TryStartNextSsStagingRoute(now, anchor))
-                nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
+            RejectSsStagingCandidate(now, anchor,
+                "SS staging candidate rejected: no protected flight route to the documented spawn envelope");
             return;
         }
 
-        ssStagingDestination = candidate.Position;
-        selectedSsStagingPath = path;
-        nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
-        status = candidate.IsCrowd
-            ? $"Navigating to crowd-aware SS staging ({candidate.CrowdPopulation} players)"
-            : "Navigating to SS staging area";
-        log.Information(
-            "SS staging candidate selected: {Type}, {Distance:0.0}y from fixed spawn",
-            candidate.IsCrowd ? $"crowd ({candidate.CrowdPopulation} players)" : "standard",
-            HorizontalDistance(candidate.Position, anchor));
+        var groundAnchor = new Vector3(anchor.X, 1024f, anchor.Z);
+        var groundGoal = vnav.PointOnFloorSafe(groundAnchor, 10f);
+        var groundPathTask = groundGoal is null
+            ? null
+            : vnav.PathfindSafe(candidate.Position, groundGoal.Value, false);
+        if (groundGoal is null || groundPathTask is null)
+        {
+            RejectSsStagingCandidate(now, anchor,
+                "SS staging candidate rejected: could not start a ground-connectivity query toward the spawn side");
+            return;
+        }
+
+        pendingSsStagingFlightPath = path;
+        ssStagingGroundPathGoal = groundGoal.Value;
+        ssStagingGroundPathTask = groundPathTask;
+        ssStagingPathStartedUtc = now;
+        status = "Protected flight route found; validating connected landing ground before moving";
+    }
+
+    private void RejectSsStagingCandidate(DateTime now, Vector3 anchor, string reason)
+    {
+        log.Information("{Reason}", reason);
+        status = reason;
+        ssStagingPathTask = null;
+        ssStagingGroundPathTask = null;
+        pendingSsStagingFlightPath = null;
+        ssStagingGroundPathGoal = default;
+        selectedSsStagingCandidate = null;
+        if (!TryStartNextSsStagingRoute(now, anchor))
+            nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
     }
 
     private bool RevalidateSsStagingDestination(Vector3 anchor, out string reason)
@@ -4165,15 +4449,14 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
-        var playerRadius = objects.LocalPlayer?.HitboxRadius ?? 0f;
-        if (HorizontalDistance(candidate.Position, anchor) < ActiveDistanceProfile.WaitingDistance + playerRadius - 0.5f ||
-            HorizontalDistance(candidate.Position, anchor) < ActiveDistanceProfile.EmergencyDistance + playerRadius)
+        if (MathF.Abs(HorizontalDistance(candidate.Position, anchor) - SsStagingTargetRadius) >
+            SsStagingRadiusTolerance)
         {
-            reason = "SS staging destination no longer meets the active safety profile; resampling";
+            reason = $"SS staging destination left the documented {SsStagingTargetRadius:0}y spawn envelope; resampling";
             return false;
         }
 
-        var protectedRadius = ActiveDistanceProfile.EmergencyDistance + playerRadius + 3f;
+        var protectedRadius = SsStagingProtectedRadius;
         if (!ProtectedSegmentIsSafe(PlayerPosition(), candidate.Position, anchor, protectedRadius, true) ||
             !FinalApproachStaysOutsideProtectedRadius(selectedSsStagingPath, anchor, protectedRadius))
         {
@@ -4205,8 +4488,12 @@ public sealed class Plugin : IDalamudPlugin
         ssStagingDestination = null;
         selectedSsStagingCandidate = null;
         ssStagingPathTask = null;
+        ssStagingGroundPathTask = null;
+        pendingSsStagingFlightPath = null;
+        ssStagingGroundPathGoal = default;
         selectedSsStagingPath = null;
         ssStagingArrived = false;
+        ssStagingLandingStartedUtc = DateTime.MinValue;
         nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
     }
 
@@ -4266,7 +4553,10 @@ public sealed class Plugin : IDalamudPlugin
         safePoint = null;
         selectedParkingCandidate = null;
         parkingPathTask = null;
+        parkingGroundPathTask = null;
         parkingPathStartedUtc = DateTime.MinValue;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         selectedParkingPath = null;
         crowdFallbackAnnounced = !preferCrowd;
         var player = PlayerPosition();
@@ -4439,6 +4729,9 @@ public sealed class Plugin : IDalamudPlugin
 
             selectedParkingCandidate = candidate;
             parkingPathTask = pathTask;
+            parkingGroundPathTask = null;
+            pendingParkingFlightPath = null;
+            parkingGroundPathGoal = default;
             parkingPathUsesFlight = fly;
             parkingPathStartedUtc = DateTime.UtcNow;
             safePoint = null;
@@ -4453,15 +4746,68 @@ public sealed class Plugin : IDalamudPlugin
         safePoint = null;
         selectedParkingCandidate = null;
         parkingPathTask = null;
+        parkingGroundPathTask = null;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         selectedParkingPath = null;
         return false;
     }
 
     private void PollCrowdParkingPath(IBattleChara target, DateTime now)
     {
-        var task = parkingPathTask;
         var candidate = selectedParkingCandidate;
-        if (task is null || candidate is null || !candidate.RequiresProtectedRoute)
+        if (candidate is null || !candidate.RequiresProtectedRoute)
+            return;
+
+        if (parkingGroundPathTask is not null)
+        {
+            var groundTask = parkingGroundPathTask;
+            if (!groundTask.IsCompleted)
+            {
+                if ((now - parkingPathStartedUtc).TotalSeconds <= CrowdPathQueryTimeoutSeconds)
+                {
+                    status = "Checking that the parking ground connects to the hunt side without a long detour";
+                    return;
+                }
+                RejectParkingCandidate(target, now,
+                    "Parking candidate rejected: ground-connectivity query timed out");
+                return;
+            }
+
+            List<Vector3>? groundPath = null;
+            try
+            {
+                if (groundTask.IsCompletedSuccessfully)
+                    groundPath = groundTask.Result;
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "Parking ground-connectivity query failed");
+            }
+            parkingGroundPathTask = null;
+
+            if (!IsReasonableGroundConnection(candidate.Position, parkingGroundPathGoal, groundPath,
+                    out var groundReason))
+            {
+                RejectParkingCandidate(target, now, $"Parking candidate rejected: {groundReason}");
+                return;
+            }
+
+            var flightPath = pendingParkingFlightPath;
+            if (flightPath is null || flightPath.Count == 0)
+            {
+                RejectParkingCandidate(target, now,
+                    "Parking candidate rejected: validated flight route was lost");
+                return;
+            }
+
+            pendingParkingFlightPath = null;
+            AcceptParkingPath(target, candidate, flightPath, now);
+            return;
+        }
+
+        var task = parkingPathTask;
+        if (task is null)
             return;
 
         if (!task.IsCompleted)
@@ -4476,12 +4822,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            parkingPathTask = null;
-            selectedParkingCandidate = null;
-            log.Information(candidate.IsRandomizedRetreat
+            RejectParkingCandidate(target, now, candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: protected vnavmesh path query timed out"
                 : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: protected vnavmesh path query timed out");
-            ContinueParkingAfterCrowdRejection(target, now);
             return;
         }
 
@@ -4499,11 +4842,9 @@ public sealed class Plugin : IDalamudPlugin
         parkingPathTask = null;
         if (path is null || path.Count == 0)
         {
-            selectedParkingCandidate = null;
-            log.Information(candidate.IsRandomizedRetreat
+            RejectParkingCandidate(target, now, candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: vnavmesh found no protected route"
                 : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: vnavmesh found no protected route");
-            ContinueParkingAfterCrowdRejection(target, now);
             return;
         }
 
@@ -4515,25 +4856,75 @@ public sealed class Plugin : IDalamudPlugin
             !PathStaysOutsideProtectedRadius(PlayerPosition(), path, target.Position, protectedRadius,
                 allowOutwardEscape))
         {
-            selectedParkingCandidate = null;
             var rejection = candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: crosses safety radius"
                 : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: route crosses mark safety radius";
-            log.Information("{Rejection}", rejection);
-            status = rejection;
-            ContinueParkingAfterCrowdRejection(target, now);
+            RejectParkingCandidate(target, now, rejection);
             return;
         }
 
         if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
-            ClearanceAtPoint(candidate.Position, target) > MaximumParkingClearance + 0.5f ||
-            !vnav.MovePathSafe(path, parkingPathUsesFlight))
+            ClearanceAtPoint(candidate.Position, target) > MaximumParkingClearance + 0.5f)
         {
-            selectedParkingCandidate = null;
-            log.Information(candidate.IsRandomizedRetreat
+            RejectParkingCandidate(target, now, candidate.IsRandomizedRetreat
                 ? "Retreat candidate rejected: destination or protected route became unavailable"
                 : $"Rejected {(candidate.IsCrowd ? "crowd" : "geometric")} parking candidate: destination or protected route became unavailable");
-            ContinueParkingAfterCrowdRejection(target, now);
+            return;
+        }
+
+        if (parkingPathUsesFlight)
+        {
+            if (!TryStartParkingGroundConnectivityQuery(candidate, target, path, now))
+            {
+                RejectParkingCandidate(target, now,
+                    "Parking candidate rejected: could not validate connected ground on the hunt side");
+            }
+            return;
+        }
+
+        AcceptParkingPath(target, candidate, path, now);
+    }
+
+    private bool TryStartParkingGroundConnectivityQuery(
+        ParkingCandidate candidate,
+        IBattleChara target,
+        List<Vector3> flightPath,
+        DateTime now)
+    {
+        var away = candidate.Position - target.Position;
+        away.Y = 0f;
+        if (away.LengthSquared() < 0.01f)
+            return false;
+        away = Vector3.Normalize(away);
+        var tagCenterRange = target.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) +
+                             TagApproachClearance;
+        var intendedGoal = target.Position + away * tagCenterRange;
+        intendedGoal.Y = 1024f;
+        var groundGoal = vnav.PointOnFloorSafe(intendedGoal, 8f);
+        var groundTask = groundGoal is null
+            ? null
+            : vnav.PathfindSafe(candidate.Position, groundGoal.Value, false);
+        if (groundGoal is null || groundTask is null)
+            return false;
+
+        pendingParkingFlightPath = flightPath;
+        parkingGroundPathGoal = groundGoal.Value;
+        parkingGroundPathTask = groundTask;
+        parkingPathStartedUtc = now;
+        status = "Protected flight route found; validating connected landing ground before moving";
+        return true;
+    }
+
+    private void AcceptParkingPath(
+        IBattleChara target,
+        ParkingCandidate candidate,
+        List<Vector3> path,
+        DateTime now)
+    {
+        if (!vnav.MovePathSafe(path, parkingPathUsesFlight))
+        {
+            RejectParkingCandidate(target, now,
+                "Parking candidate rejected: validated route became unavailable before movement");
             return;
         }
 
@@ -4562,11 +4953,27 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private void RejectParkingCandidate(IBattleChara target, DateTime now, string reason)
+    {
+        log.Information("{Reason}", reason);
+        status = reason;
+        parkingPathTask = null;
+        parkingGroundPathTask = null;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
+        selectedParkingCandidate = null;
+        ContinueParkingAfterCrowdRejection(target, now);
+    }
+
     private void ContinueParkingAfterCrowdRejection(IBattleChara target, DateTime now)
     {
         var fly = parkingPathUsesFlight;
         safePoint = null;
         selectedParkingPath = null;
+        parkingPathTask = null;
+        parkingGroundPathTask = null;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         parkingPathStartedUtc = DateTime.MinValue;
         if (TryStartNextParkingRoute(fly, target))
         {
@@ -4784,6 +5191,47 @@ public sealed class Plugin : IDalamudPlugin
         return HorizontalDistance(closest, point);
     }
 
+    private static bool IsReasonableGroundConnection(
+        Vector3 start,
+        Vector3 goal,
+        List<Vector3>? path,
+        out string reason)
+    {
+        if (path is null || path.Count == 0)
+        {
+            reason = "vnavmesh found no ground path to the hunt side";
+            return false;
+        }
+
+        var pathLength = 0f;
+        var previous = start;
+        foreach (var waypoint in path)
+        {
+            pathLength += Vector3.Distance(previous, waypoint);
+            previous = waypoint;
+        }
+
+        var endpointGap = HorizontalDistance(previous, goal);
+        if (endpointGap > MaximumGroundPathEndpointGap)
+        {
+            reason = $"ground path ended {endpointGap:0.0}y short of the hunt side";
+            return false;
+        }
+
+        var directDistance = MathF.Max(1f, Vector3.Distance(start, goal));
+        var maximumReasonableLength = MathF.Max(
+            directDistance * MaximumGroundPathDetourRatio,
+            directDistance + MaximumGroundPathDetourAllowance);
+        if (pathLength > maximumReasonableLength)
+        {
+            reason = $"ground path detours {pathLength:0.0}y for a {directDistance:0.0}y direct approach";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
     private IBattleChara? FindMark()
     {
         if (current is null || clientState.TerritoryType != current.TerritoryId)
@@ -4822,7 +5270,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (state == SentinelState.ResetToUldah && killConfirmed && combat.IsPlayerDead &&
+        if (state == SentinelState.ResetToUldah && killConfirmed &&
             activeSsProfile == profile)
         {
             QueueSsAfterCompletedHunt(null, profile, DateTime.UtcNow, reason);
@@ -4905,6 +5353,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         var ssAlert = reportedSs ?? BuildReservedSsWatch(current, profile, now);
+        if (ssAlert is not null && HuntCatalog.TryGetSsStagingLocation(current.TerritoryId, out var location))
+            ssAlert = ssAlert with { MapX = location.MapX, MapY = location.MapY };
         if (ssAlert is not null && reportedSs is null && ssSpawnAnnounced)
             ssAlert = ssAlert with { HuntType = "ssrank" };
         if (ssAlert is null)
@@ -4969,9 +5419,6 @@ public sealed class Plugin : IDalamudPlugin
     private static bool IsReservedSsWatch(HuntAlertSnapshot alert) =>
         alert.HuntType.Equals(ReservedSsWatchHuntType, StringComparison.OrdinalIgnoreCase);
 
-    private static bool ApproximatelySameMapPoint(HuntAlertSnapshot left, HuntAlertSnapshot right) =>
-        Math.Abs(left.MapX - right.MapX) < 0.1f && Math.Abs(left.MapY - right.MapY) < 0.1f;
-
     private void RemoveQueuedSsReservation(SsProfile profile)
     {
         if (current is null)
@@ -5001,8 +5448,29 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is null || killConfirmed)
             return;
+
+        // An external notice or generic reward line must never overrule the live game object.
+        // This is the final shared gate for every path into PostKillSsGrace/ResetToUldah.
+        if (clientState.TerritoryType == current.TerritoryId &&
+            travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+        {
+            var visiblyLiveMark = FindMark();
+            if (visiblyLiveMark is not null && !visiblyLiveMark.IsDead && visiblyLiveMark.CurrentHp > 0)
+            {
+                MarkWasIdentified(visiblyLiveMark);
+                status = $"Ignored conflicting death evidence for {current.CreatureName}: the exact current entity is still alive";
+                log.Warning(
+                    "Rejected conflicting kill evidence because the current entity is visibly alive: mark={Mark}, object={ObjectId}, HP={Hp:0.0}%, world={World}, territory={Territory}, instance={Instance}, evidence={Evidence}",
+                    current.CreatureName, visiblyLiveMark.GameObjectId,
+                    CombatController.HpPercent(visiblyLiveMark), current.World,
+                    current.TerritoryId, current.Instance, reason);
+                return;
+            }
+        }
+
         killConfirmed = true;
         pullResetCandidateSinceUtc = DateTime.MinValue;
+        ResetPendingTagDispatch();
         discardAtUldah = false;
         discardReason = string.Empty;
         vnav.StopSafe();
@@ -5010,12 +5478,34 @@ public sealed class Plugin : IDalamudPlugin
         MarkKilled(current, now);
         log.Information("Hunt cleared/completed with positive evidence: {Mark} on {World}; reason={Reason}",
             current.CreatureName, current.World, reason);
-        if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName) &&
+        if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName))
+            activeSsProfile = HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
+        var normalSInCurrentContext =
+            HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName) &&
             clientState.TerritoryType == current.TerritoryId &&
-            travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+            travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase);
+        if (normalSInCurrentContext)
         {
             var hadLatchedSsEvidence = TryConsumePendingSsChainEvidence(now, out var latchedSsReason);
-            activeSsProfile = HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
+
+            // PostKillSsGrace is reserved for a hunt that this client actually identified and
+            // observed in combat. A confirmed dead-on-arrival hunt has no local pull cycle to
+            // grace; begin recovery immediately, preserving any already-observed SS chain next.
+            if (!markEverIdentified || !markCombatObserved)
+            {
+                if (hadLatchedSsEvidence && activeSsProfile is not null)
+                {
+                    QueueSsAfterCompletedHunt(null, activeSsProfile, now,
+                        $"{latchedSsReason}; the S rank was confirmed dead before local combat observation");
+                    return;
+                }
+
+                nextActionUtc = now;
+                SetState(SentinelState.ResetToUldah,
+                    $"{reason}; confirmed dead before arrival/combat, returning to Ul'dah now");
+                return;
+            }
+
             ssChainObserved = false;
             ssSpawnAnnounced = false;
             postKillSsGraceDeadlineUtc = now.AddSeconds(config.PostKillSsGraceSeconds);
@@ -5031,7 +5521,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ClearPendingSsChainEvidence();
-        nextActionUtc = now.AddSeconds(2);
+        nextActionUtc = now;
         SetState(SentinelState.ResetToUldah,
             $"{reason}; returning to Ul'dah on the current visited world");
     }
@@ -5059,7 +5549,10 @@ public sealed class Plugin : IDalamudPlugin
         safePoint = null;
         selectedParkingCandidate = null;
         parkingPathTask = null;
+        parkingGroundPathTask = null;
         parkingPathStartedUtc = DateTime.MinValue;
+        pendingParkingFlightPath = null;
+        parkingGroundPathGoal = default;
         selectedParkingPath = null;
         crowdFallbackAnnounced = false;
         territoryAetheryteId = 0;
@@ -5074,6 +5567,7 @@ public sealed class Plugin : IDalamudPlugin
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         activeTagActionId = 0;
+        ResetPendingTagDispatch();
         discardAtUldah = false;
         discardReason = string.Empty;
         ssChainObserved = false;
@@ -5125,6 +5619,19 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private void ResetPendingTagDispatch() => pendingTagDispatch = null;
+
+    private static bool ActionSequenceWasHandled(
+        ushort baselineSequence,
+        ushort submittedSequence,
+        ushort handledSequence)
+    {
+        var submittedDistance = (ushort)(submittedSequence - baselineSequence);
+        var handledDistance = (ushort)(handledSequence - baselineSequence);
+        return submittedDistance > 0 && submittedDistance < 0x8000 &&
+               handledDistance >= submittedDistance && handledDistance < 0x8000;
+    }
+
     private bool ObservePullCycleReset(IBattleChara target, DateTime now)
     {
         if (current is null || !markEverIdentified || !pullCycleCombatObserved || !pullCycleTagged ||
@@ -5165,6 +5672,7 @@ public sealed class Plugin : IDalamudPlugin
         pullCycleCombatObserved = false;
         pullCycleTagged = false;
         activeTagActionId = 0;
+        ResetPendingTagDispatch();
         postTagRetreatActive = false;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         vnav.StopSafe();
@@ -5236,27 +5744,45 @@ public sealed class Plugin : IDalamudPlugin
         return isHuntReward;
     }
 
-    private bool KillNoticeMatchesWorld(string killedWorld, HuntAlertSnapshot alert)
+    private bool KillNoticeMatchesAlert(
+        string killedWorld,
+        uint killedTerritory,
+        int killedInstance,
+        HuntAlertSnapshot alert)
     {
-        if (!string.IsNullOrWhiteSpace(killedWorld))
-            return alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(killedWorld) &&
+            !alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (killedTerritory != 0 && alert.TerritoryId != killedTerritory)
+            return false;
+        if (killedInstance > 0 && alert.Instance != killedInstance)
+            return false;
 
-        return clientState.TerritoryType == alert.TerritoryId &&
-               travel.CurrentWorld.Equals(alert.World, StringComparison.OrdinalIgnoreCase);
+        // If the notice omitted any routing identity, accept it only when the missing identity
+        // can be proven from the character's current World/territory/instance. This prevents a
+        // same-name notice from another instance clearing the active or queued hunt.
+        var physicallyInAlertContext =
+            clientState.TerritoryType == alert.TerritoryId &&
+            travel.CurrentWorld.Equals(alert.World, StringComparison.OrdinalIgnoreCase) &&
+            (travel.CurrentInstance <= 0 || travel.CurrentInstance == alert.Instance);
+        if (string.IsNullOrWhiteSpace(killedWorld) || killedTerritory == 0 || killedInstance <= 0)
+            return physicallyInAlertContext;
+
+        return true;
     }
 
-    private void RemoveKilledQueuedAlerts(string sonarText, string killedWorld)
+    private void RemoveKilledQueuedAlerts(
+        string sonarText,
+        string killedWorld,
+        uint killedTerritory,
+        int killedInstance)
     {
         var removed = pendingAlerts.Where(alert =>
             HuntCatalog.TextMentionsMark(sonarText, alert.CreatureName) &&
-            (string.IsNullOrWhiteSpace(killedWorld)
-                ? alert.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
-                : alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase))).ToArray();
+            KillNoticeMatchesAlert(killedWorld, killedTerritory, killedInstance, alert)).ToArray();
         var unresolvedRemoved = unresolvedFaloopAlerts
             .Where(pair => HuntCatalog.TextMentionsMark(sonarText, pair.Value.Alert.CreatureName) &&
-                           (string.IsNullOrWhiteSpace(killedWorld)
-                               ? pair.Value.Alert.World.Equals(travel.CurrentWorld, StringComparison.OrdinalIgnoreCase)
-                               : pair.Value.Alert.World.Equals(killedWorld, StringComparison.OrdinalIgnoreCase)))
+                           KillNoticeMatchesAlert(killedWorld, killedTerritory, killedInstance, pair.Value.Alert))
             .Select(pair => pair.Key).ToArray();
         if (removed.Length == 0 && unresolvedRemoved.Length == 0)
             return;
@@ -5795,6 +6321,14 @@ internal sealed record SsStagingCandidate(
     bool IsCrowd,
     int CrowdPopulation,
     Vector3 CrowdCenter);
+
+internal sealed record TagDispatch(
+    uint ActionId,
+    ulong TargetId,
+    ushort BaselineSequence,
+    ushort? Sequence,
+    bool DeferredForTarget,
+    DateTime SubmittedAtUtc);
 
 internal sealed record TerritoryAetheryteOverride(
     uint AetheryteId,
