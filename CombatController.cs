@@ -7,7 +7,17 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace SRankSentinel;
 
-internal readonly record struct TagAttemptResult(bool Attempted, bool Accepted);
+internal readonly record struct TagAttemptResult(
+    bool Submitted,
+    bool ClientAccepted,
+    ushort SequenceBefore,
+    ushort SequenceAfter,
+    bool DeferredForTarget);
+
+internal readonly record struct TagActionState(
+    ushort LastUsedSequence,
+    ushort LastHandledSequence,
+    bool QueuedForTarget);
 
 internal sealed class CombatController(
     IGameGui gameGui,
@@ -37,23 +47,54 @@ internal sealed class CombatController(
         return adjustedActionId == 0 ? actionId : adjustedActionId;
     }
 
-    public void TargetMark(IBattleChara mark) => targets.Target = mark;
+    public bool TargetMark(IBattleChara mark)
+    {
+        targets.Target = mark;
+        return targets.Target?.GameObjectId == mark.GameObjectId;
+    }
 
     public unsafe TagAttemptResult TrySingleTag(uint actionId, IBattleChara mark)
     {
         if (actionId == 0 || IsPlayerDead || mark.IsDead || mark.CurrentHp == 0)
-            return new TagAttemptResult(false, false);
+            return new TagAttemptResult(false, false, 0, 0, false);
 
         TargetMark(mark);
 
         var manager = ActionManager.Instance();
         if (manager is null || manager->GetActionStatus(ActionType.Action, actionId, mark.GameObjectId) != 0)
-            return new TagAttemptResult(false, false);
+            return new TagAttemptResult(false, false, 0, 0, false);
 
-        // Once UseAction is invoked, the caller permanently closes the attack gate for this mark.
-        // The return value only tells us whether the client accepted that single attempt.
+        var sequenceBefore = manager->LastUsedActionSequence;
         var accepted = manager->UseAction(ActionType.Action, actionId, mark.GameObjectId);
-        return new TagAttemptResult(true, accepted);
+        var queuedForTarget = manager->ActionQueued &&
+                              manager->QueuedActionType == ActionType.Action &&
+                              manager->QueuedActionId == actionId &&
+                              (ulong)manager->QueuedTargetId == mark.GameObjectId;
+        var castingForTarget = manager->CastActionType == ActionType.Action &&
+                               manager->CastActionId == actionId &&
+                               (ulong)manager->CastTargetId == mark.GameObjectId;
+        return new TagAttemptResult(
+            true,
+            accepted,
+            sequenceBefore,
+            manager->LastUsedActionSequence,
+            queuedForTarget || castingForTarget);
+    }
+
+    public unsafe TagActionState ReadTagActionState(uint actionId, ulong targetId)
+    {
+        var manager = ActionManager.Instance();
+        if (manager is null)
+            return default;
+
+        var queuedForTarget = manager->ActionQueued &&
+                              manager->QueuedActionType == ActionType.Action &&
+                              manager->QueuedActionId == actionId &&
+                              (ulong)manager->QueuedTargetId == targetId;
+        return new TagActionState(
+            manager->LastUsedActionSequence,
+            manager->LastHandledActionSequence,
+            queuedForTarget);
     }
 
     private static uint GetBaseRangedTagAction(uint classJobId) => classJobId switch
