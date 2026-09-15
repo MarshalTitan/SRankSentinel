@@ -27,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
     private const double ReturnTeleportRetrySeconds = 3;
     private const double ReturnTransitionTimeoutSeconds = 45;
     private const double ReturnRecoveryWatchdogSeconds = 120;
+    private const double DeadPostKillRewardGraceSeconds = 2.0;
     private const float CrowdSearchRadius = 90f;
     private const float CrowdClusterLinkDistance = 14f;
     private const float CrowdRevalidationRadius = 18f;
@@ -200,6 +201,7 @@ public sealed class Plugin : IDalamudPlugin
     private int returnActionAttempts;
     private int returnConfirmationAttempts;
     private int returnTeleportAttempts;
+    private DateTime deadPostKillRewardGraceDeadlineUtc = DateTime.MinValue;
     private SentinelState incidentalAggroResumeState = SentinelState.Idle;
     private DateTime incidentalAggroStartedUtc = DateTime.MinValue;
     private DateTime incidentalAggroClearSinceUtc = DateTime.MinValue;
@@ -1764,6 +1766,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TickResetToUldah(DateTime now)
     {
+        if (TickDeadPostKillRewardGrace(now))
+            return;
+
         UpdateReturnRecoveryWatchdog(now);
 
         // The game can open its normal death Return prompt before positive kill evidence moves
@@ -2482,6 +2487,56 @@ public sealed class Plugin : IDalamudPlugin
         nextActionUtc = now.AddSeconds(ReturnActionRetrySeconds);
     }
 
+    private bool TickDeadPostKillRewardGrace(DateTime now)
+    {
+        if (deadPostKillRewardGraceDeadlineUtc == DateTime.MinValue)
+            return false;
+
+        if (!killConfirmed || !tagAttempted || !pullCycleTagged)
+        {
+            ResetDeadPostKillRewardGrace();
+            return false;
+        }
+
+        // A successful Raise immediately restores the normal living recovery path. Until then,
+        // retain the dead character in the hunt territory so reward/credit processing has a full
+        // two seconds after the positively confirmed death before Return can be adopted or used.
+        if (!combat.IsPlayerDead)
+        {
+            ResetDeadPostKillRewardGrace();
+            return false;
+        }
+
+        if (now < deadPostKillRewardGraceDeadlineUtc)
+        {
+            var remaining = Math.Max(0, (deadPostKillRewardGraceDeadlineUtc - now).TotalSeconds);
+            status = combat.TryAcceptRaise()
+                ? "Accepted Raise during the post-kill reward grace; waiting for revival"
+                : $"Current hunt confirmed dead — waiting {remaining:0.0}s for reward/credit processing before Return";
+            return true;
+        }
+
+        log.Information("Post-kill reward grace complete — Returning to Ul'dah.");
+        status = "Post-kill reward grace complete — Returning to Ul'dah";
+        ResetDeadPostKillRewardGrace();
+        return false;
+    }
+
+    private void BeginDeadPostKillRewardGrace(DateTime now)
+    {
+        ResetDeadPostKillRewardGrace();
+        if (!combat.IsPlayerDead || !tagAttempted || !pullCycleTagged)
+            return;
+
+        deadPostKillRewardGraceDeadlineUtc = now.AddSeconds(DeadPostKillRewardGraceSeconds);
+        log.Information(
+            "Current hunt confirmed dead — waiting {Seconds:0.0}s for reward/credit processing before Return.",
+            DeadPostKillRewardGraceSeconds);
+    }
+
+    private void ResetDeadPostKillRewardGrace() =>
+        deadPostKillRewardGraceDeadlineUtc = DateTime.MinValue;
+
     private void ReportReturnRecoveryFailure(string message)
     {
         status = $"Return recovery failure: {message}";
@@ -2513,6 +2568,7 @@ public sealed class Plugin : IDalamudPlugin
         returnActionAttempts = 0;
         returnConfirmationAttempts = 0;
         returnTeleportAttempts = 0;
+        ResetDeadPostKillRewardGrace();
     }
 
     private void TickWorldVisit(DateTime now)
@@ -5475,6 +5531,7 @@ public sealed class Plugin : IDalamudPlugin
         discardReason = string.Empty;
         vnav.StopSafe();
         var now = DateTime.UtcNow;
+        BeginDeadPostKillRewardGrace(now);
         MarkKilled(current, now);
         log.Information("Hunt cleared/completed with positive evidence: {Mark} on {World}; reason={Reason}",
             current.CreatureName, current.World, reason);
