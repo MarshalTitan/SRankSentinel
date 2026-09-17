@@ -68,8 +68,17 @@ public sealed class Plugin : IDalamudPlugin
     private const double ApproachRouteStallSeconds = 15;
     private const double ApproachMovementStartGraceSeconds = 8;
     private const double ApproachSlowPathfindNoticeSeconds = 20;
+    private const double ApproachPathfindTimeoutSeconds = 30;
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
+    private const int ApproachProjectionPassesBeforeApproximateFlight = 2;
+    private const int ApproachProjectionPassesBeforeAbandon = 6;
+    private const int ApproachFailuresBeforeAlternateAetheryte = 4;
+    private const int ApproachFailuresBeforeAbandon = 8;
+    private const float ApproachVerticalProjectionHalfExtent = 1024f;
+    private const double AlternateAetheryteTeleportStartTimeoutSeconds = 12;
+    private const int AetheryteTeleportAttemptLimit = 3;
+    private const byte AetheryteMapMarkerDataType = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -103,6 +112,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Queue<SsStagingCandidate> ssStagingCandidates = new();
     private readonly Queue<Vector3> approachProjectionCandidates = new();
     private readonly Queue<Vector3> approachRouteCandidates = new();
+    private readonly List<TerritoryAetheryteCandidate> territoryAetheryteCandidates = new();
 
     private bool configOpen;
     private HuntAlertSnapshot? current;
@@ -120,8 +130,12 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime approachMovementSubmittedUtc = DateTime.MinValue;
     private int approachProjectionCandidateIndex;
     private int approachProjectionCandidateCount;
+    private int approachEmptyProjectionPasses;
+    private int approachFailuresAtCurrentAetheryte;
     private int approachEarlyStops;
+    private bool approachPointIsApproximate;
     private bool approachRouteIsSegment;
+    private bool approachRouteUsesFlight = true;
     private bool approachStartingEgressActive;
     private bool approachPathfindingObserved;
     private bool approachMovementObserved;
@@ -148,6 +162,10 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime returnLandingLastProgressUtc = DateTime.MinValue;
     private int returnLandingAttempt;
     private uint territoryAetheryteId;
+    private int territoryAetheryteCandidateIndex = -1;
+    private int territoryAetheryteTeleportAttempts;
+    private int alternateAetheryteTeleportAttempts;
+    private bool alternateAetheryteZoningObserved;
     private SentinelState state = SentinelState.Idle;
     private DateTime stateSinceUtc = DateTime.UtcNow;
     private DateTime lastTickUtc = DateTime.MinValue;
@@ -1419,8 +1437,16 @@ public sealed class Plugin : IDalamudPlugin
     private void PrepareCurrentTravel()
     {
         territoryAetheryteId = 0;
+        territoryAetheryteCandidates.Clear();
+        territoryAetheryteCandidateIndex = -1;
+        territoryAetheryteTeleportAttempts = 0;
+        alternateAetheryteTeleportAttempts = 0;
+        alternateAetheryteZoningObserved = false;
         alertPoint = null;
         approachPoint = null;
+        approachPointIsApproximate = false;
+        approachEmptyProjectionPasses = 0;
+        approachFailuresAtCurrentAetheryte = 0;
         safePoint = null;
         selectedParkingCandidate = null;
         parkingPathTask = null;
@@ -1511,13 +1537,17 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         territoryAetheryteId = 0;
+        territoryAetheryteCandidates.Clear();
+        territoryAetheryteCandidateIndex = -1;
 
         // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
         // Idyllshire followed by the Prologue Gate aethernet destination.
         if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
             travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
         {
-            territoryAetheryteId = HuntCatalog.IdyllshireAetheryteId;
+            territoryAetheryteCandidates.Add(new TerritoryAetheryteCandidate(
+                HuntCatalog.IdyllshireAetheryteId, "Idyllshire", null, 0f, "required Prologue Gate route"));
+            SelectTerritoryAetheryteCandidate(0, "required gateway route");
             return;
         }
 
@@ -1529,60 +1559,155 @@ public sealed class Plugin : IDalamudPlugin
         if (TerritoryAetheryteOverrides.TryGetValue(current.TerritoryId, out var territoryOverride))
         {
             if (attuned.Any(row => row.RowId == territoryOverride.AetheryteId))
-                territoryAetheryteId = territoryOverride.AetheryteId;
+                territoryAetheryteCandidates.Add(new TerritoryAetheryteCandidate(
+                    territoryOverride.AetheryteId, territoryOverride.AetheryteName, null, 0f,
+                    "territory safety override"));
             log.Information("Territory override: {Territory} -> {Aetheryte}",
                 territoryOverride.TerritoryName, territoryOverride.AetheryteName);
-            if (territoryAetheryteId == 0)
+            if (territoryAetheryteCandidates.Count == 0)
                 log.Warning(
                     "Required territory override {Aetheryte} ({AetheryteId}) is not currently usable; refusing to choose another aetheryte in {Territory}",
                     territoryOverride.AetheryteName, territoryOverride.AetheryteId, territoryOverride.TerritoryName);
         }
         else if (alertPoint is not null)
         {
-            territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
+            BuildTerritoryAetheryteCandidates(attuned, alertPoint.Value);
         }
 
-        if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
-            territoryAetheryteId = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId).RowId;
-        if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
-            territoryAetheryteId = attuned.FirstOrDefault().RowId;
+        if (territoryAetheryteCandidates.Count == 0 &&
+            !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
+        {
+            var preferred = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId);
+            if (preferred.RowId != 0)
+                AddFallbackAetheryteCandidate(preferred, "configured fallback; no coordinate position resolved");
+            foreach (var aetheryte in attuned.Where(row => row.RowId != preferred.RowId))
+                AddFallbackAetheryteCandidate(aetheryte, "unranked fallback; no coordinate position resolved");
+        }
+
+        if (territoryAetheryteCandidates.Count > 0)
+            SelectTerritoryAetheryteCandidate(0, "lowest estimated onward travel cost");
     }
 
-    private uint SelectNearestUsableAetheryte(
+    private void BuildTerritoryAetheryteCandidates(
         IReadOnlyCollection<Aetheryte> attuned,
         Vector3 destination)
     {
-        var candidates = new List<(uint Id, string Name, float Distance)>();
+        if (current is null)
+            return;
+
+        var map = data.GetExcelSheet<Map>()
+            .FirstOrDefault(row => row.TerritoryType.RowId == current.TerritoryId);
+        var ranked = new List<TerritoryAetheryteCandidate>();
+        var unranked = new List<TerritoryAetheryteCandidate>();
+
         foreach (var aetheryte in attuned)
         {
-            var levelReference = aetheryte.Level.FirstOrDefault(reference =>
-                reference.RowId != 0 &&
-                reference.IsValid &&
-                reference.Value.Territory.RowId == current?.TerritoryId);
-            if (levelReference.RowId == 0 || !levelReference.IsValid)
-                continue;
-
-            var level = levelReference.Value;
-            var distanceYalms = HorizontalDistance(destination, new Vector3(level.X, level.Y, level.Z));
             var name = aetheryte.PlaceName.IsValid
                 ? aetheryte.PlaceName.Value.Name.ToString()
                 : $"Aetheryte {aetheryte.RowId}";
-            candidates.Add((aetheryte.RowId, name, distanceYalms));
-            log.Information("Teleport candidate: {Aetheryte} - {Distance:0}y from mark",
-                name, distanceYalms);
+
+            Vector3? levelPosition = null;
+            foreach (var reference in aetheryte.Level.Where(reference =>
+                         reference.RowId != 0 && reference.IsValid &&
+                         reference.Value.Territory.RowId == current.TerritoryId))
+            {
+                var level = reference.Value;
+                var position = new Vector3(level.X, level.Y, level.Z);
+                if (levelPosition is null ||
+                    HorizontalDistance(position, destination) < HorizontalDistance(levelPosition.Value, destination))
+                    levelPosition = position;
+            }
+
+            Vector3? markerPosition = null;
+            if (map.RowId != 0 && map.SizeFactor > 0 &&
+                data.GetSubrowExcelSheet<MapMarker>().TryGetRow(map.RowId, out var mapMarkers))
+            {
+                var marker = mapMarkers.FirstOrDefault(candidate =>
+                    candidate.DataType == AetheryteMapMarkerDataType &&
+                    candidate.DataKey.RowId == aetheryte.RowId);
+                if (marker.DataKey.RowId == aetheryte.RowId)
+                {
+                    var divisor = map.SizeFactor / 2f;
+                    var markerMapX = marker.X / divisor + 1f;
+                    var markerMapY = marker.Y / divisor + 1f;
+                    var payload = new MapLinkPayload(current.TerritoryId, map.RowId, markerMapX, markerMapY);
+                    markerPosition = new Vector3(payload.RawX / 1000f, 0f, payload.RawY / 1000f);
+                }
+            }
+
+            var selectedPosition = levelPosition ?? markerPosition;
+            var source = levelPosition is not null ? "linked Level position" :
+                markerPosition is not null ? "map-marker fallback" : "unresolved position";
+            if (levelPosition is not null && markerPosition is not null)
+            {
+                var disagreement = HorizontalDistance(levelPosition.Value, markerPosition.Value);
+                if (disagreement > 100f)
+                {
+                    selectedPosition = markerPosition;
+                    source = "map-marker fallback (linked Level disagreed)";
+                    log.Warning(
+                        "Aetheryte position disagreement for {Aetheryte}: linked Level and map marker differ by {Distance:0}y; using the map marker that shares the hunt-coordinate transform",
+                        name, disagreement);
+                }
+            }
+
+            if (selectedPosition is null)
+            {
+                unranked.Add(new TerritoryAetheryteCandidate(
+                    aetheryte.RowId, name, null, float.PositiveInfinity, source));
+                continue;
+            }
+
+            var cost = HorizontalDistance(destination, selectedPosition.Value);
+            ranked.Add(new TerritoryAetheryteCandidate(
+                aetheryte.RowId, name, selectedPosition, cost, source));
         }
 
-        var selected = candidates.OrderBy(candidate => candidate.Distance).FirstOrDefault();
-        if (selected.Id == 0)
+        foreach (var candidate in ranked.OrderBy(candidate => candidate.EstimatedCostYalms))
         {
-            log.Warning("Usable aetherytes were found for territory {TerritoryId}, but none had a linked territory Level position; using the configured fallback",
-                current?.TerritoryId ?? 0);
-            return 0;
+            territoryAetheryteCandidates.Add(candidate);
+            log.Information(
+                "Evaluating hunt approach: {Aetheryte} = {Distance:0}y estimated onward travel ({Source})",
+                candidate.Name, candidate.EstimatedCostYalms, candidate.PositionSource);
         }
 
-        log.Information("Selected nearest aetheryte: {Aetheryte} ({Distance:0}y from mark)",
-            selected.Name, selected.Distance);
-        return selected.Id;
+        foreach (var candidate in unranked.OrderBy(candidate =>
+                     candidate.Id == current.PreferredAetheryteId ? 0 : 1))
+        {
+            territoryAetheryteCandidates.Add(candidate);
+            log.Warning(
+                "Evaluating hunt approach: {Aetheryte} has no resolvable position and remains an ordered fallback",
+                candidate.Name);
+        }
+    }
+
+    private void AddFallbackAetheryteCandidate(Aetheryte aetheryte, string reason)
+    {
+        var name = aetheryte.PlaceName.IsValid
+            ? aetheryte.PlaceName.Value.Name.ToString()
+            : $"Aetheryte {aetheryte.RowId}";
+        territoryAetheryteCandidates.Add(new TerritoryAetheryteCandidate(
+            aetheryte.RowId, name, null, float.PositiveInfinity, reason));
+    }
+
+    private bool SelectTerritoryAetheryteCandidate(int index, string reason)
+    {
+        if (index < 0 || index >= territoryAetheryteCandidates.Count)
+            return false;
+
+        territoryAetheryteCandidateIndex = index;
+        var selected = territoryAetheryteCandidates[index];
+        territoryAetheryteId = selected.Id;
+        territoryAetheryteTeleportAttempts = 0;
+        alternateAetheryteTeleportAttempts = 0;
+        log.Information(
+            "Selected hunt approach aetheryte {Aetheryte} ({AetheryteId}); estimate={Distance}; source={Source}; reason={Reason}",
+            selected.Name, selected.Id,
+            float.IsPositiveInfinity(selected.EstimatedCostYalms)
+                ? "unknown"
+                : $"{selected.EstimatedCostYalms:0}y",
+            selected.PositionSource, reason);
+        return true;
     }
 
     private void OnFrameworkUpdate(IFramework _)
@@ -1700,6 +1825,12 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.WaitForTerritory:
                 TickWaitForTerritory(now);
+                return;
+            case SentinelState.TeleportToAlternateAetheryte:
+                TickTeleportToAlternateAetheryte(now);
+                return;
+            case SentinelState.WaitForAlternateAetheryte:
+                TickWaitForAlternateAetheryte(now);
                 return;
             case SentinelState.OpenHinterlandsGateway:
                 TickOpenHinterlandsGateway(now);
@@ -2715,8 +2846,31 @@ public sealed class Plugin : IDalamudPlugin
             UseGeneralAction(23);
         else if (travel.Teleport(territoryAetheryteId))
         {
+            territoryAetheryteTeleportAttempts = 0;
             SetState(SentinelState.WaitForTerritory, $"Teleporting normally toward {current.CreatureName}");
             return;
+        }
+        else
+        {
+            territoryAetheryteTeleportAttempts++;
+            if (territoryAetheryteTeleportAttempts >= AetheryteTeleportAttemptLimit)
+            {
+                var failedAetheryte = ActiveTerritoryAetheryteName();
+                var nextIndex = territoryAetheryteCandidateIndex + 1;
+                if (SelectTerritoryAetheryteCandidate(nextIndex,
+                        $"candidate {failedAetheryte} repeatedly rejected Teleport"))
+                {
+                    log.Warning(
+                        "Teleport destination {FailedAetheryte} failed {Attempts} time(s); trying next-ranked approach aetheryte {Aetheryte}",
+                        failedAetheryte, AetheryteTeleportAttemptLimit, ActiveTerritoryAetheryteName());
+                    nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+                    return;
+                }
+
+                FailCurrent(
+                    $"all ranked territory aetherytes rejected Teleport after {AetheryteTeleportAttemptLimit} bounded attempts each");
+                return;
+            }
         }
         nextActionUtc = now.AddSeconds(3);
     }
@@ -2737,6 +2891,122 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (TravelTimedOut(now))
             FailCurrent($"Teleport arrival in territory {current.TerritoryId} timed out");
+    }
+
+    private bool TryAdvanceToNextAetheryte(DateTime now, string recoveryReason)
+    {
+        var nextIndex = territoryAetheryteCandidateIndex + 1;
+        if (nextIndex < 0 || nextIndex >= territoryAetheryteCandidates.Count)
+            return false;
+
+        vnav.StopSafe("replanning the hunt approach from the next ranked aetheryte");
+        if (!SelectTerritoryAetheryteCandidate(nextIndex, recoveryReason))
+            return false;
+
+        approachPoint = null;
+        approachPointIsApproximate = false;
+        approachEmptyProjectionPasses = 0;
+        approachFailuresAtCurrentAetheryte = 0;
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
+        alternateAetheryteTeleportAttempts = 0;
+        alternateAetheryteZoningObserved = false;
+        nextActionUtc = now;
+        var candidate = territoryAetheryteCandidates[territoryAetheryteCandidateIndex];
+        log.Warning(
+            "Destination projection/path failed from the previous aetheryte; attempting recovery by teleporting to {Aetheryte} ({AetheryteId}): {Reason}",
+            candidate.Name, candidate.Id, recoveryReason);
+        SetState(SentinelState.TeleportToAlternateAetheryte,
+            $"Replanning {current?.CreatureName}'s approach from {candidate.Name}");
+        return true;
+    }
+
+    private void TickTeleportToAlternateAetheryte(DateTime now)
+    {
+        if (current is null || territoryAetheryteCandidateIndex < 0 ||
+            territoryAetheryteCandidateIndex >= territoryAetheryteCandidates.Count)
+            return;
+        if (now < nextActionUtc || travel.IsBusy)
+            return;
+
+        var candidate = territoryAetheryteCandidates[territoryAetheryteCandidateIndex];
+        if (condition[ConditionFlag.Mounted])
+        {
+            UseGeneralAction(23);
+            nextActionUtc = now.AddSeconds(2);
+            status = $"Dismounting before retrying the hunt approach from {candidate.Name}";
+            return;
+        }
+
+        alternateAetheryteTeleportAttempts++;
+        if (travel.Teleport(candidate.Id))
+        {
+            alternateAetheryteZoningObserved = false;
+            SetState(SentinelState.WaitForAlternateAetheryte,
+                $"Teleporting to {candidate.Name} for a lower-cost recovery approach");
+            return;
+        }
+
+        if (alternateAetheryteTeleportAttempts >= AetheryteTeleportAttemptLimit)
+        {
+            if (TryAdvanceToNextAetheryte(now,
+                    $"{candidate.Name} rejected {AetheryteTeleportAttemptLimit} Teleport attempts"))
+                return;
+            FailCurrent(
+                $"all alternate approach aetherytes rejected {AetheryteTeleportAttemptLimit} bounded Teleport attempts");
+            return;
+        }
+
+        status = $"{candidate.Name} is not accepting Teleport yet; retaining the hunt and retrying " +
+                 $"({alternateAetheryteTeleportAttempts}/{AetheryteTeleportAttemptLimit})";
+        nextActionUtc = now.AddSeconds(3);
+    }
+
+    private void TickWaitForAlternateAetheryte(DateTime now)
+    {
+        if (current is null || territoryAetheryteCandidateIndex < 0 ||
+            territoryAetheryteCandidateIndex >= territoryAetheryteCandidates.Count)
+            return;
+
+        var candidate = territoryAetheryteCandidates[territoryAetheryteCandidateIndex];
+        if (travel.IsBusy)
+        {
+            alternateAetheryteZoningObserved = true;
+            status = $"Zoning through {candidate.Name}; the active hunt remains reserved";
+            return;
+        }
+
+        var arrivedNearCandidate = candidate.Position is not null &&
+                                   HorizontalDistance(PlayerPosition(), candidate.Position.Value) <= 100f;
+        if ((alternateAetheryteZoningObserved || arrivedNearCandidate) &&
+            clientState.TerritoryType == current.TerritoryId)
+        {
+            log.Information(
+                "Confirmed alternate aetheryte arrival at {Aetheryte}: zoningObserved={ZoningObserved}, nearExpectedPosition={NearExpectedPosition}",
+                candidate.Name, alternateAetheryteZoningObserved, arrivedNearCandidate);
+            BeginInstanceCheck();
+            return;
+        }
+
+        if ((now - stateSinceUtc).TotalSeconds < AlternateAetheryteTeleportStartTimeoutSeconds)
+        {
+            status = $"Waiting for the Teleport to {candidate.Name} to begin";
+            return;
+        }
+
+        log.Warning(
+            "Teleport to alternate approach aetheryte {Aetheryte} did not begin within {Seconds:0}s; retrying without discarding {Mark}",
+            candidate.Name, AlternateAetheryteTeleportStartTimeoutSeconds, current.CreatureName);
+        if (alternateAetheryteTeleportAttempts >= AetheryteTeleportAttemptLimit)
+        {
+            if (TryAdvanceToNextAetheryte(now,
+                    $"Teleport to {candidate.Name} repeatedly failed to begin zoning"))
+                return;
+            FailCurrent("all alternate approach aetherytes failed to begin zoning after bounded Teleport attempts");
+            return;
+        }
+        nextActionUtc = now;
+        SetState(SentinelState.TeleportToAlternateAetheryte,
+            $"Retrying the normal Teleport to {candidate.Name}");
     }
 
     private bool NeedsIdyllshireGateway() =>
@@ -3014,6 +3284,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is null)
             return;
+        if (TrySwitchToVisibleMarkDuringApproach())
+            return;
         if (!vnav.IsReadySafe())
         {
             BeginMeshWait("vnavmesh mesh readiness was lost");
@@ -3048,35 +3320,82 @@ public sealed class Plugin : IDalamudPlugin
             approachPoint = approachProjectionCandidates.Count > 0
                 ? approachProjectionCandidates.Dequeue()
                 : null;
+            if (approachPoint is not null)
+                approachPointIsApproximate = false;
             if (approachPoint is null)
             {
-                nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
-                status = $"Could not project {current.CreatureName}'s mapped local destination onto vnavmesh yet; " +
-                         "holding the active hunt and retrying";
-                return;
+                approachEmptyProjectionPasses++;
+                var aetheryteName = ActiveTerritoryAetheryteName();
+                log.Warning(
+                    "Destination projection failed from {Aetheryte} for {Mark}; pass {Pass}/{Limit}",
+                    aetheryteName, current.CreatureName, approachEmptyProjectionPasses,
+                    ApproachProjectionPassesBeforeApproximateFlight);
+
+                if (approachEmptyProjectionPasses >= ApproachProjectionPassesBeforeApproximateFlight)
+                {
+                    if (TryPrepareApproximateAlertFlight())
+                    {
+                        log.Warning(
+                            "Destination projection failed from {Aetheryte}; attempting recovery strategy approximate X/Y flight toward {Mark}",
+                            aetheryteName, current.CreatureName);
+                    }
+                    else if (TryAdvanceToNextAetheryte(now,
+                                 $"vertical projection remained unavailable for {current.CreatureName}"))
+                    {
+                        return;
+                    }
+                    else if (approachEmptyProjectionPasses >= ApproachProjectionPassesBeforeAbandon)
+                    {
+                        FailCurrent(
+                            $"mapped destination projection remained unavailable after {ApproachProjectionPassesBeforeAbandon} bounded passes and no alternate aetheryte remained");
+                        return;
+                    }
+                }
+
+                if (approachPoint is not null)
+                {
+                    ResetApproachRouteTracking(clearProjectionCandidates: false);
+                    nextActionUtc = now;
+                }
+                else
+                {
+                    nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+                    status = $"Could not project {current.CreatureName}'s mapped local destination from " +
+                             $"{aetheryteName}; bounded vertical recovery will retry without abandoning the hunt";
+                    return;
+                }
             }
 
-            approachProjectionCandidateIndex++;
-            ResetApproachRouteTracking(clearProjectionCandidates: false);
-            log.Information(
-                "Trying approach candidate {Index}/{Count} for {Mark}: local ({X:0.0}, {Z:0.0}), {Distance:0}y from player",
-                approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName,
-                approachPoint.Value.X, approachPoint.Value.Z,
-                HorizontalDistance(PlayerPosition(), approachPoint.Value));
-            status = $"Trying approach candidate {approachProjectionCandidateIndex}/{approachProjectionCandidateCount} " +
-                     $"for {current.CreatureName}";
+            if (!approachPointIsApproximate)
+            {
+                approachProjectionCandidateIndex++;
+                approachEmptyProjectionPasses = 0;
+                ResetApproachRouteTracking(clearProjectionCandidates: false);
+                log.Information(
+                    "Trying approach candidate {Index}/{Count} for {Mark}: local ({X:0.0}, {Y:0.0}, {Z:0.0}), {Distance:0}y from player",
+                    approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName,
+                    approachPoint.Value.X, approachPoint.Value.Y, approachPoint.Value.Z,
+                    HorizontalDistance(PlayerPosition(), approachPoint.Value));
+                status = $"Trying approach candidate {approachProjectionCandidateIndex}/{approachProjectionCandidateCount} " +
+                         $"for {current.CreatureName}";
+            }
         }
 
         if (now < nextActionUtc)
             return;
-        if (!EnsureMounted(now))
+        if (vnav.IsNavPathfindInProgressSafe())
+        {
+            status = $"Waiting for vnavmesh's previous route calculation before approaching {current.CreatureName}";
+            return;
+        }
+        if (!EnsureApproachTravelMode(now))
             return;
         if (TryStartApproachRoute(now))
         {
             var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
                 ActiveDistanceProfile.WaitingDistance);
             SetState(SentinelState.ApproachAlertCoordinates,
-                $"Flying toward {current.CreatureName}'s reported coordinates; " +
+                $"{(CurrentApproachUsesFlight() ? "Flying" : "Ground-routing through the tunnel system")} toward {current.CreatureName}'s reported coordinates; " +
                 $"entity resolution waits until within about {scanRange:0}y");
             return;
         }
@@ -3088,6 +3407,7 @@ public sealed class Plugin : IDalamudPlugin
                 "Approach candidate {Index}/{Count} could not start a route; trying the next projected candidate",
                 approachProjectionCandidateIndex, approachProjectionCandidateCount);
             approachPoint = null;
+            approachPointIsApproximate = false;
             ResetApproachRouteTracking(clearProjectionCandidates: false);
             status = $"Mapped {current.CreatureName} destination was unreachable; trying another nearby projection";
         }
@@ -3099,6 +3419,8 @@ public sealed class Plugin : IDalamudPlugin
     private void TickApproachAlertCoordinates(DateTime now)
     {
         if (current is null)
+            return;
+        if (TrySwitchToVisibleMarkDuringApproach())
             return;
         if (!vnav.IsReadySafe())
         {
@@ -3144,6 +3466,17 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!approachPathTask.IsCompleted)
             {
+                if (pathfindElapsed >= ApproachPathfindTimeoutSeconds)
+                {
+                    vnav.CancelAllPathfindingSafe(
+                        $"{current.CreatureName} approach exceeded {ApproachPathfindTimeoutSeconds:0}s");
+                    approachPathTask = null;
+                    HandleStoppedApproachRoute(now,
+                        $"pathfinding exceeded the bounded {ApproachPathfindTimeoutSeconds:0}s timeout");
+                    if (state != SentinelState.TeleportToAlternateAetheryte && !vnav.IsReadySafe())
+                        BeginMeshWait("bounded approach-pathfinding cancellation is reloading vnavmesh");
+                    return;
+                }
                 if (pathfindElapsed >= ApproachSlowPathfindNoticeSeconds && !approachSlowPathfindNoticeLogged)
                 {
                     approachSlowPathfindNoticeLogged = true;
@@ -3187,7 +3520,7 @@ public sealed class Plugin : IDalamudPlugin
                     "First path point for {Mark} is {Gap:0.0}y from the current navmesh position; route will be observed during the movement-start grace period",
                     current.CreatureName, firstGap);
 
-            if (!vnav.MovePathSafe(path, true))
+            if (!vnav.MovePathSafe(path, approachRouteUsesFlight))
             {
                 HandleStoppedApproachRoute(now, "Path.MoveTo rejected the computed waypoint list");
                 return;
@@ -3269,12 +3602,18 @@ public sealed class Plugin : IDalamudPlugin
 
         if (now < nextActionUtc)
             return;
-        if (!EnsureMounted(now))
+        if (vnav.IsNavPathfindInProgressSafe())
+        {
+            status = $"Waiting for vnavmesh's previous route calculation before resuming {current.CreatureName}";
+            return;
+        }
+        if (!EnsureApproachTravelMode(now))
             return;
 
         if (TryStartApproachRoute(now))
         {
-            status = $"Approach resumed for {current.CreatureName}; {distance:0}y remain to the reported area";
+            status = $"{(CurrentApproachUsesFlight() ? "Flight" : "Ground tunnel route")} resumed for " +
+                     $"{current.CreatureName}; {distance:0}y remain to the reported area";
             log.Information("Approach resumed for {Mark}; {Distance:0}y remain", current.CreatureName, distance);
         }
         else
@@ -3289,17 +3628,128 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private bool TrySwitchToVisibleMarkDuringApproach()
+    {
+        if (current is null)
+            return false;
+
+        var visible = FindMark();
+        if (visible is null)
+            return false;
+
+        mark = visible;
+        MarkWasIdentified(visible);
+        if (visible.IsDead || visible.CurrentHp == 0)
+        {
+            ConfirmKill($"{visible.Name.TextValue} became visibly dead during coordinate-approach recovery");
+            return true;
+        }
+
+        vnav.StopSafe("actual hunt entity became visible during coordinate approach");
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
+        approachPoint = null;
+        approachPointIsApproximate = false;
+        log.Information(
+            "Actual entity detected during coordinate approach: {Mark}; switching immediately from approximate navigation to dynamic tracking",
+            visible.Name.TextValue);
+        SetState(SentinelState.LocateMark,
+            $"{visible.Name.TextValue} is now detectable; switching to dynamic entity tracking");
+        return true;
+    }
+
+    private bool CurrentApproachUsesFlight()
+    {
+        if (current is null)
+            return true;
+        return !HuntCatalog.RequiresGroundTunnelApproach(
+            current.TerritoryId, current.MarkDataId, current.CreatureName);
+    }
+
+    private bool EnsureApproachTravelMode(DateTime now)
+    {
+        if (CurrentApproachUsesFlight())
+            return EnsureMounted(now);
+
+        if (condition[ConditionFlag.InFlight])
+        {
+            vnav.StopSafe("landing before the Chernobog tunnel approach");
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(1);
+            }
+            status = "Landing before Chernobog's ground-only U'Ghamaro Mines route";
+            return false;
+        }
+
+        return EnsureMounted(now);
+    }
+
+    private bool TryPrepareApproximateAlertFlight()
+    {
+        if (current is null || alertPoint is null || !CurrentApproachUsesFlight())
+            return false;
+
+        var player = PlayerPosition();
+        approachPoint = new Vector3(alertPoint.Value.X, player.Y, alertPoint.Value.Z);
+        approachPointIsApproximate = true;
+        approachProjectionCandidateIndex = 1;
+        approachProjectionCandidateCount = 1;
+        log.Warning(
+            "Using bounded approximate flight recovery for {Mark}: target X={X:0.0}, Z={Z:0.0}, preserving current flight elevation Y={Y:0.0}; actual entity detection remains authoritative",
+            current.CreatureName, approachPoint.Value.X, approachPoint.Value.Z, approachPoint.Value.Y);
+        status = $"Projection recovery: beginning safe approximate flight toward {current.CreatureName}'s reported X/Y";
+        return true;
+    }
+
+    private string ActiveTerritoryAetheryteName()
+    {
+        if (territoryAetheryteCandidateIndex >= 0 &&
+            territoryAetheryteCandidateIndex < territoryAetheryteCandidates.Count)
+            return territoryAetheryteCandidates[territoryAetheryteCandidateIndex].Name;
+        return territoryAetheryteId == 0 ? "the unresolved territory entrance" : $"Aetheryte {territoryAetheryteId}";
+    }
+
     private void PrepareApproachProjectionCandidates(Vector3 anchor)
     {
         approachProjectionCandidates.Clear();
         approachProjectionCandidateIndex = 0;
         approachProjectionCandidateCount = 0;
         var projected = new List<Vector3>();
+        var playerY = PlayerPosition().Y;
+        var verticalRecoveryUsed = false;
+        if (!CurrentApproachUsesFlight())
+        {
+            PrepareGroundTunnelProjectionCandidates(anchor, playerY, projected);
+            var tunnelCandidates = projected
+                .OrderBy(point => HorizontalDistance(point, anchor))
+                .ThenBy(point => Math.Abs(point.Y - playerY))
+                .Take(24)
+                .ToArray();
+            foreach (var point in tunnelCandidates)
+                approachProjectionCandidates.Enqueue(point);
+            approachProjectionCandidateCount = tunnelCandidates.Length;
+            log.Information(
+                "Ground/tunnel destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} elevation-aware navmesh candidate(s) near player elevation {Y:0.0}",
+                current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, tunnelCandidates.Length, playerY);
+            return;
+        }
+
         var exactProjection = vnav.PointOnFloorSafe(anchor, 8f);
         if (exactProjection is null)
+        {
+            exactProjection = vnav.NearestPointSafe(
+                new Vector3(anchor.X, playerY, anchor.Z), 12f, ApproachVerticalProjectionHalfExtent);
+            verticalRecoveryUsed = exactProjection is not null;
+        }
+        if (exactProjection is null)
             log.Information(
-                "Exact destination projection failed for {Mark}; sampling nearby reachable candidates",
-                current?.CreatureName ?? "active hunt");
+                "Exact destination projection failed for {Mark}; sampling nearby X/Z positions across a {VerticalRange:0}y vertical search range",
+                current?.CreatureName ?? "active hunt", ApproachVerticalProjectionHalfExtent);
+        else if (verticalRecoveryUsed)
+            log.Information(
+                "Recovered {Mark}'s 2D alert destination through a vertical navmesh query at Y={Y:0.0}",
+                current?.CreatureName ?? "active hunt", exactProjection.Value.Y);
 
         var offsets = new[] { 0f, 6f, 12f, 18f, 24f, 36f };
         var angles = new[] { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
@@ -3314,6 +3764,13 @@ public sealed class Plugin : IDalamudPlugin
                 var floor = radius == 0f && exactProjection is not null
                     ? exactProjection
                     : vnav.PointOnFloorSafe(sample, 18f);
+                if (floor is null)
+                {
+                    floor = vnav.NearestPointSafe(
+                        new Vector3(sample.X, playerY, sample.Z), 20f,
+                        ApproachVerticalProjectionHalfExtent);
+                    verticalRecoveryUsed |= floor is not null;
+                }
                 if (floor is null || projected.Any(point => HorizontalDistance(point, floor.Value) < 2f))
                     continue;
                 projected.Add(floor.Value);
@@ -3328,14 +3785,57 @@ public sealed class Plugin : IDalamudPlugin
             approachProjectionCandidates.Enqueue(point);
         approachProjectionCandidateCount = ordered.Length;
         log.Information(
-            "Reported destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} projected approach candidate(s)",
-            current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, ordered.Length);
+            "Reported destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} projected approach candidate(s); verticalRecovery={VerticalRecovery}",
+            current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, ordered.Length,
+            verticalRecoveryUsed);
+    }
+
+    private void PrepareGroundTunnelProjectionCandidates(
+        Vector3 anchor,
+        float playerY,
+        List<Vector3> projected)
+    {
+        var offsets = new[] { 0f, 8f, 18f, 36f };
+        var angles = new[] { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
+        var verticalOffsets = new[] { 0f, -64f, 64f, -128f, 128f };
+
+        foreach (var radius in offsets)
+        {
+            foreach (var angle in radius == 0f ? new[] { 0f } : angles)
+            {
+                var radians = angle * MathF.PI / 180f;
+                var sample = anchor + new Vector3(MathF.Cos(radians) * radius, 0f, MathF.Sin(radians) * radius);
+                var sampleResolved = false;
+                foreach (var verticalOffset in verticalOffsets)
+                {
+                    var nearest = vnav.NearestPointSafe(
+                        new Vector3(sample.X, playerY + verticalOffset, sample.Z), 18f, 28f);
+                    if (nearest is null || projected.Any(point => Vector3.Distance(point, nearest.Value) < 2f))
+                        continue;
+                    projected.Add(nearest.Value);
+                    sampleResolved = true;
+                }
+
+                if (sampleResolved)
+                    continue;
+
+                sample.Y = 1024f;
+                var fallback = vnav.PointOnFloorSafe(sample, 18f);
+                if (fallback is not null && projected.All(point => Vector3.Distance(point, fallback.Value) >= 2f))
+                    projected.Add(fallback.Value);
+            }
+        }
     }
 
     private bool TryStartApproachRoute(DateTime now)
     {
         if (approachPoint is null)
             return false;
+        if (vnav.IsNavPathfindInProgressSafe())
+        {
+            status = $"Waiting for the previous vnavmesh pathfinding request to settle before replanning {current?.CreatureName}";
+            return false;
+        }
 
         if (approachRouteCandidates.Count == 0)
             PrepareApproachRouteCandidates(approachPoint.Value);
@@ -3346,7 +3846,8 @@ public sealed class Plugin : IDalamudPlugin
         var target = approachRouteCandidates.Dequeue();
         var remaining = HorizontalDistance(player, approachPoint.Value);
         approachRouteIsSegment = HorizontalDistance(target, approachPoint.Value) > 2f;
-        var pathTask = vnav.PathfindSafe(player, target, true);
+        approachRouteUsesFlight = CurrentApproachUsesFlight();
+        var pathTask = vnav.PathfindSafe(player, target, approachRouteUsesFlight);
         if (pathTask is null)
             return false;
 
@@ -3367,8 +3868,9 @@ public sealed class Plugin : IDalamudPlugin
         nextActionUtc = DateTime.MinValue;
 
         log.Information(
-            "Submitted explicit vnavmesh pathfind for {Mark}: segment={Segment}, targetDistance={TargetDistance:0.0}y, totalRemaining={Remaining:0.0}y, mounted={Mounted}, flying={Flying}",
-            current?.CreatureName ?? "active hunt", approachRouteIsSegment,
+            "Submitted explicit vnavmesh pathfind for {Mark}: mode={Mode}, segment={Segment}, targetDistance={TargetDistance:0.0}y, totalRemaining={Remaining:0.0}y, mounted={Mounted}, flying={Flying}",
+            current?.CreatureName ?? "active hunt", approachRouteUsesFlight ? "flight" : "ground/tunnel",
+            approachRouteIsSegment,
             HorizontalDistance(player, target), remaining,
             condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
 
@@ -3404,7 +3906,10 @@ public sealed class Plugin : IDalamudPlugin
             {
                 var intended = player + direction * distance + tangent * lateral;
                 intended.Y = 1024f;
-                var projected = vnav.PointOnFloorSafe(intended, 14f);
+                var projected = CurrentApproachUsesFlight()
+                    ? vnav.PointOnFloorSafe(intended, 14f)
+                    : vnav.NearestPointSafe(
+                        new Vector3(intended.X, player.Y, intended.Z), 14f, 36f);
                 if (projected is null ||
                     HorizontalDistance(projected.Value, player) < 12f ||
                     HorizontalDistance(projected.Value, destination) >= remaining ||
@@ -3467,6 +3972,18 @@ public sealed class Plugin : IDalamudPlugin
         approachLastObservedWaypointCount = -1;
         nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
 
+        approachFailuresAtCurrentAetheryte++;
+        if (approachFailuresAtCurrentAetheryte >= ApproachFailuresBeforeAlternateAetheryte &&
+            TryAdvanceToNextAetheryte(now,
+                $"{current.CreatureName}'s route repeatedly stopped before arrival ({reason})"))
+            return;
+        if (approachFailuresAtCurrentAetheryte >= ApproachFailuresBeforeAbandon)
+        {
+            FailCurrent(
+                $"approach route stopped {approachFailuresAtCurrentAetheryte} times without reaching the hunt and no alternate aetheryte remained");
+            return;
+        }
+
         if (destinationProgress >= ApproachMeaningfulProgressDistance)
         {
             approachEarlyStops = 0;
@@ -3507,6 +4024,7 @@ public sealed class Plugin : IDalamudPlugin
             "Approach candidate {Index}/{Count} rejected for {Mark}: {Reason}",
             approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName, reason);
         approachPoint = null;
+        approachPointIsApproximate = false;
         ResetApproachRouteTracking(clearProjectionCandidates: false);
         nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
         SetState(SentinelState.PrepareApproachDestination,
@@ -3529,6 +4047,7 @@ public sealed class Plugin : IDalamudPlugin
         approachMovementSubmittedUtc = DateTime.MinValue;
         approachEarlyStops = 0;
         approachRouteIsSegment = false;
+        approachRouteUsesFlight = true;
         approachStartingEgressActive = false;
         approachPathfindingObserved = false;
         approachMovementObserved = false;
@@ -3540,6 +4059,7 @@ public sealed class Plugin : IDalamudPlugin
         approachProjectionCandidates.Clear();
         approachProjectionCandidateIndex = 0;
         approachProjectionCandidateCount = 0;
+        approachPointIsApproximate = false;
     }
 
     private void TickLocateMark(DateTime now)
@@ -5613,6 +6133,14 @@ public sealed class Plugin : IDalamudPlugin
         selectedParkingPath = null;
         crowdFallbackAnnounced = false;
         territoryAetheryteId = 0;
+        territoryAetheryteCandidates.Clear();
+        territoryAetheryteCandidateIndex = -1;
+        territoryAetheryteTeleportAttempts = 0;
+        alternateAetheryteTeleportAttempts = 0;
+        alternateAetheryteZoningObserved = false;
+        approachEmptyProjectionPasses = 0;
+        approachFailuresAtCurrentAetheryte = 0;
+        approachPointIsApproximate = false;
         killConfirmed = false;
         tagAttempted = false;
         postTagRetreatActive = false;
@@ -6337,6 +6865,8 @@ public sealed class Plugin : IDalamudPlugin
         WaitForWorld,
         TeleportToTerritory,
         WaitForTerritory,
+        TeleportToAlternateAetheryte,
+        WaitForAlternateAetheryte,
         OpenHinterlandsGateway,
         SelectHinterlandsGateway,
         SelectHinterlandsDestination,
@@ -6391,6 +6921,13 @@ internal sealed record TerritoryAetheryteOverride(
     uint AetheryteId,
     string TerritoryName,
     string AetheryteName);
+
+internal sealed record TerritoryAetheryteCandidate(
+    uint Id,
+    string Name,
+    Vector3? Position,
+    float EstimatedCostYalms,
+    string PositionSource);
 
 internal sealed class PendingFaloopLocation(
     HuntAlertSnapshot alert,
