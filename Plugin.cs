@@ -78,6 +78,8 @@ public sealed class Plugin : IDalamudPlugin
     private const float ApproachVerticalProjectionHalfExtent = 1024f;
     private const double AlternateAetheryteTeleportStartTimeoutSeconds = 12;
     private const int AetheryteTeleportAttemptLimit = 3;
+    private const double PostWorldVisitMinimumSettleSeconds = 2;
+    private const double PostWorldVisitTeleportListSettleSeconds = 8;
     private const byte AetheryteMapMarkerDataType = 3;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
@@ -166,6 +168,8 @@ public sealed class Plugin : IDalamudPlugin
     private int territoryAetheryteTeleportAttempts;
     private int alternateAetheryteTeleportAttempts;
     private bool alternateAetheryteZoningObserved;
+    private DateTime postWorldVisitTeleportListDeadlineUtc = DateTime.MinValue;
+    private bool territoryAetheryteSelectedWithoutNativeList;
     private SentinelState state = SentinelState.Idle;
     private DateTime stateSinceUtc = DateTime.UtcNow;
     private DateTime lastTickUtc = DateTime.MinValue;
@@ -1442,6 +1446,8 @@ public sealed class Plugin : IDalamudPlugin
         territoryAetheryteTeleportAttempts = 0;
         alternateAetheryteTeleportAttempts = 0;
         alternateAetheryteZoningObserved = false;
+        postWorldVisitTeleportListDeadlineUtc = DateTime.MinValue;
+        territoryAetheryteSelectedWithoutNativeList = false;
         alertPoint = null;
         approachPoint = null;
         approachPointIsApproximate = false;
@@ -1510,16 +1516,15 @@ public sealed class Plugin : IDalamudPlugin
     private static bool HasUsableMapCoordinates(HuntAlertSnapshot alert) =>
         alert.MapX > 0f && alert.MapY > 0f;
 
-    private bool TryResolveTerritoryAetheryte()
+    private TerritoryAetheryteResolution TryResolveTerritoryAetheryte(DateTime? now = null)
     {
         territoryAetheryteId = 0;
         if (current is null)
-            return false;
+            return TerritoryAetheryteResolution.NoStaticCandidates;
 
         try
         {
-            ResolveTerritoryAetheryte();
-            return territoryAetheryteId != 0;
+            return ResolveTerritoryAetheryte(now ?? DateTime.UtcNow);
         }
         catch (Exception ex)
         {
@@ -1527,34 +1532,68 @@ public sealed class Plugin : IDalamudPlugin
                 "Aetheryte resolution failed for {Mark} in territory {Territory}; retaining the active hunt for retry",
                 current.CreatureName, current.TerritoryId);
             territoryAetheryteId = 0;
-            return false;
+            return TerritoryAetheryteResolution.NoStaticCandidates;
         }
     }
 
-    private void ResolveTerritoryAetheryte()
+    private TerritoryAetheryteResolution ResolveTerritoryAetheryte(DateTime now)
     {
         if (current is null)
-            return;
+            return TerritoryAetheryteResolution.NoStaticCandidates;
 
         territoryAetheryteId = 0;
         territoryAetheryteCandidates.Clear();
         territoryAetheryteCandidateIndex = -1;
+        territoryAetheryteSelectedWithoutNativeList = false;
+
+        var staticCandidates = data.GetExcelSheet<Aetheryte>()
+            .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
+            .ToArray();
+        var nativeListReady = travel.TryGetTeleportableAetherytes(out var teleportableAetherytes);
+        var matchingNativeCandidates = staticCandidates.Count(row => teleportableAetherytes.Contains(row.RowId));
+        log.Information(
+            "Territory teleport resolution for {Mark}: destinationWorld={World}, territory={Territory}, discovered={Discovered}, nativeListReady={NativeListReady}, nativeDestinations={NativeCount}, matchingTerritoryDestinations={MatchingCount}",
+            current.CreatureName, current.World, current.TerritoryId, staticCandidates.Length,
+            nativeListReady, teleportableAetherytes.Count, matchingNativeCandidates);
+
+        var postWorldVisitResolution = postWorldVisitTeleportListDeadlineUtc != DateTime.MinValue;
+        if (postWorldVisitResolution)
+        {
+            var minimumSettleComplete =
+                now >= postWorldVisitTeleportListDeadlineUtc.AddSeconds(
+                    -(PostWorldVisitTeleportListSettleSeconds - PostWorldVisitMinimumSettleSeconds));
+            if (!minimumSettleComplete ||
+                (matchingNativeCandidates == 0 && now < postWorldVisitTeleportListDeadlineUtc))
+                return TerritoryAetheryteResolution.NativeListUnready;
+        }
+
+        var nativeListUsableForTerritory = nativeListReady && matchingNativeCandidates > 0;
+        territoryAetheryteSelectedWithoutNativeList = !nativeListUsableForTerritory;
+        var attuned = nativeListUsableForTerritory
+            ? staticCandidates.Where(row => teleportableAetherytes.Contains(row.RowId)).ToArray()
+            : staticCandidates;
+
+        if (!nativeListUsableForTerritory)
+            log.Warning(
+                "Native Teleport data is {Readiness}; retaining and ranking {Count} static territory candidates for validation by actual Teleport submission",
+                nativeListReady ? "populated but stale/inconclusive for this territory" : "unready/empty",
+                attuned.Length);
 
         // The Dravanian Hinterlands has no main teleport crystal. Its normal-game route is
         // Idyllshire followed by the Prologue Gate aethernet destination.
         if (current.TerritoryId == HuntCatalog.DravanianHinterlandsTerritoryId &&
-            travel.CanTeleportTo(HuntCatalog.IdyllshireAetheryteId))
+            (!nativeListUsableForTerritory || teleportableAetherytes.Contains(HuntCatalog.IdyllshireAetheryteId)))
         {
             territoryAetheryteCandidates.Add(new TerritoryAetheryteCandidate(
                 HuntCatalog.IdyllshireAetheryteId, "Idyllshire", null, 0f, "required Prologue Gate route"));
             SelectTerritoryAetheryteCandidate(0, "required gateway route");
-            return;
+            return TerritoryAetheryteResolution.Resolved;
         }
 
-        var attuned = data.GetExcelSheet<Aetheryte>()
-            .Where(row => row.IsAetheryte && row.Territory.RowId == current.TerritoryId)
-            .Where(row => travel.CanTeleportTo(row.RowId))
-            .ToArray();
+        if (!postWorldVisitResolution && nativeListReady && matchingNativeCandidates == 0)
+            return staticCandidates.Length == 0
+                ? TerritoryAetheryteResolution.NoStaticCandidates
+                : TerritoryAetheryteResolution.NoAttunedCandidates;
 
         if (TerritoryAetheryteOverrides.TryGetValue(current.TerritoryId, out var territoryOverride))
         {
@@ -1585,7 +1624,14 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (territoryAetheryteCandidates.Count > 0)
+        {
             SelectTerritoryAetheryteCandidate(0, "lowest estimated onward travel cost");
+            return TerritoryAetheryteResolution.Resolved;
+        }
+
+        return staticCandidates.Length == 0
+            ? TerritoryAetheryteResolution.NoStaticCandidates
+            : TerritoryAetheryteResolution.NoAttunedCandidates;
     }
 
     private void BuildTerritoryAetheryteCandidates(
@@ -2712,7 +2758,11 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))
         {
-            CompleteWorldVisit(targetWorld);
+            if (!travel.IsBusy && travel.IsInUldah(clientState.TerritoryType))
+                CompleteWorldVisit(targetWorld);
+            else
+                SetState(SentinelState.WaitForWorld,
+                    $"Destination world {targetWorld} confirmed; waiting for physical Ul'dah arrival");
             return;
         }
         if (TravelTimedOut(now))
@@ -2795,8 +2845,18 @@ public sealed class Plugin : IDalamudPlugin
     {
         vnav.StopSafe();
         if (current is not null)
+        {
             log.Information("Travel state entered for {Mark}: arrived on {World}; next territory {Territory}, instance {Instance}",
                 current.CreatureName, targetWorld, current.TerritoryId, current.Instance);
+            territoryAetheryteId = 0;
+            territoryAetheryteCandidates.Clear();
+            territoryAetheryteCandidateIndex = -1;
+            territoryAetheryteSelectedWithoutNativeList = false;
+            postWorldVisitTeleportListDeadlineUtc = DateTime.UtcNow.AddSeconds(PostWorldVisitTeleportListSettleSeconds);
+            log.Information(
+                "Destination world confirmed: {World}, physically loaded in Ul'dah; allowing up to {Seconds:0.0}s for post-World-Visit Teleport data readiness",
+                targetWorld, PostWorldVisitTeleportListSettleSeconds);
+        }
         SetState(SentinelState.TeleportToTerritory,
             $"Arrived on {targetWorld}; preparing territory teleport");
     }
@@ -2825,7 +2885,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             if (now < nextActionUtc)
                 return;
-            if (TryResolveTerritoryAetheryte())
+            var resolution = TryResolveTerritoryAetheryte(now);
+            if (resolution == TerritoryAetheryteResolution.Resolved)
             {
                 log.Information("Recovered territory teleport destination {AetheryteId} for active hunt {Mark}",
                     territoryAetheryteId, current.CreatureName);
@@ -2833,9 +2894,27 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            status = $"No attuned aetheryte is currently resolvable for territory {current.TerritoryId}; " +
+            if (resolution == TerritoryAetheryteResolution.NativeListUnready)
+            {
+                var remaining = Math.Max(0, (postWorldVisitTeleportListDeadlineUtc - now).TotalSeconds);
+                status = $"Destination world confirmed; Teleport data is still initializing after World Visit " +
+                         $"({remaining:0.0}s bounded wait); retaining {current.CreatureName}";
+                log.Information(
+                    "Post-World-Visit Teleport data not ready for {Mark}: territory candidates remain preserved; retrying in 1s ({Remaining:0.0}s left)",
+                    current.CreatureName, remaining);
+                nextActionUtc = now.AddSeconds(1);
+                return;
+            }
+
+            if (resolution == TerritoryAetheryteResolution.NoAttunedCandidates)
+            {
+                FailCurrent($"native Teleport data is ready but confirms no attuned aetheryte for territory {current.TerritoryId}");
+                return;
+            }
+
+            status = $"No territory aetheryte exists in game data for territory {current.TerritoryId}; " +
                      $"retaining {current.CreatureName} and retrying";
-            log.Warning("No attuned aetheryte currently resolved for {Mark} in territory {Territory}; active hunt retained",
+            log.Warning("No static territory aetheryte resolved for {Mark} in territory {Territory}; active hunt retained",
                 current.CreatureName, current.TerritoryId);
             nextActionUtc = now.AddSeconds(5);
             return;
@@ -2844,9 +2923,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         if (condition[ConditionFlag.Mounted])
             UseGeneralAction(23);
-        else if (travel.Teleport(territoryAetheryteId))
+        else if (travel.Teleport(territoryAetheryteId, territoryAetheryteSelectedWithoutNativeList))
         {
             territoryAetheryteTeleportAttempts = 0;
+            log.Information(
+                "Submitted territory Teleport to {Aetheryte} ({AetheryteId}); nativeListReadyAtSelection={NativeListReady}",
+                ActiveTerritoryAetheryteName(), territoryAetheryteId,
+                !territoryAetheryteSelectedWithoutNativeList);
             SetState(SentinelState.WaitForTerritory, $"Teleporting normally toward {current.CreatureName}");
             return;
         }
@@ -2938,7 +3021,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         alternateAetheryteTeleportAttempts++;
-        if (travel.Teleport(candidate.Id))
+        if (travel.Teleport(candidate.Id, territoryAetheryteSelectedWithoutNativeList))
         {
             alternateAetheryteZoningObserved = false;
             SetState(SentinelState.WaitForAlternateAetheryte,
@@ -6887,6 +6970,14 @@ public sealed class Plugin : IDalamudPlugin
         AvoidIncidentalAggro,
         PostKillSsGrace,
         SsWatch,
+    }
+
+    private enum TerritoryAetheryteResolution
+    {
+        Resolved,
+        NativeListUnready,
+        NoAttunedCandidates,
+        NoStaticCandidates,
     }
 }
 
