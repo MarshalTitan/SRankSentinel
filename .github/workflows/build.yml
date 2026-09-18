@@ -20,6 +20,9 @@ jobs:
       - name: Audit supported Faloop POI coverage
         run: node .github/scripts/Audit-FaloopCatalog.mjs FaloopCatalog.cs HuntCatalog.cs FaloopClient.cs
 
+      - name: Audit post-World-Visit Teleport readiness recovery
+        run: node .github/scripts/Audit-TeleportReadiness.mjs Plugin.cs NativeTravel.cs
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:

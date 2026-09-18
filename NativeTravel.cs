@@ -101,28 +101,46 @@ internal sealed class NativeTravel(
         return new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     }
 
-    public unsafe bool CanTeleportTo(uint aetheryteId)
+    public unsafe bool TryGetTeleportableAetherytes(out HashSet<uint> aetheryteIds)
     {
+        aetheryteIds = new HashSet<uint>();
         var telepo = Telepo.Instance();
-        if (telepo is null || aetheryteId == 0)
+        if (telepo is null)
             return false;
 
         telepo->UpdateAetheryteList();
         foreach (var destination in telepo->TeleportList)
-            if (destination.AetheryteId == aetheryteId && destination.SubIndex == 0)
-                return true;
+            if (destination.AetheryteId != 0 && destination.SubIndex == 0)
+                aetheryteIds.Add(destination.AetheryteId);
 
-        return false;
+        // An initialized list always contains at least one destination for a character that can
+        // World Visit from Ul'dah. Immediately after World Visit the native list can temporarily
+        // be empty; that is an unknown/readiness state, not positive proof of no attunements.
+        return aetheryteIds.Count > 0;
     }
 
-    public unsafe bool Teleport(uint aetheryteId)
+    public bool CanTeleportTo(uint aetheryteId)
     {
-        if (!CanUseTravelAction(5))
+        return aetheryteId != 0 &&
+               TryGetTeleportableAetherytes(out var aetheryteIds) &&
+               aetheryteIds.Contains(aetheryteId);
+    }
+
+    public unsafe bool Teleport(uint aetheryteId, bool allowUnreadyTeleportList = false)
+    {
+        if (aetheryteId == 0 || !CanUseTravelAction(5))
             return false;
 
         var telepo = Telepo.Instance();
-        if (telepo is null || !CanTeleportTo(aetheryteId))
+        if (telepo is null)
             return false;
+
+        var listReady = TryGetTeleportableAetherytes(out var aetheryteIds);
+        if (listReady && !aetheryteIds.Contains(aetheryteId) && !allowUnreadyTeleportList)
+            return false;
+        if (!listReady && !allowUnreadyTeleportList)
+            return false;
+
         return telepo->Teleport(aetheryteId, 0);
     }
 
