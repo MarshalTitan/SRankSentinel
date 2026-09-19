@@ -44,7 +44,6 @@ internal static class HuntCatalog
     public const uint IdyllshireTerritoryId = 478;
     public const uint IdyllshireAetheryteId = 75;
     public const uint ChernobogTerritoryId = 180;
-    public const uint ChernobogDataId = 2967;
     public const string ChernobogName = "Chernobog";
     public const uint ForgivenRebellionDataId = 8915;
     public const uint KerDataId = 10615;
@@ -224,9 +223,8 @@ internal static class HuntCatalog
     public static bool IsSupportedTerritory(uint territoryId) =>
         GetExpansion(territoryId) is not SupportedExpansion.None;
 
-    public static bool RequiresGroundTunnelApproach(uint territoryId, uint dataId, string name) =>
-        territoryId == ChernobogTerritoryId &&
-        (dataId == ChernobogDataId || Normalize(name) == Normalize(ChernobogName));
+    public static bool IsChernobog(uint territoryId, string? name) =>
+        territoryId == ChernobogTerritoryId && NamesMatch(name, ChernobogName);
 
     public static IReadOnlyCollection<uint> SupportedTerritoryIds { get; } =
         Definitions.Select(definition => definition.TerritoryId).Distinct().Order().ToArray();

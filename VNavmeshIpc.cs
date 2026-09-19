@@ -20,9 +20,7 @@ internal sealed class VNavmeshIpc
     private readonly ICallGateSubscriber<bool> movementAllowed;
     private readonly ICallGateSubscriber<bool> simplePathfindInProgress;
     private readonly ICallGateSubscriber<bool> navPathfindInProgress;
-    private readonly ICallGateSubscriber<Vector3, float, float, Vector3?> nearestPoint;
     private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> pointOnFloor;
-    private readonly ICallGateSubscriber<object> cancelAllPathfinding;
     private readonly ICallGateSubscriber<object> stop;
     private readonly IPluginLog log;
     private string lastStopDiagnostic = string.Empty;
@@ -43,9 +41,7 @@ internal sealed class VNavmeshIpc
         movementAllowed = pi.GetIpcSubscriber<bool>("vnavmesh.Path.GetMovementAllowed");
         simplePathfindInProgress = pi.GetIpcSubscriber<bool>("vnavmesh.SimpleMove.PathfindInProgress");
         navPathfindInProgress = pi.GetIpcSubscriber<bool>("vnavmesh.Nav.PathfindInProgress");
-        nearestPoint = pi.GetIpcSubscriber<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPoint");
         pointOnFloor = pi.GetIpcSubscriber<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor");
-        cancelAllPathfinding = pi.GetIpcSubscriber<object>("vnavmesh.Nav.PathfindCancelAll");
         stop = pi.GetIpcSubscriber<object>("vnavmesh.Path.Stop");
     }
 
@@ -143,27 +139,6 @@ internal sealed class VNavmeshIpc
     {
         try { return pointOnFloor.InvokeFunc(destination, false, halfExtentXZ); }
         catch { return null; }
-    }
-
-    public Vector3? NearestPointSafe(Vector3 destination, float halfExtentXZ, float halfExtentY)
-    {
-        try { return nearestPoint.InvokeFunc(destination, halfExtentXZ, halfExtentY); }
-        catch { return null; }
-    }
-
-    public bool CancelAllPathfindingSafe(string reason)
-    {
-        try
-        {
-            log.Warning("Cancelling all outstanding vnavmesh pathfinding requests: {Reason}", reason);
-            cancelAllPathfinding.InvokeAction();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "Could not cancel outstanding vnavmesh pathfinding requests");
-            return false;
-        }
     }
 
     public void StopSafe(string reason = "unspecified", [CallerMemberName] string caller = "unknown")
