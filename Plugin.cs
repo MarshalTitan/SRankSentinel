@@ -1740,7 +1740,7 @@ public sealed class Plugin : IDalamudPlugin
                 state != SentinelState.AvoidIncidentalAggro && IsLocalHuntState(state))
             {
                 BeginTagRequiredRecovery(visibleMark, now,
-                    $"{visibleMark.Name.TextValue} crossed the engage threshold before a tag was confirmed");
+                    $"{visibleMark?.Name.TextValue ?? current.CreatureName} crossed the engage threshold before a tag was confirmed");
                 return;
             }
         }
