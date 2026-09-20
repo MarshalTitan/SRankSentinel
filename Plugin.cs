@@ -38,8 +38,14 @@ public sealed class Plugin : IDalamudPlugin
     private const double ParkingRouteStallSeconds = 12;
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
+    private const int MaximumParkingRecoveryFailures = 6;
+    private const double ParkingRecoveryBudgetSeconds = 90;
+    private const float ParkingPreferredClearanceTolerance = 3f;
     private const float TagApproachClearance = 8f;
     private const double TagDispatchConfirmationTimeoutSeconds = 5;
+    private const double TagRecoveryBudgetSeconds = 120;
+    private const double TagRouteStallSeconds = 8;
+    private const double TagEntityReacquireSeconds = 5;
     private const float MaximumParkingClearance = 35f;
     private const float MaximumGroundPathDetourRatio = 2.5f;
     private const float MaximumGroundPathDetourAllowance = 30f;
@@ -54,6 +60,9 @@ public sealed class Plugin : IDalamudPlugin
     private const double PullResetConfirmationSeconds = 4;
     private const double IncidentalAggroClearConfirmationSeconds = 2;
     private const double IncidentalAggroRouteRetrySeconds = 6;
+    private const double IncidentalAggroEscapeBudgetSeconds = 24;
+    private const int IncidentalAggroEscapeAttemptLimit = 4;
+    private const double IncidentalCombatActionRetrySeconds = 1;
     private const float IncidentalAggroThreatRadius = 60f;
     private const float IncidentalAggroEscapeDistance = 55f;
     private const double SsStagingPathQueryTimeoutSeconds = 20;
@@ -68,8 +77,15 @@ public sealed class Plugin : IDalamudPlugin
     private const double ApproachRouteStallSeconds = 15;
     private const double ApproachMovementStartGraceSeconds = 8;
     private const double ApproachSlowPathfindNoticeSeconds = 20;
+    private const double ApproachPathQueryTimeoutSeconds = 45;
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
+    private const float ApproachScanTolerance = 3f;
+    private const int ProjectionFailuresBeforeApproximateRoute = 2;
+    private const double LocalApproachRecoveryBudgetSeconds = 90;
+    private const double FinalLocateScanSeconds = 20;
+    private const double RaiseAcceptanceRetrySeconds = 2;
+    private const double CompletedRaiseResolutionBudgetSeconds = 6;
     private static readonly IReadOnlyDictionary<uint, TerritoryAetheryteOverride> TerritoryAetheryteOverrides =
         new Dictionary<uint, TerritoryAetheryteOverride>
         {
@@ -128,6 +144,10 @@ public sealed class Plugin : IDalamudPlugin
     private bool approachSlowPathfindNoticeLogged;
     private int approachSubmittedWaypointCount;
     private int approachLastObservedWaypointCount = -1;
+    private int approachEmptyProjectionPasses;
+    private bool approachPointIsApproximate;
+    private bool approachApproximateRecoveryUsed;
+    private DateTime approachRecoveryStartedUtc = DateTime.MinValue;
     private Vector3? safePoint;
     private ParkingCandidate? selectedParkingCandidate;
     private Task<List<Vector3>>? parkingPathTask;
@@ -141,6 +161,9 @@ public sealed class Plugin : IDalamudPlugin
     private bool parkingPathUsesFlight;
     private Vector3 parkingLastProgressPosition;
     private DateTime parkingLastProgressUtc = DateTime.MinValue;
+    private DateTime parkingRecoveryStartedUtc = DateTime.MinValue;
+    private int parkingRecoveryFailures;
+    private bool parkingDeviationLogged;
     private Vector3? returnLandingPoint;
     private Vector3 returnLandingLastProgressPosition;
     private DateTime returnLandingStartedUtc = DateTime.MinValue;
@@ -158,6 +181,18 @@ public sealed class Plugin : IDalamudPlugin
     private bool markCombatObserved;
     private bool pullCycleCombatObserved;
     private bool pullCycleTagged;
+    private bool tagRequired;
+    private DateTime tagRequiredSinceUtc = DateTime.MinValue;
+    private DateTime tagEntityMissingSinceUtc = DateTime.MinValue;
+    private DateTime tagLastProgressUtc = DateTime.MinValue;
+    private Vector3 tagLastProgressPosition;
+    private float tagBestClearance = float.MaxValue;
+    private Vector3? tagLandingPoint;
+    private DateTime tagLandingStartedUtc = DateTime.MinValue;
+    private DateTime tagLandingLastProgressUtc = DateTime.MinValue;
+    private Vector3 tagLandingLastPosition;
+    private int tagRecoveryFailures;
+    private int tagHpEscalationMask;
     private ulong identifiedMarkGameObjectId;
     private int pullCycle = 1;
     private DateTime pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -202,12 +237,27 @@ public sealed class Plugin : IDalamudPlugin
     private int returnConfirmationAttempts;
     private int returnTeleportAttempts;
     private DateTime deadPostKillRewardGraceDeadlineUtc = DateTime.MinValue;
+    private DateTime raiseDialogFirstSeenUtc = DateTime.MinValue;
+    private DateTime raiseAcceptanceSubmittedUtc = DateTime.MinValue;
+    private DateTime nextRaiseAttemptUtc = DateTime.MinValue;
+    private DateTime lastRaiseDiagnosticUtc = DateTime.MinValue;
+    private bool raiseDialogCloseLogged;
+    private int raiseAcceptanceAttempts;
+    private string lastRaisePrompt = string.Empty;
     private SentinelState incidentalAggroResumeState = SentinelState.Idle;
     private DateTime incidentalAggroStartedUtc = DateTime.MinValue;
     private DateTime incidentalAggroClearSinceUtc = DateTime.MinValue;
     private DateTime incidentalAggroLastProgressUtc = DateTime.MinValue;
     private Vector3 incidentalAggroLastPosition;
     private int incidentalAggroEscapeAttempt;
+    private bool incidentalCombatFallbackActive;
+    private ulong incidentalCombatTargetId;
+    private DateTime nextIncidentalCombatActionUtc = DateTime.MinValue;
+    private DateTime huntSearchStartedUtc = DateTime.MinValue;
+    private DateTime locateWindowStartedUtc = DateTime.MinValue;
+    private DateTime finalLocateScanStartedUtc = DateTime.MinValue;
+    private int locateWindowCount;
+    private bool finalLocateReturnStarted;
     private Task<FaloopAuthenticationResult>? faloopLoginTask;
     private bool faloopLoginWasAutomatic;
     private bool automaticFaloopReauthenticationAttempted;
@@ -1342,6 +1392,7 @@ public sealed class Plugin : IDalamudPlugin
         markCombatObserved = false;
         pullCycleCombatObserved = false;
         pullCycleTagged = false;
+        ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -1359,7 +1410,9 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetRaiseTracking();
         ResetIncidentalAggroTracking();
+        ResetParkingRecoveryTracking();
         PrepareCurrentTravel();
         log.Information(
             "Hunt activated: {Mark} on {World}, territory {Territory}, instance {Instance}; positive kill evidence remains required",
@@ -1380,6 +1433,7 @@ public sealed class Plugin : IDalamudPlugin
         markCombatObserved = false;
         pullCycleCombatObserved = false;
         pullCycleTagged = false;
+        ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -1398,7 +1452,9 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetRaiseTracking();
         ResetIncidentalAggroTracking();
+        ResetParkingRecoveryTracking();
         PrepareCurrentTravel();
 
         // A real loaded SS entity always supersedes static/provider coordinates. Provider links
@@ -1440,6 +1496,8 @@ public sealed class Plugin : IDalamudPlugin
         crowdFallbackAnnounced = false;
         parkingCandidates.Clear();
         ResetApproachRouteTracking(clearProjectionCandidates: true);
+        ResetLocalApproachRecovery();
+        ResetLocateSearchTracking();
         nextActionUtc = DateTime.MinValue;
 
         if (current is null)
@@ -1663,6 +1721,7 @@ public sealed class Plugin : IDalamudPlugin
                     }
                     if (ObservePullCycleReset(visibleMark, now))
                         return;
+                    LatchTagRequirement(visibleMark, now);
                 }
                 else
                     pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -1670,12 +1729,18 @@ public sealed class Plugin : IDalamudPlugin
 
             if (combat.IsPlayerDead)
             {
-                if (visibleMark is not null && combat.TryAcceptRaise())
-                    status = $"Accepted Raise while {visibleMark.Name.TextValue} is still alive";
-                else
-                    status = visibleMark is null
-                        ? "Dead before the mark's death was confirmed; waiting for Raise (Return is locked)"
-                        : $"Dead while {visibleMark.Name.TextValue} is alive; waiting for Raise (Return is locked)";
+                TickRaiseAcceptance(now, visibleMark is null
+                    ? "Dead before the mark's death was confirmed; waiting for Raise (Return is locked)"
+                    : $"Dead while {visibleMark.Name.TextValue} is alive; waiting for Raise (Return is locked)");
+                return;
+            }
+
+            ObserveRaiseRecoveryCompletion(now);
+            if (tagRequired && state != SentinelState.TagApproach &&
+                state != SentinelState.AvoidIncidentalAggro && IsLocalHuntState(state))
+            {
+                BeginTagRequiredRecovery(visibleMark, now,
+                    $"{visibleMark.Name.TextValue} crossed the engage threshold before a tag was confirmed");
                 return;
             }
         }
@@ -1775,6 +1840,9 @@ public sealed class Plugin : IDalamudPlugin
     private void TickResetToUldah(DateTime now)
     {
         if (TickDeadPostKillRewardGrace(now))
+            return;
+
+        if (killConfirmed && combat.IsPlayerDead && TickCompletedRaiseResolution(now))
             return;
 
         UpdateReturnRecoveryWatchdog(now);
@@ -2185,7 +2253,7 @@ public sealed class Plugin : IDalamudPlugin
 
         return objects.OfType<IBattleChara>()
             .Where(actor => actor.ObjectKind == ObjectKind.BattleNpc &&
-                            actor.GameObjectId != identifiedMarkGameObjectId &&
+                            !IsCurrentMarkActor(actor) &&
                             !actor.IsDead && actor.CurrentHp > 0 && actor.IsTargetable &&
                             actor.TargetObjectId == player.GameObjectId &&
                             HorizontalDistance(actor.Position, player.Position) <= IncidentalAggroThreatRadius)
@@ -2284,6 +2352,31 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         incidentalAggroClearSinceUtc = DateTime.MinValue;
+        if (incidentalCombatFallbackActive)
+        {
+            TickIncidentalCombatFallback(threats, now);
+            return;
+        }
+
+        if (HuntProgressPolicy.ShouldUseIncidentalCombatFallback(
+                threats.Length > 0,
+                incidentalAggroEscapeAttempt,
+                IncidentalAggroEscapeAttemptLimit,
+                (now - incidentalAggroStartedUtc).TotalSeconds,
+                IncidentalAggroEscapeBudgetSeconds))
+        {
+            incidentalCombatFallbackActive = true;
+            incidentalCombatTargetId = threats[0].GameObjectId;
+            nextIncidentalCombatActionUtc = now;
+            vnav.StopSafe("bounded incidental escape exhausted; starting controlled WAR/MRD fallback");
+            log.Warning(
+                "Incidental escape exhausted after {Attempts} attempt(s) and {Seconds:0.0}s; switching to the positively identified non-mark attacker {Threat} ({ObjectId})",
+                incidentalAggroEscapeAttempt, (now - incidentalAggroStartedUtc).TotalSeconds,
+                threats[0].Name.TextValue, threats[0].GameObjectId);
+            TickIncidentalCombatFallback(threats, now);
+            return;
+        }
+
         var playerPosition = PlayerPosition();
         if (HorizontalDistance(playerPosition, incidentalAggroLastPosition) >= 3f)
         {
@@ -2324,6 +2417,91 @@ public sealed class Plugin : IDalamudPlugin
             incidentalAggroEscapeAttempt, HorizontalDistance(playerPosition, destination), fly);
         status = $"Incidental combat blocks travel; escape attempt {incidentalAggroEscapeAttempt} underway without attacking";
     }
+
+    private void TickIncidentalCombatFallback(IReadOnlyCollection<IBattleChara> threats, DateTime now)
+    {
+        if (current is null)
+            return;
+
+        var threat = threats.FirstOrDefault(actor => actor.GameObjectId == incidentalCombatTargetId) ??
+                     threats.FirstOrDefault();
+        var playerId = objects.LocalPlayer?.GameObjectId ?? 0;
+        if (threat is null || IsCurrentMarkActor(threat) || threat.IsDead || threat.CurrentHp == 0 ||
+            !threat.IsTargetable || playerId == 0 || threat.TargetObjectId != playerId)
+        {
+            incidentalCombatFallbackActive = false;
+            incidentalCombatTargetId = 0;
+            nextIncidentalCombatActionUtc = DateTime.MinValue;
+            status = "Incidental attacker is no longer positively identified; confirming combat has cleared";
+            return;
+        }
+
+        incidentalCombatTargetId = threat.GameObjectId;
+        if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
+        {
+            vnav.StopSafe("dismounting for bounded incidental attacker fallback");
+            if (now >= nextIncidentalCombatActionUtc)
+            {
+                UseGeneralAction(23);
+                nextIncidentalCombatActionUtc = now.AddSeconds(1);
+            }
+            status = $"Incidental escape exhausted; dismounting to clear only {threat.Name.TextValue}";
+            return;
+        }
+
+        var liveMark = FindMark();
+        var player = PlayerPosition();
+        var clearance = MathF.Max(0f,
+            HorizontalDistance(player, threat.Position) - threat.HitboxRadius -
+            (objects.LocalPlayer?.HitboxRadius ?? 0f));
+        if (clearance > 18f)
+        {
+            if (liveMark is not null &&
+                !ProtectedSegmentIsSafe(player, threat.Position, liveMark.Position,
+                    ProtectedCenterRadius(liveMark), true))
+            {
+                status = $"Incidental attacker {threat.Name.TextValue} is across the S-rank safety radius; holding and retrying ranged clearance only";
+            }
+            else if (!vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
+            {
+                var desiredCenterRange = threat.HitboxRadius +
+                                         (objects.LocalPlayer?.HitboxRadius ?? 0f) + 15f;
+                vnav.MoveCloseToSafe(threat.Position, false, desiredCenterRange);
+            }
+        }
+        else
+        {
+            vnav.StopSafe("using controlled single-target action on incidental attacker");
+        }
+
+        if (now < nextIncidentalCombatActionUtc)
+            return;
+
+        var action = combat.TryBasicWarTrashAction(threat);
+        nextIncidentalCombatActionUtc = now.AddSeconds(IncidentalCombatActionRetrySeconds);
+        if (!action.SupportedJob)
+        {
+            status = "Incidental escape exhausted, but controlled combat fallback is limited to WAR/MRD; retaining safe recovery diagnostics";
+            log.Error(
+                "Could not clear incidental attacker {Threat}: controlled fallback requires WAR/MRD; active hunt remains {Mark}",
+                threat.Name.TextValue, current.CreatureName);
+            return;
+        }
+
+        if (action.Submitted)
+            log.Information(
+                "Submitted controlled incidental-attacker action {ActionId} to {Threat}; the S/SS target remains excluded",
+                action.ActionId, threat.Name.TextValue);
+        status = action.Submitted
+            ? $"Clearing incidental attacker {threat.Name.TextValue} with WAR/MRD action {action.ActionId}; hunt state is preserved"
+            : $"Incidental attacker {threat.Name.TextValue} remains selected; waiting for range/GCD before the next basic action";
+    }
+
+    private bool IsCurrentMarkActor(IBattleChara actor) =>
+        actor.GameObjectId == identifiedMarkGameObjectId ||
+        (current is not null &&
+         ((current.MarkDataId != 0 && actor.BaseId == current.MarkDataId) ||
+          actor.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)));
 
     private bool TryStartIncidentalAggroEscape(
         IReadOnlyCollection<IBattleChara> threats,
@@ -2396,6 +2574,9 @@ public sealed class Plugin : IDalamudPlugin
         incidentalAggroLastProgressUtc = DateTime.MinValue;
         incidentalAggroLastPosition = default;
         incidentalAggroEscapeAttempt = 0;
+        incidentalCombatFallbackActive = false;
+        incidentalCombatTargetId = 0;
+        nextIncidentalCombatActionUtc = DateTime.MinValue;
     }
 
     private void ResetSsStagingTracking()
@@ -2518,9 +2699,8 @@ public sealed class Plugin : IDalamudPlugin
         if (now < deadPostKillRewardGraceDeadlineUtc)
         {
             var remaining = Math.Max(0, (deadPostKillRewardGraceDeadlineUtc - now).TotalSeconds);
-            status = combat.TryAcceptRaise()
-                ? "Accepted Raise during the post-kill reward grace; waiting for revival"
-                : $"Current hunt confirmed dead — waiting {remaining:0.0}s for reward/credit processing before Return";
+            TickRaiseAcceptance(now,
+                $"Current hunt confirmed dead — waiting {remaining:0.0}s for reward/credit processing before Return");
             return true;
         }
 
@@ -2544,6 +2724,142 @@ public sealed class Plugin : IDalamudPlugin
 
     private void ResetDeadPostKillRewardGrace() =>
         deadPostKillRewardGraceDeadlineUtc = DateTime.MinValue;
+
+    private bool TickRaiseAcceptance(DateTime now, string fallbackStatus)
+    {
+        if (!combat.IsPlayerDead)
+        {
+            ObserveRaiseRecoveryCompletion(now);
+            status = fallbackStatus;
+            return false;
+        }
+
+        if (now < nextRaiseAttemptUtc)
+        {
+            status = raiseAcceptanceSubmittedUtc == DateTime.MinValue
+                ? fallbackStatus
+                : "Raise acceptance submitted; waiting for the dialog to close or revival to begin";
+            return raiseAcceptanceSubmittedUtc != DateTime.MinValue;
+        }
+
+        var interaction = combat.TryAcceptRaise();
+        switch (interaction.State)
+        {
+            case RaiseInteractionState.Submitted:
+                if (raiseDialogFirstSeenUtc == DateTime.MinValue)
+                {
+                    raiseDialogFirstSeenUtc = now;
+                    log.Information("Raise dialog detected; prompt text recognized: {Prompt}", interaction.Prompt);
+                }
+                raiseAcceptanceAttempts++;
+                raiseAcceptanceSubmittedUtc = now;
+                nextRaiseAttemptUtc = now.AddSeconds(RaiseAcceptanceRetrySeconds);
+                raiseDialogCloseLogged = false;
+                lastRaisePrompt = interaction.Prompt;
+                log.Information(
+                    "Raise affirmative control available; acceptance callback submitted (attempt {Attempt})",
+                    raiseAcceptanceAttempts);
+                status = "Raise acceptance callback submitted; waiting for revival";
+                return true;
+
+            case RaiseInteractionState.AffirmativeUnavailable:
+                if (raiseDialogFirstSeenUtc == DateTime.MinValue)
+                    raiseDialogFirstSeenUtc = now;
+                if ((now - lastRaiseDiagnosticUtc).TotalSeconds >= RaiseAcceptanceRetrySeconds)
+                {
+                    log.Warning(
+                        "Raise dialog detected and prompt recognized, but the affirmative control is unavailable: {Prompt}",
+                        interaction.Prompt);
+                    lastRaiseDiagnosticUtc = now;
+                }
+                nextRaiseAttemptUtc = now.AddSeconds(0.5);
+                status = "Raise dialog recognized; waiting for the affirmative control to become available";
+                return true;
+
+            case RaiseInteractionState.PromptUnrecognized:
+                if ((now - lastRaiseDiagnosticUtc).TotalSeconds >= 5)
+                {
+                    log.Information("SelectYesno is open but is not a Raise prompt: {Prompt}", interaction.Prompt);
+                    lastRaiseDiagnosticUtc = now;
+                }
+                status = fallbackStatus;
+                return false;
+
+            default:
+                if (raiseAcceptanceSubmittedUtc != DateTime.MinValue)
+                {
+                    if (!raiseDialogCloseLogged)
+                    {
+                        log.Information(
+                            "Raise dialog closed after acceptance callback; waiting for revival state to begin");
+                        raiseDialogCloseLogged = true;
+                    }
+                    status = "Raise dialog closed; waiting for revival to begin";
+                    return true;
+                }
+                status = fallbackStatus;
+                return false;
+        }
+    }
+
+    private bool TickCompletedRaiseResolution(DateTime now)
+    {
+        var handled = TickRaiseAcceptance(now,
+            "Hunt complete; checking for a remaining Raise dialog before Return");
+        if (!handled)
+            return false;
+
+        var resolutionStart = raiseDialogFirstSeenUtc != DateTime.MinValue
+            ? raiseDialogFirstSeenUtc
+            : raiseAcceptanceSubmittedUtc;
+        if (resolutionStart == DateTime.MinValue ||
+            !HuntProgressPolicy.MayDeclineStuckRaiseAfterKill(
+                combat.IsPlayerDead,
+                false,
+                killConfirmed,
+                (now - resolutionStart).TotalSeconds,
+                CompletedRaiseResolutionBudgetSeconds))
+            return true;
+
+        var decline = combat.TryDeclineRaise();
+        if (decline.State == RaiseInteractionState.Declined)
+        {
+            log.Warning(
+                "Raise remained unresolved for {Seconds:0.0}s after the confirmed kill; submitted the negative callback so Return recovery cannot remain blocked",
+                (now - resolutionStart).TotalSeconds);
+            status = "Completed-hunt Raise dialog remained stuck; closing it before Return";
+            ResetRaiseTracking();
+            nextActionUtc = now.AddSeconds(1);
+            return true;
+        }
+
+        // The callback may already have closed the dialog between inspection and this frame.
+        ResetRaiseTracking();
+        return false;
+    }
+
+    private void ObserveRaiseRecoveryCompletion(DateTime now)
+    {
+        if (raiseDialogFirstSeenUtc == DateTime.MinValue &&
+            raiseAcceptanceSubmittedUtc == DateTime.MinValue)
+            return;
+        log.Information(
+            "Raise recovery observed: player is conscious; prompt={Prompt}, attempts={Attempts}, elapsed={Elapsed:0.0}s",
+            lastRaisePrompt, raiseAcceptanceAttempts,
+            raiseDialogFirstSeenUtc == DateTime.MinValue ? 0 : (now - raiseDialogFirstSeenUtc).TotalSeconds);
+        ResetRaiseTracking();
+    }
+
+    private void ResetRaiseTracking()
+    {
+        raiseDialogFirstSeenUtc = DateTime.MinValue;
+        raiseAcceptanceSubmittedUtc = DateTime.MinValue;
+        nextRaiseAttemptUtc = DateTime.MinValue;
+        lastRaiseDiagnosticUtc = DateTime.MinValue;
+        raiseDialogCloseLogged = false;
+        raiseAcceptanceAttempts = 0;
+        lastRaisePrompt = string.Empty;
+    }
 
     private void ReportReturnRecoveryFailure(string message)
     {
@@ -3022,9 +3338,19 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is null)
             return;
+        if (TrySwitchToVisibleMarkDuringApproach(now))
+            return;
         if (!vnav.IsReadySafe())
         {
             BeginMeshWait("vnavmesh mesh readiness was lost");
+            return;
+        }
+
+        if (approachRecoveryStartedUtc != DateTime.MinValue &&
+            (now - approachRecoveryStartedUtc).TotalSeconds >= LocalApproachRecoveryBudgetSeconds)
+        {
+            FailCurrent(
+                $"local coordinate projection/path recovery was exhausted after {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
             return;
         }
 
@@ -3034,6 +3360,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             if (!TryPrepareAlertPoint())
             {
+                if (HasUsableMapCoordinates(current) && approachRecoveryStartedUtc == DateTime.MinValue)
+                    approachRecoveryStartedUtc = now;
                 nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
                 status = HasUsableMapCoordinates(current)
                     ? $"Waiting for current game map data to convert {current.CreatureName}'s X{current.MapX:0.0} Y{current.MapY:0.0} destination; retrying"
@@ -3056,23 +3384,66 @@ public sealed class Plugin : IDalamudPlugin
             approachPoint = approachProjectionCandidates.Count > 0
                 ? approachProjectionCandidates.Dequeue()
                 : null;
+            if (approachPoint is not null)
+                approachPointIsApproximate = false;
             if (approachPoint is null)
             {
-                nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
-                status = $"Could not project {current.CreatureName}'s mapped local destination onto vnavmesh yet; " +
-                         "holding the active hunt and retrying";
-                return;
+                if (approachRecoveryStartedUtc == DateTime.MinValue)
+                    approachRecoveryStartedUtc = now;
+                approachEmptyProjectionPasses++;
+                var decision = HuntProgressPolicy.DecideProjectionRecovery(
+                    approachEmptyProjectionPasses,
+                    ProjectionFailuresBeforeApproximateRoute,
+                    approachApproximateRecoveryUsed,
+                    (now - approachRecoveryStartedUtc).TotalSeconds,
+                    LocalApproachRecoveryBudgetSeconds);
+                log.Warning(
+                    "Destination projection failed for {Mark}; pass {Pass}, local recovery={Recovery}, elapsed={Elapsed:0.0}s/{Budget:0}s",
+                    current.CreatureName, approachEmptyProjectionPasses, decision,
+                    (now - approachRecoveryStartedUtc).TotalSeconds, LocalApproachRecoveryBudgetSeconds);
+                if (decision == ProjectionRecoveryAction.BeginApproximateFlight &&
+                    TryPrepareApproximateAlertFlight())
+                {
+                    approachApproximateRecoveryUsed = true;
+                    ResetApproachRouteTracking(clearProjectionCandidates: false);
+                    nextActionUtc = now;
+                    log.Warning(
+                        "Destination projection failed for {Mark}; attempting bounded approximate X/Z flight while continuing actual-entity detection",
+                        current.CreatureName);
+                }
+                else if (decision == ProjectionRecoveryAction.AbandonUnresolved)
+                {
+                    FailCurrent(
+                        $"mapped destination remained unprojectable after {approachEmptyProjectionPasses} bounded passes and approximate recovery");
+                    return;
+                }
+
+                if (approachPoint is not null)
+                {
+                    status = $"Projection recovery: beginning approximate flight toward {current.CreatureName}'s reported X/Z";
+                }
+                else
+                {
+                    nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
+                    status = $"Could not project {current.CreatureName}'s mapped destination; bounded pass " +
+                             $"{approachEmptyProjectionPasses} will retry, then use approximate flight";
+                    return;
+                }
             }
 
-            approachProjectionCandidateIndex++;
-            ResetApproachRouteTracking(clearProjectionCandidates: false);
-            log.Information(
-                "Trying approach candidate {Index}/{Count} for {Mark}: local ({X:0.0}, {Z:0.0}), {Distance:0}y from player",
-                approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName,
-                approachPoint.Value.X, approachPoint.Value.Z,
-                HorizontalDistance(PlayerPosition(), approachPoint.Value));
-            status = $"Trying approach candidate {approachProjectionCandidateIndex}/{approachProjectionCandidateCount} " +
-                     $"for {current.CreatureName}";
+            if (!approachPointIsApproximate)
+            {
+                approachEmptyProjectionPasses = 0;
+                approachProjectionCandidateIndex++;
+                ResetApproachRouteTracking(clearProjectionCandidates: false);
+                log.Information(
+                    "Trying approach candidate {Index}/{Count} for {Mark}: local ({X:0.0}, {Z:0.0}), {Distance:0}y from player",
+                    approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName,
+                    approachPoint.Value.X, approachPoint.Value.Z,
+                    HorizontalDistance(PlayerPosition(), approachPoint.Value));
+                status = $"Trying approach candidate {approachProjectionCandidateIndex}/{approachProjectionCandidateCount} " +
+                         $"for {current.CreatureName}";
+            }
         }
 
         if (now < nextActionUtc)
@@ -3108,11 +3479,22 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (current is null)
             return;
+        if (TrySwitchToVisibleMarkDuringApproach(now))
+            return;
         if (!vnav.IsReadySafe())
         {
             vnav.StopSafe("mesh readiness was lost during explicit approach path lifecycle");
             ResetApproachRouteTracking(clearProjectionCandidates: false);
             BeginMeshWait("vnavmesh readiness was lost during the coordinate approach");
+            return;
+        }
+        if (approachRecoveryStartedUtc != DateTime.MinValue &&
+            (now - approachRecoveryStartedUtc).TotalSeconds >= LocalApproachRecoveryBudgetSeconds)
+        {
+            vnav.StopSafe("bounded local approach budget exhausted");
+            ResetApproachRouteTracking(clearProjectionCandidates: true);
+            FailCurrent(
+                $"local approach made no usable progress within {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
             return;
         }
         if (approachPoint is null)
@@ -3126,12 +3508,12 @@ public sealed class Plugin : IDalamudPlugin
         var distance = HorizontalDistance(playerPosition, approachPoint.Value);
         var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
             ActiveDistanceProfile.WaitingDistance);
-        if (distance <= scanRange + 8f)
+        if (distance <= scanRange + ApproachScanTolerance)
         {
             vnav.StopSafe("reported-coordinate scan range reached");
             log.Information(
-                "Within entity scan range for {Mark}: {Distance:0}y from the projected report; switching to mark detection",
-                current.CreatureName, distance);
+                "Within entity scan range for {Mark}: {Distance:0.0}y from the projected report; preferred={Preferred:0.0}y, tolerance={Tolerance:0.0}y; switching to mark detection",
+                current.CreatureName, distance, scanRange, ApproachScanTolerance);
             ResetApproachRouteTracking(clearProjectionCandidates: false);
             SetState(SentinelState.LocateMark,
                 $"Reached {current.CreatureName}'s reported area; beginning positive entity resolution");
@@ -3152,6 +3534,14 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!approachPathTask.IsCompleted)
             {
+                if (pathfindElapsed >= ApproachPathQueryTimeoutSeconds)
+                {
+                    approachPathTask = null;
+                    vnav.StopSafe("bounded local path query timed out");
+                    HandleStoppedApproachRoute(now,
+                        $"pathfinding exceeded {ApproachPathQueryTimeoutSeconds:0}s without returning a route");
+                    return;
+                }
                 if (pathfindElapsed >= ApproachSlowPathfindNoticeSeconds && !approachSlowPathfindNoticeLogged)
                 {
                     approachSlowPathfindNoticeLogged = true;
@@ -3297,19 +3687,64 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private bool TrySwitchToVisibleMarkDuringApproach(DateTime now)
+    {
+        if (current is null)
+            return false;
+        var visible = FindMark();
+        if (visible is null)
+            return false;
+
+        mark = visible;
+        MarkWasIdentified(visible);
+        if (visible.IsDead || visible.CurrentHp == 0)
+        {
+            ConfirmKill($"{visible.Name.TextValue} became visibly dead during local approach recovery");
+            return true;
+        }
+
+        vnav.StopSafe("actual hunt entity became visible during local coordinate approach");
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
+        approachPoint = null;
+        LatchTagRequirement(visible, now);
+        log.Information(
+            "Actual entity detected during local approach: {Mark}; switching immediately from approximate coordinates to dynamic tracking",
+            visible.Name.TextValue);
+        if (tagRequired)
+            BeginTagRequiredRecovery(visible, now,
+                $"{visible.Name.TextValue} became visible with the tag gate already open");
+        else
+            SetState(SentinelState.LocateMark,
+                $"{visible.Name.TextValue} is now detectable; switching to dynamic entity tracking");
+        return true;
+    }
+
+    private bool TryPrepareApproximateAlertFlight()
+    {
+        if (current is null || alertPoint is null)
+            return false;
+        var player = PlayerPosition();
+        approachPoint = new Vector3(alertPoint.Value.X, player.Y, alertPoint.Value.Z);
+        approachPointIsApproximate = true;
+        approachProjectionCandidateIndex = 1;
+        approachProjectionCandidateCount = 1;
+        log.Warning(
+            "Using bounded approximate local flight for {Mark}: X={X:0.0}, Z={Z:0.0}, flight Y={Y:0.0}; actual entity detection remains authoritative",
+            current.CreatureName, approachPoint.Value.X, approachPoint.Value.Z, approachPoint.Value.Y);
+        return true;
+    }
+
     private void PrepareApproachProjectionCandidates(Vector3 anchor)
     {
         approachProjectionCandidates.Clear();
         approachProjectionCandidateIndex = 0;
         approachProjectionCandidateCount = 0;
         var projected = new List<Vector3>();
-        var exactProjection = vnav.PointOnFloorSafe(anchor, 8f);
-        if (exactProjection is null)
-            log.Information(
-                "Exact destination projection failed for {Mark}; sampling nearby reachable candidates",
-                current?.CreatureName ?? "active hunt");
-
-        var offsets = new[] { 0f, 6f, 12f, 18f, 24f, 36f };
+        var playerY = PlayerPosition().Y;
+        var verticalOrigins = new[] { anchor.Y, playerY + 120f, playerY + 60f, playerY + 20f, playerY - 40f, 1024f }
+            .Distinct()
+            .ToArray();
+        var offsets = new[] { 0f, 6f, 12f, 18f, 24f, 36f, 54f, 72f };
         var angles = new[] { 0f, 45f, 90f, 135f, 180f, 225f, 270f, 315f };
 
         foreach (var radius in offsets)
@@ -3318,26 +3753,29 @@ public sealed class Plugin : IDalamudPlugin
             {
                 var radians = angle * MathF.PI / 180f;
                 var sample = anchor + new Vector3(MathF.Cos(radians) * radius, 0f, MathF.Sin(radians) * radius);
-                sample.Y = 1024f;
-                var floor = radius == 0f && exactProjection is not null
-                    ? exactProjection
-                    : vnav.PointOnFloorSafe(sample, 18f);
-                if (floor is null || projected.Any(point => HorizontalDistance(point, floor.Value) < 2f))
-                    continue;
-                projected.Add(floor.Value);
+                foreach (var originY in verticalOrigins)
+                {
+                    sample.Y = originY;
+                    var floor = vnav.PointOnFloorSafe(sample, radius == 0f ? 8f : 18f);
+                    if (floor is null || projected.Any(point => Vector3.Distance(point, floor.Value) < 2f))
+                        continue;
+                    projected.Add(floor.Value);
+                }
             }
         }
 
         var ordered = projected
             .OrderBy(point => HorizontalDistance(point, anchor))
-            .Take(16)
+            .ThenBy(point => MathF.Abs(point.Y - playerY))
+            .Take(24)
             .ToArray();
         foreach (var point in ordered)
             approachProjectionCandidates.Enqueue(point);
         approachProjectionCandidateCount = ordered.Length;
         log.Information(
-            "Reported destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} projected approach candidate(s)",
-            current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, ordered.Length);
+            "Reported destination resolved for {Mark}: local anchor ({X:0.0}, {Z:0.0}); prepared {Count} elevation-aware candidate(s) from {VerticalCount} vertical origin(s)",
+            current?.CreatureName ?? "active hunt", anchor.X, anchor.Z, ordered.Length,
+            verticalOrigins.Length);
     }
 
     private bool TryStartApproachRoute(DateTime now)
@@ -3449,6 +3887,7 @@ public sealed class Plugin : IDalamudPlugin
         approachBestRemaining = Math.Min(approachBestRemaining, remaining);
         approachLastProgressPosition = player;
         approachLastProgressUtc = now;
+        approachRecoveryStartedUtc = DateTime.MinValue;
     }
 
     private void HandleStoppedApproachRoute(DateTime now, string reason)
@@ -3477,6 +3916,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (destinationProgress >= ApproachMeaningfulProgressDistance)
         {
+            approachRecoveryStartedUtc = DateTime.MinValue;
             approachEarlyStops = 0;
             approachStartingEgressActive = false;
             approachRouteCandidates.Clear();
@@ -3485,6 +3925,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (approachRecoveryStartedUtc == DateTime.MinValue)
+            approachRecoveryStartedUtc = now;
         approachEarlyStops++;
         if (!approachStartingEgressActive)
         {
@@ -3515,6 +3957,7 @@ public sealed class Plugin : IDalamudPlugin
             "Approach candidate {Index}/{Count} rejected for {Mark}: {Reason}",
             approachProjectionCandidateIndex, approachProjectionCandidateCount, current.CreatureName, reason);
         approachPoint = null;
+        approachPointIsApproximate = false;
         ResetApproachRouteTracking(clearProjectionCandidates: false);
         nextActionUtc = now.AddSeconds(ApproachRouteRetrySeconds);
         SetState(SentinelState.PrepareApproachDestination,
@@ -3548,6 +3991,32 @@ public sealed class Plugin : IDalamudPlugin
         approachProjectionCandidates.Clear();
         approachProjectionCandidateIndex = 0;
         approachProjectionCandidateCount = 0;
+        approachPointIsApproximate = false;
+    }
+
+    private void ResetLocalApproachRecovery()
+    {
+        approachEmptyProjectionPasses = 0;
+        approachPointIsApproximate = false;
+        approachApproximateRecoveryUsed = false;
+        approachRecoveryStartedUtc = DateTime.MinValue;
+    }
+
+    private double CurrentLocateSearchBudgetSeconds()
+    {
+        var configuredWindow = Math.Max(30, config.LocateTimeoutSeconds);
+        return pendingAlerts.Count > 0
+            ? Math.Max(90, configuredWindow + 30)
+            : Math.Max(120, configuredWindow * 2);
+    }
+
+    private void ResetLocateSearchTracking()
+    {
+        huntSearchStartedUtc = DateTime.MinValue;
+        locateWindowStartedUtc = DateTime.MinValue;
+        finalLocateScanStartedUtc = DateTime.MinValue;
+        locateWindowCount = 0;
+        finalLocateReturnStarted = false;
     }
 
     private void TickLocateMark(DateTime now)
@@ -3572,23 +4041,106 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             vnav.StopSafe();
+            LatchTagRequirement(mark, now);
+            if (tagRequired)
+            {
+                BeginTagRequiredRecovery(mark, now,
+                    "Reacquired the live mark; resuming the latched tag operation before parking");
+                return;
+            }
             BeginSafeParking(mark, true);
             return;
         }
 
         vnav.StopSafe();
-        var elapsed = (now - stateSinceUtc).TotalSeconds;
-        if (elapsed >= config.LocateTimeoutSeconds)
+        if (huntSearchStartedUtc == DateTime.MinValue)
         {
-            stateSinceUtc = now;
-            status = $"{current.CreatureName} was not visible during the latest scan window; " +
-                     "remaining near its alert coordinates and continuing to rescan—no kill is inferred";
+            huntSearchStartedUtc = now;
+            locateWindowStartedUtc = now;
+            locateWindowCount = 1;
+            log.Information(
+                "LocateMark cumulative search started for {Mark}; window={Window}s, total budget={Budget:0}s, queued={Queued}",
+                current.CreatureName, config.LocateTimeoutSeconds, CurrentLocateSearchBudgetSeconds(),
+                pendingAlerts.Count);
+        }
+        if (locateWindowStartedUtc == DateTime.MinValue)
+            locateWindowStartedUtc = now;
+
+        var cumulative = (now - huntSearchStartedUtc).TotalSeconds;
+        if (finalLocateReturnStarted && finalLocateScanStartedUtc == DateTime.MinValue)
+        {
+            finalLocateScanStartedUtc = now;
+            locateWindowCount++;
+            log.Warning(
+                "Final positive entity scan started for {Mark} at the reported area after {Elapsed:0}s cumulative search",
+                current.CreatureName, cumulative);
+        }
+        var finalElapsed = finalLocateScanStartedUtc == DateTime.MinValue
+            ? 0
+            : (now - finalLocateScanStartedUtc).TotalSeconds;
+        var recovery = HuntProgressPolicy.DecideLocateRecovery(
+            cumulative,
+            CurrentLocateSearchBudgetSeconds(),
+            finalLocateReturnStarted,
+            finalElapsed,
+            FinalLocateScanSeconds);
+        if (recovery == LocateRecoveryAction.BeginFinalReportedAreaScan)
+        {
+            finalLocateReturnStarted = true;
+            var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
+                ActiveDistanceProfile.WaitingDistance);
+            if (alertPoint is not null &&
+                HorizontalDistance(PlayerPosition(), alertPoint.Value) > scanRange + ApproachScanTolerance)
+            {
+                approachPoint = null;
+                ResetApproachRouteTracking(clearProjectionCandidates: true);
+                approachRecoveryStartedUtc = now;
+                nextActionUtc = now;
+                log.Warning(
+                    "LocateMark search budget reached for {Mark}; returning once to the original reported coordinates for a final positive scan",
+                    current.CreatureName);
+                SetState(SentinelState.PrepareApproachDestination,
+                    $"Search budget reached after {cumulative:0}s; returning once to the reported area for a final scan");
+                return;
+            }
+
+            finalLocateScanStartedUtc = now;
+            locateWindowCount++;
+            log.Warning(
+                "LocateMark search budget reached for {Mark}; already at the reported area, beginning the final {Seconds:0}s positive scan",
+                current.CreatureName, FinalLocateScanSeconds);
+        }
+        else if (recovery == LocateRecoveryAction.AbandonUnresolved)
+        {
+            FailCurrent(
+                $"{current.CreatureName} remained unresolved—not confirmed dead—after {cumulative:0}s, {locateWindowCount} scan window(s), and the final reported-area scan");
             return;
         }
 
-        var remaining = Math.Max(0, config.LocateTimeoutSeconds - elapsed);
-        status = $"Near {current.CreatureName}'s alert coordinates; rescanning for the actual entity " +
-                 $"({remaining:0}s in this scan window). Missing does not mean dead";
+        var windowElapsed = (now - locateWindowStartedUtc).TotalSeconds;
+        if (!finalLocateReturnStarted && windowElapsed >= config.LocateTimeoutSeconds)
+        {
+            locateWindowStartedUtc = now;
+            locateWindowCount++;
+            log.Warning(
+                "LocateMark scan window {Window} completed for {Mark}; cumulative={Cumulative:0}s/{Budget:0}s. Missing remains neutral evidence",
+                locateWindowCount - 1, current.CreatureName, cumulative, CurrentLocateSearchBudgetSeconds());
+            status = $"{current.CreatureName} was not visible in scan window {locateWindowCount - 1}; " +
+                     $"continuing within the cumulative {CurrentLocateSearchBudgetSeconds():0}s search budget—no kill is inferred";
+            return;
+        }
+
+        if (finalLocateReturnStarted)
+        {
+            var finalRemaining = Math.Max(0, FinalLocateScanSeconds - finalElapsed);
+            status = $"Final positive scan for {current.CreatureName} at the original reported area " +
+                     $"({finalRemaining:0}s remaining). Failure will be unresolved, not dead";
+            return;
+        }
+
+        var remaining = Math.Max(0, config.LocateTimeoutSeconds - windowElapsed);
+        status = $"Near {current.CreatureName}'s alert coordinates; scan window {locateWindowCount}, " +
+                 $"{remaining:0}s remaining ({cumulative:0}s cumulative). Missing does not mean dead";
     }
 
     private void TickMoveToSafePoint(DateTime now)
@@ -3611,6 +4163,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         MarkWasIdentified(mark);
+        if (CheckParkingRecoveryBudget(mark, now))
+            return;
         if (parkingPathTask is not null || parkingGroundPathTask is not null)
         {
             PollCrowdParkingPath(mark, now);
@@ -3643,6 +4197,9 @@ public sealed class Plugin : IDalamudPlugin
                     ParkingRouteStallSeconds);
                 if (!TryStartNextParkingRoute(true, mark))
                 {
+                    if (RegisterParkingRecoveryFailure(mark,
+                            "the active parking route stalled and no alternate remained", now))
+                        return;
                     nextActionUtc = now.AddSeconds(3);
                     SetState(SentinelState.LocateMark,
                         "Safe parking was obstructed; keeping the hunt active and resampling another route");
@@ -3658,6 +4215,9 @@ public sealed class Plugin : IDalamudPlugin
             if (!TryStartNextParkingRoute(true, mark))
             {
                 vnav.StopSafe();
+                if (RegisterParkingRecoveryFailure(mark,
+                        "all sampled parking routes stopped before arrival", now))
+                    return;
                 nextActionUtc = now.AddSeconds(3);
                 SetState(SentinelState.LocateMark,
                     "All sampled parking routes were temporarily unavailable; keeping the hunt active and retrying");
@@ -3685,6 +4245,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         MarkWasIdentified(mark);
+        if (CheckParkingRecoveryBudget(mark, now))
+            return;
         if (!RevalidateParkingForLanding(mark, out var reason))
         {
             RestartSafeParkingAfterRevalidation(mark, reason);
@@ -3703,6 +4265,9 @@ public sealed class Plugin : IDalamudPlugin
                         $"Landing was obstructed; trying another safe point ({parkingCandidates.Count} alternatives remain)");
                     return;
                 }
+                if (RegisterParkingRecoveryFailure(mark,
+                        "landing timed out and no alternate parking candidate remained", now))
+                    return;
                 nextActionUtc = now.AddSeconds(3);
                 SetState(SentinelState.LocateMark,
                     "Landing was obstructed and no alternate remains; keeping the hunt active and resampling");
@@ -3712,6 +4277,7 @@ public sealed class Plugin : IDalamudPlugin
             nextActionUtc = now.AddSeconds(1);
             return;
         }
+        ResetParkingRecoveryTracking();
         SetState(SentinelState.SafeWait,
             $"Parked {ActiveDistanceProfile.WaitingDistance:0}y clear; " +
             $"emergency floor {ActiveDistanceProfile.EmergencyDistance:0}y");
@@ -3722,9 +4288,14 @@ public sealed class Plugin : IDalamudPlugin
         mark = FindMark();
         if (mark is null)
         {
-            status = "Mark temporarily not visible; holding position and refusing to chase";
+            vnav.StopSafe();
+            SetState(SentinelState.LocateMark,
+                "Mark temporarily not visible from safe wait; beginning bounded reacquisition without inferring death");
             return;
         }
+
+        MarkWasIdentified(mark);
+        LatchTagRequirement(mark, now);
 
         var clearance = ClearanceFromMark(mark);
         var hp = CombatController.HpPercent(mark);
@@ -3732,38 +4303,32 @@ public sealed class Plugin : IDalamudPlugin
         status = $"Safe wait: {mark.Name.TextValue} {clearance:0.0}y clear, {hp:0.0}% HP, " +
                  (inCombat ? "in combat" : "not in combat");
 
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(mark, now,
+                $"Tag required for pull cycle {pullCycle}; parking is suspended until one ranged tag is confirmed");
+            return;
+        }
+
         if (clearance < ActiveDistanceProfile.EmergencyDistance)
         {
             BeginGroundRetreat(mark);
             return;
         }
 
-        if (!tagAttempted && inCombat && hp <= ActiveDistanceProfile.EngageHpPercent)
-        {
-            activeTagActionId = combat.ResolveTagActionId();
-            if (activeTagActionId == 0)
-            {
-                status = "Combat/HP gate passed, but this job has no supported ranged tag; waiting without attacking";
-            }
-            else
-            {
-                combat.TargetMark(mark);
-                var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
-                if (vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
-                {
-                    log.Information("Proper pull detected for {Mark}; attempting ranged tag for pull cycle {PullCycle}",
-                        mark.Name.TextValue, pullCycle);
-                    SetState(SentinelState.TagApproach,
-                        $"Proper pull detected; attempting ranged tag for pull cycle {pullCycle} at {hp:0.0}% HP");
-                    return;
-                }
-            }
-        }
-
-        if (clearance > MaximumParkingClearance + 0.5f)
+        var preferredError = HuntProgressPolicy.ParkingClearanceError(
+            clearance, ActiveDistanceProfile.WaitingDistance);
+        if (clearance > MaximumParkingClearance + 0.5f ||
+            (preferredError > ParkingPreferredClearanceTolerance + 1f &&
+             (selectedParkingCandidate is null ||
+              HuntProgressPolicy.IsPreferredParkingClearance(
+                  ClearanceAtPoint(selectedParkingCandidate.Position, mark),
+                  ActiveDistanceProfile.WaitingDistance,
+                  ParkingPreferredClearanceTolerance))))
         {
             BeginSafeParking(mark, fly: false);
-            status = $"Mark moved {clearance:0}y away; returning to the safe waiting envelope within {MaximumParkingClearance:0}y";
+            status = $"Mark moved to {clearance:0.0}y clearance; returning toward the configured " +
+                     $"{ActiveDistanceProfile.WaitingDistance:0}y preference";
         }
     }
 
@@ -3773,15 +4338,49 @@ public sealed class Plugin : IDalamudPlugin
         if (mark is null)
         {
             vnav.StopSafe();
-            SetState(SentinelState.SafeWait, "Mark lost during tag approach; holding safely");
+            if (tagEntityMissingSinceUtc == DateTime.MinValue)
+                tagEntityMissingSinceUtc = now;
+            if ((now - tagEntityMissingSinceUtc).TotalSeconds >= TagEntityReacquireSeconds)
+            {
+                SetState(SentinelState.LocateMark,
+                    "Tag is still required, but the entity left object range; beginning bounded reacquisition without clearing the tag latch");
+                return;
+            }
+            status = "Tag remains required; briefly reacquiring the current entity without returning to ordinary waiting";
             return;
         }
         MarkWasIdentified(mark);
+        tagEntityMissingSinceUtc = DateTime.MinValue;
         if (mark.IsDead || mark.CurrentHp == 0)
         {
             ConfirmKill($"Positively identified {mark.Name.TextValue} is visibly dead during tag approach");
             return;
         }
+
+        LatchTagRequirement(mark, now);
+        if (!tagRequired)
+        {
+            if (tagAttempted)
+            {
+                if (now >= nextActionUtc)
+                    BeginGroundRetreat(mark, postTag: true);
+                else
+                    status = $"Tag confirmed (action {activeTagActionId}); holding briefly before retreat";
+            }
+            else
+                SetState(SentinelState.SafeWait, "The pull reset before a tag was required; returning to safe wait");
+            return;
+        }
+
+        if (tagRequiredSinceUtc != DateTime.MinValue &&
+            (now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds)
+        {
+            FailCurrent(
+                $"tag preparation remained unresolved for {TagRecoveryBudgetSeconds:0}s while the mark stayed alive");
+            return;
+        }
+
+        ReportTagRecoveryEscalation(mark);
 
         if (pendingTagDispatch is not null)
         {
@@ -3802,7 +4401,9 @@ public sealed class Plugin : IDalamudPlugin
             {
                 tagAttempted = true;
                 pullCycleTagged = true;
+                tagRequired = false;
                 pendingTagDispatch = null;
+                ResetTagRecoveryTracking(clearRequirement: false);
                 nextActionUtc = now.AddSeconds(3);
                 status = $"Tag confirmed for {mark.Name.TextValue}, pull cycle {pullCycle} " +
                          $"(action {activeTagActionId}, sequence {sequence}); attack cutoff is active";
@@ -3828,29 +4429,9 @@ public sealed class Plugin : IDalamudPlugin
             nextActionUtc = now.AddSeconds(1);
         }
 
-        if (tagAttempted)
-        {
-            if (now >= nextActionUtc)
-            {
-                BeginGroundRetreat(mark, postTag: true);
-                status = $"Attack cutoff active; retreating to {ActiveDistanceProfile.WaitingDistance:0}y after the confirmed tag";
-            }
-            else
-            {
-                status = $"Tag confirmed (action {activeTagActionId}); holding still briefly so casted tags are not cancelled";
-            }
-            return;
-        }
-
         if (condition[ConditionFlag.InFlight] || condition[ConditionFlag.Mounted])
         {
-            vnav.StopSafe("dismounting before the ranged tag");
-            if (now >= nextActionUtc)
-            {
-                UseGeneralAction(23);
-                nextActionUtc = now.AddSeconds(1);
-            }
-            status = $"Dismounting before tagging {mark.Name.TextValue}; the live hunt remains active";
+            TickTagLandingAndDismount(mark, now);
             return;
         }
 
@@ -3858,10 +4439,17 @@ public sealed class Plugin : IDalamudPlugin
             CombatController.HpPercent(mark) > ActiveDistanceProfile.EngageHpPercent)
         {
             vnav.StopSafe();
-            BeginGroundRetreat(mark);
+            status = $"Tag requirement remains latched for pull cycle {pullCycle}; waiting for the full-HP/out-of-combat reset confirmation";
             return;
         }
 
+        if (activeTagActionId == 0)
+            activeTagActionId = combat.ResolveTagActionId();
+        if (activeTagActionId == 0)
+        {
+            status = "Tag is required, but the current job has no supported ranged tag; bounded recovery remains active";
+            return;
+        }
 
         if (!combat.TargetMark(mark))
         {
@@ -3869,7 +4457,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (ClearanceFromMark(mark) <= TagApproachClearance + 1f)
+        var clearance = ClearanceFromMark(mark);
+        UpdateTagRecoveryProgress(mark, clearance, now);
+        if (clearance <= TagApproachClearance + 1f)
         {
             vnav.StopSafe();
             if (now >= nextActionUtc)
@@ -3899,13 +4489,43 @@ public sealed class Plugin : IDalamudPlugin
                         mark.Name.TextValue, activeTagActionId);
                 nextActionUtc = now.AddSeconds(1);
             }
+            status = $"Tag remains required for pull cycle {pullCycle}; retrying the same ranged action until server handling is confirmed";
+            return;
         }
 
-        if ((now - stateSinceUtc).TotalSeconds > 3 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
+        var routeRunning = vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe();
+        if (routeRunning && tagLastProgressUtc != DateTime.MinValue &&
+            (now - tagLastProgressUtc).TotalSeconds >= TagRouteStallSeconds)
         {
-            var desiredCenterRange = mark.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f) + TagApproachClearance;
-            vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange);
+            vnav.StopSafe("tag approach stalled without meaningful progress");
+            tagRecoveryFailures++;
+            tagLastProgressUtc = now;
+            nextActionUtc = now;
+            log.Warning(
+                "Tag-required ground approach stalled; retrying without clearing the latch (failure {Failure}, HP={Hp:0.0}%)",
+                tagRecoveryFailures, CombatController.HpPercent(mark));
+            routeRunning = false;
         }
+
+        if (!routeRunning && now >= nextActionUtc)
+        {
+            var desiredCenterRange = mark.HitboxRadius +
+                                     (objects.LocalPlayer?.HitboxRadius ?? 0f) +
+                                     TagApproachClearance;
+            if (!vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
+            {
+                tagRecoveryFailures++;
+                nextActionUtc = now.AddSeconds(1);
+                status = $"Tag-required approach could not start; retry {tagRecoveryFailures} remains latched while the mark is alive";
+                return;
+            }
+
+            tagLastProgressPosition = PlayerPosition();
+            tagBestClearance = clearance;
+            tagLastProgressUtc = now;
+        }
+
+        status = $"Tag required: approaching {mark.Name.TextValue} for one confirmed ranged action ({clearance:0.0}y clear)";
     }
 
     private void TickGroundRetreat(DateTime now)
@@ -3914,9 +4534,12 @@ public sealed class Plugin : IDalamudPlugin
         if (mark is null)
         {
             vnav.StopSafe();
-            SetState(SentinelState.SafeWait, "Mark lost during retreat; stopped safely");
+            SetState(SentinelState.LocateMark,
+                "Mark left object range during retreat; stopped safely and beginning bounded reacquisition");
             return;
         }
+        if (CheckParkingRecoveryBudget(mark, now))
+            return;
         if (parkingPathTask is not null || parkingGroundPathTask is not null)
         {
             PollCrowdParkingPath(mark, now);
@@ -3998,9 +4621,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            status = combat.TryAcceptRaise()
-                ? $"Accepted Raise during the {activeSsProfile.ExpansionName} SS grace"
-                : $"Dead during the {activeSsProfile.ExpansionName} SS grace; waiting briefly for SS evidence";
+            TickRaiseAcceptance(now,
+                $"Dead during the {activeSsProfile.ExpansionName} SS grace; waiting briefly for SS evidence");
             return;
         }
 
@@ -4567,17 +5189,31 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
+        LatchTagRequirement(target, DateTime.UtcNow);
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(target, DateTime.UtcNow,
+                "Tag gate is open; suspending safe parking until the ranged tag is confirmed");
+            return;
+        }
         if (!vnav.IsReadySafe())
         {
             BeginMeshWait("vnavmesh readiness was lost before dynamic safe parking");
             return;
         }
+        if (parkingRecoveryStartedUtc == DateTime.MinValue)
+            parkingRecoveryStartedUtc = DateTime.UtcNow;
+        if (CheckParkingRecoveryBudget(target, DateTime.UtcNow))
+            return;
         if (fly && !EnsureMounted(DateTime.UtcNow))
             return;
         PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance, preferCrowd: true);
         if (!TryStartNextParkingRoute(fly, target))
         {
             vnav.StopSafe();
+            if (RegisterParkingRecoveryFailure(target,
+                    "no sampled safe parking route was available", DateTime.UtcNow))
+                return;
             nextActionUtc = DateTime.UtcNow.AddSeconds(3);
             SetState(SentinelState.LocateMark,
                 "No sampled safe parking route is available yet; keeping the hunt active and retrying near the alert area");
@@ -4590,13 +5226,24 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginGroundRetreat(IBattleChara target, bool postTag = false)
     {
+        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        {
+            BeginTagRequiredRecovery(target, DateTime.UtcNow,
+                "Tag remains required; ordinary retreat cannot replace the pending ranged tag");
+            return;
+        }
         postTagRetreatActive = postTag;
+        if (parkingRecoveryStartedUtc == DateTime.MinValue)
+            parkingRecoveryStartedUtc = DateTime.UtcNow;
         PrepareParkingCandidates(target, ActiveDistanceProfile.WaitingDistance,
             preferCrowd: postTag, randomizedRetreat: postTag);
         if (!TryStartNextParkingRoute(false, target))
         {
             vnav.StopSafe();
             postTagRetreatActive = false;
+            if (!postTag && RegisterParkingRecoveryFailure(target,
+                    "no sampled ground-retreat route was available", DateTime.UtcNow))
+                return;
             SetState(SentinelState.SafeWait, postTag
                 ? "No protected randomized retreat route was reachable; holding position safely"
                 : "No sampled ground-retreat route was reachable; holding position");
@@ -4623,6 +5270,7 @@ public sealed class Plugin : IDalamudPlugin
         parkingGroundPathGoal = default;
         selectedParkingPath = null;
         crowdFallbackAnnounced = !preferCrowd;
+        parkingDeviationLogged = false;
         var player = PlayerPosition();
         var away = player - target.Position;
         away.Y = 0;
@@ -4636,19 +5284,20 @@ public sealed class Plugin : IDalamudPlugin
                 randomAngle + 80f, randomAngle - 80f]
             : [0f, 30f, -30f, 60f, -60f, 90f, -90f, 120f, -120f, 150f, -150f, 180f];
         float[] extraRadii = randomizedRetreat
-            ? [Random.Shared.NextSingle() * 4f + 2f, Random.Shared.NextSingle() * 4f + 5f]
+            ? [Random.Shared.NextSingle() * 2f, Random.Shared.NextSingle() * 2f + 2f]
             : [0f, 8f];
         var hitboxPadding = target.HitboxRadius + (objects.LocalPlayer?.HitboxRadius ?? 0f);
         var centerRadius = clearance + hitboxPadding;
         var minimumCenterDistance = ActiveDistanceProfile.EmergencyDistance + hitboxPadding + 3f;
         var accepted = new List<Vector3>();
+        var rankedCandidates = new List<(ParkingCandidate Candidate, float ClearanceError, float Score)>();
+        var crowdCandidateCount = 0;
 
         if (preferCrowd)
         {
             var clusters = DetectPlayerClusters(target);
             log.Information("Detected {ClusterCount} player clusters near {Mark}", clusters.Count, target.Name.TextValue);
 
-            var crowdCandidates = new List<(ParkingCandidate Candidate, float Score)>();
             foreach (var cluster in clusters)
             {
                 var towardCrowd = cluster.Center - target.Position;
@@ -4683,27 +5332,29 @@ public sealed class Plugin : IDalamudPlugin
                         ClearanceAtPoint(projected.Value, target) < clearance - 0.5f ||
                         ClearanceAtPoint(projected.Value, target) > MaximumParkingClearance + 0.5f ||
                         HorizontalDistance(projected.Value, cluster.Center) > CrowdRevalidationRadius ||
-                        crowdCandidates.Any(existing => HorizontalDistance(existing.Candidate.Position, projected.Value) < 2f))
+                        accepted.Any(existing => HorizontalDistance(existing, projected.Value) < 2f))
                         continue;
 
-                    var score = cluster.Population * 1000f -
-                                cluster.Tightness * 25f -
-                                HorizontalDistance(projected.Value, cluster.Center) * 3f -
-                                HorizontalDistance(player, projected.Value) * 0.25f -
-                                MathF.Abs(lateralOffsets[offsetIndex]);
-                    crowdCandidates.Add((
-                        new ParkingCandidate(projected.Value, true, cluster.Population, cluster.Center,
-                            true, randomizedRetreat), score));
+                    var candidateClearance = ClearanceAtPoint(projected.Value, target);
+                    var clearanceError = HuntProgressPolicy.ParkingClearanceError(
+                        candidateClearance, clearance);
+                    // Clearance is the dominant term. Crowd size only breaks close calls, and a
+                    // tiny per-process jitter lets two clients choose different equally safe points.
+                    var score = clearanceError * 100f +
+                                cluster.Tightness * 3f +
+                                HorizontalDistance(projected.Value, cluster.Center) * 2f +
+                                HorizontalDistance(player, projected.Value) * 0.2f -
+                                cluster.Population * 8f +
+                                Random.Shared.NextSingle() * 20f;
+                    var parking = new ParkingCandidate(projected.Value, true, cluster.Population,
+                        cluster.Center, true, randomizedRetreat);
+                    rankedCandidates.Add((parking, clearanceError, score));
+                    accepted.Add(projected.Value);
+                    crowdCandidateCount++;
                 }
             }
 
-            foreach (var entry in crowdCandidates.OrderByDescending(entry => entry.Score))
-            {
-                accepted.Add(entry.Candidate.Position);
-                parkingCandidates.Enqueue(entry.Candidate);
-            }
-
-            if (crowdCandidates.Count == 0)
+            if (crowdCandidateCount == 0)
             {
                 crowdFallbackAnnounced = true;
                 log.Information("No safe crowd candidate; using standard parking");
@@ -4733,10 +5384,31 @@ public sealed class Plugin : IDalamudPlugin
                 if (accepted.Any(point => HorizontalDistance(point, projected.Value) < 2f))
                     continue;
                 accepted.Add(projected.Value);
-                parkingCandidates.Enqueue(new ParkingCandidate(projected.Value, false, 0, Vector3.Zero,
-                    true, randomizedRetreat));
+                var candidateClearance = ClearanceAtPoint(projected.Value, target);
+                var clearanceError = HuntProgressPolicy.ParkingClearanceError(
+                    candidateClearance, clearance);
+                var score = clearanceError * 100f +
+                            HorizontalDistance(player, projected.Value) * 0.2f +
+                            Random.Shared.NextSingle() * 20f;
+                rankedCandidates.Add((
+                    new ParkingCandidate(projected.Value, false, 0, Vector3.Zero,
+                        true, randomizedRetreat),
+                    clearanceError,
+                    score));
             }
         }
+
+        foreach (var entry in rankedCandidates
+                     .OrderBy(entry => entry.ClearanceError <= ParkingPreferredClearanceTolerance ? 0 : 1)
+                     .ThenBy(entry => entry.Score))
+            parkingCandidates.Enqueue(entry.Candidate);
+
+        var preferredCount = rankedCandidates.Count(entry =>
+            entry.ClearanceError <= ParkingPreferredClearanceTolerance);
+        log.Information(
+            "Prepared {Count} parking candidate(s) for preferred {Preferred:0.0}y clearance: {PreferredCount} within ±{Tolerance:0.0}y, {CrowdCount} crowd-derived",
+            rankedCandidates.Count, clearance, preferredCount, ParkingPreferredClearanceTolerance,
+            crowdCandidateCount);
         if (randomizedRetreat)
             log.Information("Randomized offset: accepted {Count} protected post-tag retreat candidate(s)",
                 parkingCandidates.Count);
@@ -4998,6 +5670,15 @@ public sealed class Plugin : IDalamudPlugin
         parkingLastProgressUtc = now;
         parkingPathStartedUtc = DateTime.MinValue;
         var clearance = ClearanceAtPoint(candidate.Position, target);
+        var clearanceError = HuntProgressPolicy.ParkingClearanceError(
+            clearance, ActiveDistanceProfile.WaitingDistance);
+        if (clearanceError > ParkingPreferredClearanceTolerance && !parkingDeviationLogged)
+        {
+            parkingDeviationLogged = true;
+            log.Warning(
+                "Parking deviates from configured preference: selected={Selected:0.0}y, preferred={Preferred:0.0}y, difference={Difference:0.0}y because closer candidates failed projection/path/ground-safety validation",
+                clearance, ActiveDistanceProfile.WaitingDistance, clearanceError);
+        }
         if (candidate.IsRandomizedRetreat)
         {
             status = $"Post-tag retreat target: {clearance:0}y from mark";
@@ -5053,6 +5734,9 @@ public sealed class Plugin : IDalamudPlugin
                 "No protected randomized retreat route is currently reachable; holding position safely");
             return;
         }
+        if (RegisterParkingRecoveryFailure(target,
+                "all protected parking candidates failed route or ground-connectivity validation", now))
+            return;
         nextActionUtc = now.AddSeconds(3);
         SetState(SentinelState.LocateMark,
             "No crowd or standard parking route is currently reachable; keeping the hunt active and retrying");
@@ -5112,6 +5796,63 @@ public sealed class Plugin : IDalamudPlugin
         log.Information("{Reason}", reason);
         status = reason;
         BeginSafeParking(target, true);
+    }
+
+    private bool RegisterParkingRecoveryFailure(IBattleChara target, string reason, DateTime now)
+    {
+        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        {
+            BeginTagRequiredRecovery(target, now,
+                $"Parking/landing recovery failed while a tag is required: {reason}");
+            return true;
+        }
+
+        // Once credit is already secured, holding safely for the confirmed death is preferable
+        // to abandoning a live hunt only because an optional retreat point was unavailable.
+        if (pullCycleTagged && tagAttempted)
+            return false;
+
+        if (parkingRecoveryStartedUtc == DateTime.MinValue)
+            parkingRecoveryStartedUtc = now;
+        parkingRecoveryFailures++;
+        var elapsed = (now - parkingRecoveryStartedUtc).TotalSeconds;
+        log.Warning(
+            "Parking/landing recovery failure {Failure}/{Limit} after {Elapsed:0.0}s for {Mark}: {Reason}",
+            parkingRecoveryFailures, MaximumParkingRecoveryFailures, elapsed,
+            current?.CreatureName ?? target.Name.TextValue, reason);
+        if (parkingRecoveryFailures < MaximumParkingRecoveryFailures &&
+            elapsed < ParkingRecoveryBudgetSeconds)
+            return false;
+
+        FailCurrent(
+            $"parking/landing remained unresolved after {parkingRecoveryFailures} failures and {elapsed:0}s ({reason})");
+        return true;
+    }
+
+    private bool CheckParkingRecoveryBudget(IBattleChara target, DateTime now)
+    {
+        if (parkingRecoveryStartedUtc == DateTime.MinValue ||
+            pullCycleTagged && tagAttempted ||
+            (now - parkingRecoveryStartedUtc).TotalSeconds < ParkingRecoveryBudgetSeconds)
+            return false;
+
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(target, now,
+                "Parking/landing recovery budget expired while the tag latch was active");
+            return true;
+        }
+
+        FailCurrent(
+            $"parking/landing made no terminal progress within {ParkingRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
+        return true;
+    }
+
+    private void ResetParkingRecoveryTracking()
+    {
+        parkingRecoveryStartedUtc = DateTime.MinValue;
+        parkingRecoveryFailures = 0;
+        parkingDeviationLogged = false;
     }
 
     private List<PlayerCluster> DetectPlayerClusters(IBattleChara target) =>
@@ -5628,6 +6369,7 @@ public sealed class Plugin : IDalamudPlugin
         markCombatObserved = false;
         pullCycleCombatObserved = false;
         pullCycleTagged = false;
+        ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
         pullResetCandidateSinceUtc = DateTime.MinValue;
@@ -5645,10 +6387,14 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        ResetRaiseTracking();
         ResetReturnLandingRecovery();
         ResetIncidentalAggroTracking();
+        ResetParkingRecoveryTracking();
         parkingCandidates.Clear();
         ResetApproachRouteTracking(clearProjectionCandidates: true);
+        ResetLocalApproachRecovery();
+        ResetLocateSearchTracking();
     }
 
     private bool CanResolveMarkInState() => state is
@@ -5672,6 +6418,7 @@ public sealed class Plugin : IDalamudPlugin
             log.Information(
                 "Entity first positively identified: {Mark}, object={ObjectId}, world={World}, territory={Territory}",
                 target.Name.TextValue, target.GameObjectId, travel.CurrentWorld, clientState.TerritoryType);
+        ResetLocateSearchTracking();
         if (CombatController.IsMarkInCombat(target))
         {
             markCombatObserved = true;
@@ -5683,6 +6430,226 @@ public sealed class Plugin : IDalamudPlugin
             }
         }
     }
+
+    private void LatchTagRequirement(IBattleChara target, DateTime now)
+    {
+        var hp = CombatController.HpPercent(target);
+        if (!HuntProgressPolicy.ShouldLatchTag(
+                !target.IsDead && target.CurrentHp > 0,
+                CombatController.IsMarkInCombat(target),
+                hp,
+                ActiveDistanceProfile.EngageHpPercent,
+                pullCycleTagged || tagAttempted))
+            return;
+
+        if (!tagRequired)
+        {
+            tagRequired = true;
+            tagRequiredSinceUtc = now;
+            tagLastProgressUtc = now;
+            tagLastProgressPosition = PlayerPosition();
+            tagBestClearance = ClearanceFromMark(target);
+            tagRecoveryFailures = 0;
+            tagHpEscalationMask = 0;
+            activeTagActionId = combat.ResolveTagActionId();
+            log.Warning(
+                "Tag requirement latched: {Mark}, pull cycle={PullCycle}, HP={Hp:0.0}%, mounted={Mounted}, flying={Flying}; parking/mounting cannot clear this obligation",
+                target.Name.TextValue, pullCycle, hp,
+                condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+        }
+
+        ReportTagRecoveryEscalation(target);
+    }
+
+    private void BeginTagRequiredRecovery(IBattleChara? target, DateTime now, string reason)
+    {
+        if (!tagRequired)
+            return;
+
+        vnav.StopSafe("tag requirement supersedes parking and landing");
+        parkingPathTask = null;
+        parkingGroundPathTask = null;
+        pendingParkingFlightPath = null;
+        selectedParkingPath = null;
+        parkingCandidates.Clear();
+        safePoint = null;
+        selectedParkingCandidate = null;
+        postTagRetreatActive = false;
+        tagEntityMissingSinceUtc = target is null ? now : DateTime.MinValue;
+        if (tagLastProgressUtc == DateTime.MinValue)
+        {
+            tagLastProgressUtc = now;
+            tagLastProgressPosition = PlayerPosition();
+            tagBestClearance = target is null ? float.MaxValue : ClearanceFromMark(target);
+        }
+        SetState(SentinelState.TagApproach, reason);
+    }
+
+    private void TickTagLandingAndDismount(IBattleChara target, DateTime now)
+    {
+        if (tagLandingStartedUtc == DateTime.MinValue)
+        {
+            tagLandingStartedUtc = now;
+            tagLandingLastProgressUtc = now;
+            tagLandingLastPosition = PlayerPosition();
+            vnav.StopSafe("beginning tag-required landing");
+            log.Information(
+                "Tag requirement took priority while mounted/flying; beginning landing and dismount for {Mark}",
+                target.Name.TextValue);
+        }
+
+        if (!condition[ConditionFlag.InFlight])
+        {
+            tagLandingPoint = null;
+            vnav.StopSafe("dismounting on the ground for tag recovery");
+            if (now >= nextActionUtc)
+            {
+                UseGeneralAction(23);
+                nextActionUtc = now.AddSeconds(1);
+            }
+            status = $"Tag required: dismounting on safe ground before targeting {target.Name.TextValue}";
+            return;
+        }
+
+        var player = PlayerPosition();
+        if (HorizontalDistance(player, tagLandingLastPosition) >= ParkingMeaningfulProgressDistance)
+        {
+            tagLandingLastPosition = player;
+            tagLandingLastProgressUtc = now;
+        }
+
+        if (tagLandingPoint is not null)
+        {
+            if (Vector3.Distance(player, tagLandingPoint.Value) <= 5f)
+            {
+                vnav.StopSafe("tag landing recovery point reached");
+                tagLandingPoint = null;
+                tagLandingStartedUtc = now;
+                nextActionUtc = now;
+            }
+            else if ((vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe()) &&
+                     (now - tagLandingLastProgressUtc).TotalSeconds < TagRouteStallSeconds)
+            {
+                status = $"Tag required: moving to a safe landing point before dismounting for {target.Name.TextValue}";
+                return;
+            }
+            else
+            {
+                vnav.StopSafe("tag landing recovery route stalled");
+                tagLandingPoint = null;
+                tagRecoveryFailures++;
+                tagLandingLastProgressUtc = now;
+            }
+        }
+
+        if ((now - tagLandingStartedUtc).TotalSeconds >= LandingAttemptTimeoutSeconds &&
+            TryStartTagLandingRecovery(target, now))
+            return;
+
+        vnav.StopSafe("requesting normal landing for required tag");
+        if (now >= nextActionUtc)
+        {
+            UseGeneralAction(23);
+            nextActionUtc = now.AddSeconds(1);
+        }
+        status = $"Tag required: landing before the one ranged tag on {target.Name.TextValue}; remounting is suppressed";
+    }
+
+    private bool TryStartTagLandingRecovery(IBattleChara target, DateTime now)
+    {
+        var player = PlayerPosition();
+        var away = player - target.Position;
+        away.Y = 0f;
+        if (away.LengthSquared() < 0.01f)
+            away = Vector3.UnitX;
+        away = Vector3.Normalize(away);
+        var tangent = new Vector3(-away.Z, 0f, away.X);
+
+        foreach (var (outward, lateral) in new[]
+                 {
+                     (0f, 0f), (8f, 0f), (12f, 6f), (12f, -6f), (18f, 10f), (18f, -10f),
+                 })
+        {
+            var sample = player + away * outward + tangent * lateral;
+            sample.Y = 1024f;
+            var floor = vnav.PointOnFloorSafe(sample, 12f);
+            if (floor is null ||
+                ClearanceAtPoint(floor.Value, target) < ActiveDistanceProfile.EmergencyDistance ||
+                !ProtectedSegmentIsSafe(player, floor.Value, target.Position,
+                    ProtectedCenterRadius(target), true) ||
+                !vnav.MoveToSafe(floor.Value, true))
+                continue;
+
+            tagLandingPoint = floor.Value;
+            tagLandingLastPosition = player;
+            tagLandingLastProgressUtc = now;
+            tagRecoveryFailures++;
+            log.Warning(
+                "Normal tag landing did not finish; using protected landing recovery point {Attempt} at {Clearance:0.0}y clearance",
+                tagRecoveryFailures, ClearanceAtPoint(floor.Value, target));
+            status = "Normal landing did not finish; moving to an alternate protected landing point for the required tag";
+            return true;
+        }
+
+        tagRecoveryFailures++;
+        tagLandingStartedUtc = now;
+        log.Warning(
+            "No protected tag landing recovery point resolved; retrying normal landing (failure {Failure})",
+            tagRecoveryFailures);
+        return false;
+    }
+
+    private void UpdateTagRecoveryProgress(IBattleChara target, float clearance, DateTime now)
+    {
+        var player = PlayerPosition();
+        if (HorizontalDistance(player, tagLastProgressPosition) < ParkingMeaningfulProgressDistance &&
+            tagBestClearance - clearance < ParkingMeaningfulProgressDistance)
+            return;
+
+        tagLastProgressPosition = player;
+        tagBestClearance = Math.Min(tagBestClearance, clearance);
+        tagLastProgressUtc = now;
+    }
+
+    private void ReportTagRecoveryEscalation(IBattleChara target)
+    {
+        if (!tagRequired || pullCycleTagged || tagAttempted)
+            return;
+        var hp = CombatController.HpPercent(target);
+        var bit = hp <= 25f ? 2 : hp <= 50f ? 1 : 0;
+        if (bit == 0 || (tagHpEscalationMask & bit) != 0)
+            return;
+        tagHpEscalationMask |= bit;
+        log.Warning(
+            "Tag still unconfirmed at {Hp:0.0}% HP for {Mark}; escalating landing/range recovery without issuing any extra attack after confirmation",
+            hp, target.Name.TextValue);
+    }
+
+    private void ResetTagRecoveryTracking(bool clearRequirement = true)
+    {
+        if (clearRequirement)
+            tagRequired = false;
+        tagRequiredSinceUtc = DateTime.MinValue;
+        tagEntityMissingSinceUtc = DateTime.MinValue;
+        tagLastProgressUtc = DateTime.MinValue;
+        tagLastProgressPosition = default;
+        tagBestClearance = float.MaxValue;
+        tagLandingPoint = null;
+        tagLandingStartedUtc = DateTime.MinValue;
+        tagLandingLastProgressUtc = DateTime.MinValue;
+        tagLandingLastPosition = default;
+        tagRecoveryFailures = 0;
+        tagHpEscalationMask = 0;
+    }
+
+    private static bool IsLocalHuntState(SentinelState value) => value is
+        SentinelState.PrepareApproachDestination or
+        SentinelState.ApproachAlertCoordinates or
+        SentinelState.LocateMark or
+        SentinelState.MoveToSafePoint or
+        SentinelState.Landing or
+        SentinelState.SafeWait or
+        SentinelState.GroundRetreat;
 
     private void ResetPendingTagDispatch() => pendingTagDispatch = null;
 
@@ -5699,8 +6666,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool ObservePullCycleReset(IBattleChara target, DateTime now)
     {
-        if (current is null || !markEverIdentified || !pullCycleCombatObserved || !pullCycleTagged ||
-            !tagAttempted || killConfirmed || target.IsDead || target.CurrentHp == 0 ||
+        if (current is null || !markEverIdentified || !pullCycleCombatObserved ||
+            (!tagRequired && (!pullCycleTagged || !tagAttempted)) ||
+            killConfirmed || target.IsDead || target.CurrentHp == 0 ||
             clientState.TerritoryType != current.TerritoryId ||
             !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
             identifiedMarkGameObjectId == 0 || target.GameObjectId != identifiedMarkGameObjectId)
@@ -5731,20 +6699,22 @@ public sealed class Plugin : IDalamudPlugin
             return false;
 
         var completedCycle = pullCycle;
+        var completedCycleTagged = pullCycleTagged;
         var stableSeconds = (now - pullResetCandidateSinceUtc).TotalSeconds;
         pullCycle++;
         tagAttempted = false;
         pullCycleCombatObserved = false;
         pullCycleTagged = false;
+        ResetTagRecoveryTracking();
         activeTagActionId = 0;
         ResetPendingTagDispatch();
         postTagRetreatActive = false;
         pullResetCandidateSinceUtc = DateTime.MinValue;
         vnav.StopSafe();
         log.Information(
-            "Reset confirmed: same {Mark} entity {ObjectId}, previous combat=true, previous tag=true, combat=false, HP={Hp:0.0}%, stable={Stable:0.0}s; completed pull cycle {PullCycle}",
-            target.Name.TextValue, target.GameObjectId, CombatController.HpPercent(target),
-            stableSeconds, completedCycle);
+            "Reset confirmed: same {Mark} entity {ObjectId}, previous combat=true, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, stable={Stable:0.0}s; completed pull cycle {PullCycle}",
+            target.Name.TextValue, target.GameObjectId, completedCycleTagged,
+            CombatController.HpPercent(target), stableSeconds, completedCycle);
         log.Information("Tag gate re-armed for pull cycle {PullCycle}", pullCycle);
 
         var resetClearance = ClearanceFromMark(target);

@@ -19,6 +19,29 @@ internal readonly record struct TagActionState(
     ushort LastHandledSequence,
     bool QueuedForTarget);
 
+internal enum RaiseInteractionState
+{
+    NoDialog,
+    PromptUnrecognized,
+    AffirmativeUnavailable,
+    Submitted,
+    Declined,
+}
+
+internal readonly record struct RaiseInteraction(
+    RaiseInteractionState State,
+    string Prompt)
+{
+    public bool Recognized => State is RaiseInteractionState.AffirmativeUnavailable or
+        RaiseInteractionState.Submitted or RaiseInteractionState.Declined;
+}
+
+internal readonly record struct TrashActionAttempt(
+    bool SupportedJob,
+    bool Targeted,
+    bool Submitted,
+    uint ActionId);
+
 internal sealed class CombatController(
     IGameGui gameGui,
     ICondition condition,
@@ -123,25 +146,80 @@ internal sealed class CombatController(
         _ => 0,              // Pugilist/Monk and non-combat jobs have no safe native ranged tag.
     };
 
-    public unsafe bool TryAcceptRaise()
+    public unsafe RaiseInteraction TryAcceptRaise()
     {
         if (!IsPlayerDead)
-            return false;
+            return new RaiseInteraction(RaiseInteractionState.NoDialog, string.Empty);
 
         var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
-        if (addon is null || !addon->IsReady || !addon->IsVisible ||
-            addon->PromptText is null || addon->YesButton is null || !addon->YesButton->IsEnabled)
-            return false;
+        if (addon is null || !addon->IsReady || !addon->IsVisible || addon->PromptText is null)
+            return new RaiseInteraction(RaiseInteractionState.NoDialog, string.Empty);
 
         var prompt = addon->PromptText->NodeText.ToString();
-        if (!prompt.Contains("Raise", StringComparison.OrdinalIgnoreCase) &&
-            !prompt.Contains("resurrect", StringComparison.OrdinalIgnoreCase))
-            return false;
+        if (!IsRaisePrompt(prompt))
+            return new RaiseInteraction(RaiseInteractionState.PromptUnrecognized, prompt);
+        if (addon->YesButton is null || !addon->YesButton->IsEnabled)
+            return new RaiseInteraction(RaiseInteractionState.AffirmativeUnavailable, prompt);
 
         var value = new AtkValue { Type = AtkValueType.Int, Int = 0 };
         ((AtkUnitBase*)addon)->FireCallback(1, &value, true);
-        return true;
+        return new RaiseInteraction(RaiseInteractionState.Submitted, prompt);
     }
+
+    public unsafe RaiseInteraction TryDeclineRaise()
+    {
+        if (!IsPlayerDead)
+            return new RaiseInteraction(RaiseInteractionState.NoDialog, string.Empty);
+
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon is null || !addon->IsReady || !addon->IsVisible || addon->PromptText is null)
+            return new RaiseInteraction(RaiseInteractionState.NoDialog, string.Empty);
+
+        var prompt = addon->PromptText->NodeText.ToString();
+        if (!IsRaisePrompt(prompt))
+            return new RaiseInteraction(RaiseInteractionState.PromptUnrecognized, prompt);
+
+        var value = new AtkValue { Type = AtkValueType.Int, Int = 1 };
+        ((AtkUnitBase*)addon)->FireCallback(1, &value, true);
+        return new RaiseInteraction(RaiseInteractionState.Declined, prompt);
+    }
+
+    public unsafe TrashActionAttempt TryBasicWarTrashAction(IBattleChara target)
+    {
+        var classJobId = objects.LocalPlayer?.ClassJob.RowId ?? 0;
+        if (classJobId is not (3 or 21) || IsPlayerDead || target.IsDead || target.CurrentHp == 0)
+            return new TrashActionAttempt(false, false, false, 0);
+
+        var targeted = TargetMark(target);
+        if (!targeted)
+            return new TrashActionAttempt(true, false, false, 0);
+
+        var player = objects.LocalPlayer;
+        var dx = (player?.Position.X ?? 0f) - target.Position.X;
+        var dz = (player?.Position.Z ?? 0f) - target.Position.Z;
+        var centerDistance = MathF.Sqrt(dx * dx + dz * dz);
+        var meleeRange = target.HitboxRadius + (player?.HitboxRadius ?? 0f) + 3f;
+        var baseActionId = centerDistance <= meleeRange ? 31u : 46u; // Heavy Swing / Tomahawk
+        var manager = ActionManager.Instance();
+        if (manager is null)
+            return new TrashActionAttempt(true, true, false, baseActionId);
+
+        var adjustedActionId = manager->GetAdjustedActionId(baseActionId);
+        var actionId = adjustedActionId == 0 ? baseActionId : adjustedActionId;
+        if (manager->GetActionStatus(ActionType.Action, actionId, target.GameObjectId) != 0)
+            return new TrashActionAttempt(true, true, false, actionId);
+
+        return new TrashActionAttempt(
+            true,
+            true,
+            manager->UseAction(ActionType.Action, actionId, target.GameObjectId),
+            actionId);
+    }
+
+    private static bool IsRaisePrompt(string prompt) =>
+        prompt.Contains("Raise", StringComparison.OrdinalIgnoreCase) ||
+        prompt.Contains("resurrect", StringComparison.OrdinalIgnoreCase) ||
+        prompt.Contains("revive", StringComparison.OrdinalIgnoreCase);
 
     public unsafe bool UseReturn()
     {
