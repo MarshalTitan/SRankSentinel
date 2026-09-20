@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.7.37.0</Version>
+    <Version>0.7.38.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -13,5 +13,6 @@
   <ItemGroup>
     <!-- Keep the separate Sentinel Hunts project out of S Rank Sentinel's default recursive compile glob. -->
     <Compile Remove="SentinelHunts\**\*.cs" />
+    <Compile Remove="SRankSentinel.StateTests\**\*.cs" />
   </ItemGroup>
 </Project>

@@ -23,6 +23,9 @@ jobs:
       - name: Audit restored v0.7.34 travel contract
         run: node .github/scripts/Audit-V734TravelRestore.mjs Plugin.cs NativeTravel.cs HuntCatalog.cs VNavmeshIpc.cs
 
+      - name: Audit field-recovery state contracts
+        run: node .github/scripts/Audit-FieldRecovery.mjs Plugin.cs CombatController.cs HuntProgressPolicy.cs SRankSentinel.csproj
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -39,6 +42,9 @@ jobs:
 
       - name: Restore
         run: dotnet restore SRankSentinel.csproj
+
+      - name: Run state-machine regression tests
+        run: dotnet run --project SRankSentinel.StateTests/SRankSentinel.StateTests.csproj -c Release
 
       - name: Build release package
         run: dotnet build SRankSentinel.csproj -c Release --no-restore
