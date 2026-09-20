@@ -4278,8 +4278,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         ResetParkingRecoveryTracking();
+        var landedClearance = ClearanceFromMark(mark);
         SetState(SentinelState.SafeWait,
-            $"Parked {ActiveDistanceProfile.WaitingDistance:0}y clear; " +
+            $"Parked {landedClearance:0.0}y clear (preferred {ActiveDistanceProfile.WaitingDistance:0}y); " +
             $"emergency floor {ActiveDistanceProfile.EmergencyDistance:0}y");
     }
 
