@@ -63,7 +63,7 @@ const tagBody = plugin.match(/private void TickTagApproach\(DateTime now\)([\s\S
 if (!tagBody || tagBody.includes('SetState(SentinelState.SafeWait, "Mark lost during tag approach'))
   throw new Error("TagApproach can still silently clear to ordinary waiting when the entity is temporarily missing");
 
-const failCurrentBody = plugin.match(/private void FailCurrent\([\s\S]*?\n    }\n\n    private void ClearCurrent/)?.[0];
+const failCurrentBody = plugin.match(/private void FailCurrent\([\s\S]*?\r?\n    }\r?\n\r?\n    private void ClearCurrent/)?.[0];
 if (!failCurrentBody?.includes("TryBlockAutomaticHuntExit(source, state, reason)"))
   throw new Error("FailCurrent bypasses the exact live-entity exit veto");
 
