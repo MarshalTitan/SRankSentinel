@@ -14,6 +14,23 @@ internal enum ProjectionRecoveryAction
     AbandonUnresolved,
 }
 
+internal enum HuntExitRequestSource
+{
+    AutomaticStateTransition,
+    FailCurrent,
+    RecoveryBudget,
+    FrameworkException,
+    ExternalDeathEvidence,
+    ManualSkip,
+    ConfirmedDeath,
+}
+
+internal enum HuntExitDecision
+{
+    Allow,
+    BlockForVisibleLiveEntity,
+}
+
 /// <summary>
 /// Pure decisions shared by the live state machine and the no-dependency regression harness.
 /// Keeping these boundaries free of Dalamud types makes the latches and bounded-recovery rules
@@ -21,6 +38,20 @@ internal enum ProjectionRecoveryAction
 /// </summary>
 internal static class HuntProgressPolicy
 {
+    public static HuntExitDecision DecideHuntExit(
+        HuntExitRequestSource source,
+        bool physicallyInCurrentContext,
+        bool exactCurrentEntityVisible,
+        bool exactCurrentEntityAlive)
+    {
+        if (source == HuntExitRequestSource.ManualSkip)
+            return HuntExitDecision.Allow;
+
+        return physicallyInCurrentContext && exactCurrentEntityVisible && exactCurrentEntityAlive
+            ? HuntExitDecision.BlockForVisibleLiveEntity
+            : HuntExitDecision.Allow;
+    }
+
     public static bool ShouldLatchTag(
         bool markAlive,
         bool markInCombat,
