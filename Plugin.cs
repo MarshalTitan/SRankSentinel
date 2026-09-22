@@ -236,6 +236,10 @@ public sealed class Plugin : IDalamudPlugin
     private int returnActionAttempts;
     private int returnConfirmationAttempts;
     private int returnTeleportAttempts;
+    private bool resetToUldahAllowsLiveEntityExit;
+    private HuntExitRequestSource resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;
+    private SentinelState resetToUldahRequestedFromState = SentinelState.Idle;
+    private string resetToUldahRequestReason = string.Empty;
     private DateTime deadPostKillRewardGraceDeadlineUtc = DateTime.MinValue;
     private DateTime raiseDialogFirstSeenUtc = DateTime.MinValue;
     private DateTime raiseAcceptanceSubmittedUtc = DateTime.MinValue;
@@ -1410,6 +1414,10 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        resetToUldahAllowsLiveEntityExit = false;
+        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;
+        resetToUldahRequestedFromState = SentinelState.Idle;
+        resetToUldahRequestReason = string.Empty;
         ResetRaiseTracking();
         ResetIncidentalAggroTracking();
         ResetParkingRecoveryTracking();
@@ -1690,12 +1698,20 @@ public sealed class Plugin : IDalamudPlugin
             discardReason = string.Empty;
             nextActionUtc = now.AddSeconds(3);
             SetState(SentinelState.ResetToUldah,
-                $"Internal error while handling {current.CreatureName}; active hunt retained and retrying through Ul'dah");
+                $"Internal error while handling {current.CreatureName}; active hunt retained and retrying through Ul'dah",
+                HuntExitRequestSource.FrameworkException);
         }
     }
 
     private void Tick(DateTime now)
     {
+        if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) &&
+            TryBlockAutomaticHuntExit(
+                HuntExitRequestSource.ConfirmedDeath,
+                state,
+                "A post-kill/SS state was active while the exact current hunt entity was visibly alive"))
+            return;
+
         if (current is not null && IsReservedSsWatch(current) && !killConfirmed &&
             !markEverIdentified &&
             now >= current.ReceivedAtUtc.AddSeconds(config.SsChainTimeoutSeconds))
@@ -1839,6 +1855,15 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TickResetToUldah(DateTime now)
     {
+        if (!resetToUldahAllowsLiveEntityExit &&
+            TryBlockAutomaticHuntExit(
+                resetToUldahRequestSource,
+                resetToUldahRequestedFromState,
+                string.IsNullOrWhiteSpace(resetToUldahRequestReason)
+                    ? "ResetToUldah preflight requested automatic departure"
+                    : resetToUldahRequestReason))
+            return;
+
         if (TickDeadPostKillRewardGrace(now))
             return;
 
@@ -3350,7 +3375,8 @@ public sealed class Plugin : IDalamudPlugin
             (now - approachRecoveryStartedUtc).TotalSeconds >= LocalApproachRecoveryBudgetSeconds)
         {
             FailCurrent(
-                $"local coordinate projection/path recovery was exhausted after {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
+                $"local coordinate projection/path recovery was exhausted after {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead",
+                HuntExitRequestSource.RecoveryBudget);
             return;
         }
 
@@ -3414,7 +3440,8 @@ public sealed class Plugin : IDalamudPlugin
                 else if (decision == ProjectionRecoveryAction.AbandonUnresolved)
                 {
                     FailCurrent(
-                        $"mapped destination remained unprojectable after {approachEmptyProjectionPasses} bounded passes and approximate recovery");
+                        $"mapped destination remained unprojectable after {approachEmptyProjectionPasses} bounded passes and approximate recovery",
+                        HuntExitRequestSource.RecoveryBudget);
                     return;
                 }
 
@@ -3494,7 +3521,8 @@ public sealed class Plugin : IDalamudPlugin
             vnav.StopSafe("bounded local approach budget exhausted");
             ResetApproachRouteTracking(clearProjectionCandidates: true);
             FailCurrent(
-                $"local approach made no usable progress within {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
+                $"local approach made no usable progress within {LocalApproachRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead",
+                HuntExitRequestSource.RecoveryBudget);
             return;
         }
         if (approachPoint is null)
@@ -4113,7 +4141,8 @@ public sealed class Plugin : IDalamudPlugin
         else if (recovery == LocateRecoveryAction.AbandonUnresolved)
         {
             FailCurrent(
-                $"{current.CreatureName} remained unresolved—not confirmed dead—after {cumulative:0}s, {locateWindowCount} scan window(s), and the final reported-area scan");
+                $"{current.CreatureName} remained unresolved—not confirmed dead—after {cumulative:0}s, {locateWindowCount} scan window(s), and the final reported-area scan",
+                HuntExitRequestSource.RecoveryBudget);
             return;
         }
 
@@ -4377,7 +4406,8 @@ public sealed class Plugin : IDalamudPlugin
             (now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds)
         {
             FailCurrent(
-                $"tag preparation remained unresolved for {TagRecoveryBudgetSeconds:0}s while the mark stayed alive");
+                $"tag preparation remained unresolved for {TagRecoveryBudgetSeconds:0}s while the mark stayed alive",
+                HuntExitRequestSource.RecoveryBudget);
             return;
         }
 
@@ -5826,7 +5856,8 @@ public sealed class Plugin : IDalamudPlugin
             return false;
 
         FailCurrent(
-            $"parking/landing remained unresolved after {parkingRecoveryFailures} failures and {elapsed:0}s ({reason})");
+            $"parking/landing remained unresolved after {parkingRecoveryFailures} failures and {elapsed:0}s ({reason})",
+            HuntExitRequestSource.RecoveryBudget);
         return true;
     }
 
@@ -5845,7 +5876,8 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         FailCurrent(
-            $"parking/landing made no terminal progress within {ParkingRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead");
+            $"parking/landing made no terminal progress within {ParkingRecoveryBudgetSeconds:0}s; the hunt is unresolved, not dead",
+            HuntExitRequestSource.RecoveryBudget);
         return true;
     }
 
@@ -6261,7 +6293,12 @@ public sealed class Plugin : IDalamudPlugin
             travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
         {
             var visiblyLiveMark = FindMark();
-            if (visiblyLiveMark is not null && !visiblyLiveMark.IsDead && visiblyLiveMark.CurrentHp > 0)
+            if (visiblyLiveMark is not null && !visiblyLiveMark.IsDead && visiblyLiveMark.CurrentHp > 0 &&
+                HuntProgressPolicy.DecideHuntExit(
+                    HuntExitRequestSource.ExternalDeathEvidence,
+                    true,
+                    true,
+                    true) == HuntExitDecision.BlockForVisibleLiveEntity)
             {
                 MarkWasIdentified(visiblyLiveMark);
                 status = $"Ignored conflicting death evidence for {current.CreatureName}: the exact current entity is still alive";
@@ -6309,7 +6346,8 @@ public sealed class Plugin : IDalamudPlugin
 
                 nextActionUtc = now;
                 SetState(SentinelState.ResetToUldah,
-                    $"{reason}; confirmed dead before arrival/combat, returning to Ul'dah now");
+                    $"{reason}; confirmed dead before arrival/combat, returning to Ul'dah now",
+                    HuntExitRequestSource.ConfirmedDeath);
                 return;
             }
 
@@ -6330,18 +6368,26 @@ public sealed class Plugin : IDalamudPlugin
         ClearPendingSsChainEvidence();
         nextActionUtc = now;
         SetState(SentinelState.ResetToUldah,
-            $"{reason}; returning to Ul'dah on the current visited world");
+            $"{reason}; returning to Ul'dah on the current visited world",
+            HuntExitRequestSource.ConfirmedDeath);
     }
 
-    private void FailCurrent(string reason)
+    private void FailCurrent(
+        string reason,
+        HuntExitRequestSource source = HuntExitRequestSource.FailCurrent)
     {
+        if (TryBlockAutomaticHuntExit(source, state, reason))
+            return;
+
         vnav.StopSafe();
         discardAtUldah = true;
         discardReason = reason;
         nextActionUtc = DateTime.UtcNow;
         log.Warning("Abandoning active hunt {Mark} without confirmed kill only after explicit failure: {Reason}",
             current?.CreatureName ?? "(none)", reason);
-        SetState(SentinelState.ResetToUldah, $"{reason}; discarding this alert after the Ul'dah reset");
+        SetState(SentinelState.ResetToUldah,
+            $"{reason}; discarding this alert after the Ul'dah reset",
+            source);
     }
 
     private void ClearCurrent()
@@ -6388,6 +6434,10 @@ public sealed class Plugin : IDalamudPlugin
         playerReadySinceUtc = DateTime.MinValue;
         lastMarkSeenUtc = DateTime.MinValue;
         ResetReturnRecoveryTracking();
+        resetToUldahAllowsLiveEntityExit = false;
+        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;
+        resetToUldahRequestedFromState = SentinelState.Idle;
+        resetToUldahRequestReason = string.Empty;
         ResetRaiseTracking();
         ResetReturnLandingRecovery();
         ResetIncidentalAggroTracking();
@@ -7109,12 +7159,143 @@ public sealed class Plugin : IDalamudPlugin
 
     private static float VerticalSeparation(Vector3 a, Vector3 b) => MathF.Abs(a.Y - b.Y);
 
-    private void SetState(SentinelState next, string message)
+    private bool TryGetExactVisibleLiveCurrentMark(out IBattleChara liveMark)
     {
+        liveMark = null!;
+        if (current is null || !markEverIdentified || identifiedMarkGameObjectId == 0 ||
+            clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var loadedInstance = travel.CurrentInstance;
+        if (loadedInstance > 0 && current.Instance > 0 && loadedInstance != current.Instance)
+            return false;
+
+        var candidate = objects.OfType<IBattleChara>().FirstOrDefault(actor =>
+            actor.ObjectKind == ObjectKind.BattleNpc &&
+            actor.GameObjectId == identifiedMarkGameObjectId &&
+            ((current.MarkDataId != 0 && actor.BaseId == current.MarkDataId) ||
+             actor.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)));
+        if (candidate is null || candidate.IsDead || candidate.CurrentHp == 0)
+            return false;
+
+        liveMark = candidate;
+        return true;
+    }
+
+    private bool TryBlockAutomaticHuntExit(
+        HuntExitRequestSource source,
+        SentinelState requestedFromState,
+        string reason)
+    {
+        if (source == HuntExitRequestSource.ManualSkip ||
+            !TryGetExactVisibleLiveCurrentMark(out var liveMark) ||
+            HuntProgressPolicy.DecideHuntExit(source, true, true, true) !=
+            HuntExitDecision.BlockForVisibleLiveEntity)
+            return false;
+
+        var now = DateTime.UtcNow;
+        var active = current!;
+        var hp = CombatController.HpPercent(liveMark);
+        var loadedInstance = travel.CurrentInstance > 0 ? travel.CurrentInstance : active.Instance;
+        log.Error(
+            "Blocked automatic hunt exit: source={Source}, state={State}, mark={Mark}, object={ObjectId}, HP={Hp:0.0}%, world={World}, territory={Territory}, instance={Instance}, reason={Reason}",
+            source, requestedFromState, active.CreatureName, liveMark.GameObjectId, hp,
+            travel.CurrentWorld, clientState.TerritoryType, loadedInstance, reason);
+
+        vnav.StopSafe("visible live current entity vetoed automatic hunt exit");
+        var removedFalseKillRecord = killedAlerts.Remove(active.Key);
+        killConfirmed = false;
+        discardAtUldah = false;
+        discardReason = string.Empty;
+        postKillSsGraceDeadlineUtc = DateTime.MinValue;
+        ssWatchDeadlineUtc = DateTime.MinValue;
+        ssChainObserved = false;
+        ssSpawnAnnounced = false;
+        ResetDeadPostKillRewardGrace();
+        ResetReturnRecoveryTracking();
+        ResetReturnLandingRecovery();
+        ResetParkingRecoveryTracking();
+        ResetApproachRouteTracking(clearProjectionCandidates: true);
+        ResetLocalApproachRecovery();
+        ResetLocateSearchTracking();
+        resetToUldahAllowsLiveEntityExit = false;
+        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;
+        resetToUldahRequestedFromState = SentinelState.Idle;
+        resetToUldahRequestReason = string.Empty;
+        nextActionUtc = now;
+        mark = liveMark;
+        MarkWasIdentified(liveMark);
+
+        if (removedFalseKillRecord)
+        {
+            PersistQueue();
+            log.Warning(
+                "Removed the tentative killed-alert record for {Mark} because its exact entity remained visibly alive",
+                active.CreatureName);
+        }
+
+        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        {
+            // A tag budget may itself have requested the blocked exit. Rebase only the recovery
+            // budget; never clear the pull-cycle obligation or submit an additional attack.
+            tagRequiredSinceUtc = now;
+            tagEntityMissingSinceUtc = DateTime.MinValue;
+            tagLastProgressUtc = now;
+            tagLastProgressPosition = PlayerPosition();
+            tagBestClearance = ClearanceFromMark(liveMark);
+            tagLandingPoint = null;
+            tagLandingStartedUtc = DateTime.MinValue;
+            tagLandingLastProgressUtc = DateTime.MinValue;
+            tagRecoveryFailures = 0;
+        }
+
+        LatchTagRequirement(liveMark, now);
+        status = $"Blocked automatic exit from {requestedFromState}: {active.CreatureName} is visibly alive at {hp:0.0}% HP";
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(liveMark, now,
+                $"Automatic exit blocked: exact live {active.CreatureName} still requires one confirmed ranged tag");
+        }
+        else
+        {
+            SetState(SentinelState.SafeWait,
+                $"Automatic exit blocked: exact live {active.CreatureName} retained locally at {hp:0.0}% HP");
+        }
+
+        return true;
+    }
+
+    private bool SetState(
+        SentinelState next,
+        string message,
+        HuntExitRequestSource exitSource = HuntExitRequestSource.AutomaticStateTransition)
+    {
+        var previous = state;
+        if (next == SentinelState.ResetToUldah &&
+            TryBlockAutomaticHuntExit(exitSource, previous, message))
+            return false;
+
+        if (next == SentinelState.ResetToUldah)
+        {
+            resetToUldahAllowsLiveEntityExit = exitSource == HuntExitRequestSource.ManualSkip;
+            resetToUldahRequestSource = exitSource;
+            resetToUldahRequestedFromState = previous;
+            resetToUldahRequestReason = message;
+        }
+        else
+        {
+            resetToUldahAllowsLiveEntityExit = false;
+            resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;
+            resetToUldahRequestedFromState = SentinelState.Idle;
+            resetToUldahRequestReason = string.Empty;
+        }
+
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;
         log.Information("State -> {State}: {Message}", next, message);
+        return true;
     }
 
     private static bool IsSonarKillNotice(string text) =>
@@ -7268,7 +7449,7 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.SameLine();
         ImGui.BeginDisabled(current is null);
         if (ImGui.Button("SKIP CURRENT + KEEP QUEUE"))
-            FailCurrent("Current hunt skipped manually");
+            FailCurrent("Current hunt skipped manually", HuntExitRequestSource.ManualSkip);
         ImGui.EndDisabled();
         ImGui.SameLine();
         if (ImGui.Button("STOP + RESET THROUGH UL'DAH"))
@@ -7276,9 +7457,11 @@ public sealed class Plugin : IDalamudPlugin
             pendingAlerts.Clear();
             PersistQueue();
             if (current is null)
-                SetState(SentinelState.ResetToUldah, "Manual reset requested");
+                SetState(SentinelState.ResetToUldah,
+                    "Manual reset requested",
+                    HuntExitRequestSource.ManualSkip);
             else
-                FailCurrent("Stopped manually");
+                FailCurrent("Stopped manually", HuntExitRequestSource.ManualSkip);
         }
 
         ImGui.End();

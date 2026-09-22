@@ -10,6 +10,13 @@ var tests = new (string Name, Action Run)[]
     ("LocateMark expires into a final scan then unresolved abandonment", LocateBudgetIsBounded),
     ("unprojectable destination escalates to approximate flight then abandonment", ProjectionRecoveryIsBounded),
     ("parking candidates honor the configured preferred clearance", ParkingUsesPreferredClearance),
+    ("visible live mark blocks an automatic FailCurrent request", LiveMarkBlocksFailCurrent),
+    ("visible live mark blocks recovery-budget abandonment", LiveMarkBlocksRecoveryBudgetExit),
+    ("visible live mark survives framework-exception recovery", LiveMarkBlocksFrameworkExceptionExit),
+    ("visible live mark rejects conflicting external death evidence", LiveMarkBlocksConflictingDeathEvidence),
+    ("manual Skip remains allowed while the mark is alive", ManualSkipRemainsAllowed),
+    ("genuinely missing unresolved mark may still be abandoned", MissingUnresolvedMarkMayBeAbandoned),
+    ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
 };
 
 var failures = 0;
@@ -86,6 +93,41 @@ static void ParkingUsesPreferredClearance()
     False(HuntProgressPolicy.IsPreferredParkingClearance(29f, 23f, 3f));
     Equal(6f, HuntProgressPolicy.ParkingClearanceError(29f, 23f));
 }
+
+static void LiveMarkBlocksFailCurrent() =>
+    Equal(HuntExitDecision.BlockForVisibleLiveEntity,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.FailCurrent, true, true, true));
+
+static void LiveMarkBlocksRecoveryBudgetExit() =>
+    Equal(HuntExitDecision.BlockForVisibleLiveEntity,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.RecoveryBudget, true, true, true));
+
+static void LiveMarkBlocksFrameworkExceptionExit() =>
+    Equal(HuntExitDecision.BlockForVisibleLiveEntity,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.FrameworkException, true, true, true));
+
+static void LiveMarkBlocksConflictingDeathEvidence() =>
+    Equal(HuntExitDecision.BlockForVisibleLiveEntity,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.ExternalDeathEvidence, true, true, true));
+
+static void ManualSkipRemainsAllowed() =>
+    Equal(HuntExitDecision.Allow,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.ManualSkip, true, true, true));
+
+static void MissingUnresolvedMarkMayBeAbandoned() =>
+    Equal(HuntExitDecision.Allow,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.RecoveryBudget, true, false, false));
+
+static void DeadMarkPermitsRecovery() =>
+    Equal(HuntExitDecision.Allow,
+        HuntProgressPolicy.DecideHuntExit(
+            HuntExitRequestSource.ConfirmedDeath, true, true, false));
 
 static void True(bool value)
 {
