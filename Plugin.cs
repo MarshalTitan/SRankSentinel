@@ -7286,7 +7286,8 @@ public sealed class Plugin : IDalamudPlugin
 
                 var mountSubmitted = TryRequestSentinelMount(
                     out longApproachLastMountRequest,
-                    out var mountDiagnostic);
+                    out var mountDiagnostic,
+                    allowPreferredMount: longApproachMountRequests == 0);
                 longApproachMountRequests++;
                 nextLongApproachFlightActionUtc = now.AddSeconds(LongApproachMountRetrySeconds);
                 status = mountSubmitted
@@ -7359,7 +7360,10 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private unsafe bool TryRequestSentinelMount(out string requestedMount, out string diagnostic)
+    private unsafe bool TryRequestSentinelMount(
+        out string requestedMount,
+        out string diagnostic,
+        bool allowPreferredMount = true)
     {
         requestedMount = "Company Chocobo";
         diagnostic = string.Empty;
@@ -7371,6 +7375,7 @@ public sealed class Plugin : IDalamudPlugin
             ? uint.MaxValue
             : manager->GetActionStatus(ActionType.Mount, CompanyChocoboMountId);
         var mountChoice = HuntProgressPolicy.SelectMount(
+            allowPreferredMount,
             companyChocoboUnlocked,
             companyChocoboActionStatus == 0);
         if (mountChoice == SentinelMountChoice.CompanyChocobo)
@@ -7394,9 +7399,9 @@ public sealed class Plugin : IDalamudPlugin
         else
         {
             log.Information(
-                "Company Chocobo is unavailable for {Mark}; unlocked={Unlocked}, actionStatus={ActionStatus}; falling back to Mount Roulette",
-                current?.CreatureName ?? "active hunt", companyChocoboUnlocked,
-                companyChocoboActionStatus);
+                "Company Chocobo is unavailable for {Mark}; preferredAttemptAllowed={PreferredAttemptAllowed}, unlocked={Unlocked}, actionStatus={ActionStatus}; falling back to Mount Roulette",
+                current?.CreatureName ?? "active hunt", allowPreferredMount,
+                companyChocoboUnlocked, companyChocoboActionStatus);
         }
 
         requestedMount = "Mount Roulette";
@@ -7851,5 +7856,3 @@ internal sealed class HuntTrainMessageDto
     public uint startTerritoryTypeId { get; set; }
     public int instance { get; set; }
     public float mapLocationX { get; set; }
-    public float mapLocationY { get; set; }
-}
