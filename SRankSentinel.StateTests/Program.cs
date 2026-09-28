@@ -17,6 +17,13 @@ var tests = new (string Name, Action Run)[]
     ("manual Skip remains allowed while the mark is alive", ManualSkipRemainsAllowed),
     ("genuinely missing unresolved mark may still be abandoned", MissingUnresolvedMarkMayBeAbandoned),
     ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
+    ("Company Chocobo is preferred when available", CompanyChocoboIsPreferred),
+    ("unavailable Company Chocobo falls back to Mount Roulette", CompanyChocoboFallsBack),
+    ("long approach requests a mount before takeoff", LongApproachMountsFirst),
+    ("mounted long approach waits for confirmed flight", LongApproachRequiresConfirmedFlight),
+    ("confirmed flight permits the flying route", ConfirmedFlightPermitsRoute),
+    ("failed takeoff never degrades into a cross-map ground run", FailedTakeoffDoesNotGroundRun),
+    ("a genuinely non-flyable territory permits an explicit ground route", NonFlyableTerritoryPermitsGroundRoute),
 };
 
 var failures = 0;
@@ -128,6 +135,43 @@ static void DeadMarkPermitsRecovery() =>
     Equal(HuntExitDecision.Allow,
         HuntProgressPolicy.DecideHuntExit(
             HuntExitRequestSource.ConfirmedDeath, true, true, false));
+
+static void CompanyChocoboIsPreferred() =>
+    Equal(SentinelMountChoice.CompanyChocobo,
+        HuntProgressPolicy.SelectMount(true, true));
+
+static void CompanyChocoboFallsBack()
+{
+    Equal(SentinelMountChoice.MountRoulette,
+        HuntProgressPolicy.SelectMount(false, false));
+    Equal(SentinelMountChoice.MountRoulette,
+        HuntProgressPolicy.SelectMount(true, false));
+}
+
+static void LongApproachMountsFirst() =>
+    Equal(LongApproachStartupAction.RequestMount,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, false, false, 0, 20));
+
+static void LongApproachRequiresConfirmedFlight() =>
+    Equal(LongApproachStartupAction.RequestTakeoff,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, true, false, 3, 20));
+
+static void ConfirmedFlightPermitsRoute() =>
+    Equal(LongApproachStartupAction.BeginFlyingRoute,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, true, true, 4, 20));
+
+static void FailedTakeoffDoesNotGroundRun() =>
+    Equal(LongApproachStartupAction.AbandonWithoutGroundFallback,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, true, false, 20, 20));
+
+static void NonFlyableTerritoryPermitsGroundRoute() =>
+    Equal(LongApproachStartupAction.BeginGroundRouteBecauseFlightUnavailable,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, false, true, false, 3, 20));
 
 static void True(bool value)
 {
