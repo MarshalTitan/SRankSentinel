@@ -31,6 +31,22 @@ internal enum HuntExitDecision
     BlockForVisibleLiveEntity,
 }
 
+internal enum LongApproachStartupAction
+{
+    WaitForFlightAvailability,
+    RequestMount,
+    RequestTakeoff,
+    BeginFlyingRoute,
+    BeginGroundRouteBecauseFlightUnavailable,
+    AbandonWithoutGroundFallback,
+}
+
+internal enum SentinelMountChoice
+{
+    CompanyChocobo,
+    MountRoulette,
+}
+
 /// <summary>
 /// Pure decisions shared by the live state machine and the no-dependency regression harness.
 /// Keeping these boundaries free of Dalamud types makes the latches and bounded-recovery rules
@@ -38,6 +54,35 @@ internal enum HuntExitDecision
 /// </summary>
 internal static class HuntProgressPolicy
 {
+    public static SentinelMountChoice SelectMount(
+        bool preferredAttemptAllowed,
+        bool companyChocoboUnlocked,
+        bool companyChocoboActionReady) =>
+        preferredAttemptAllowed && companyChocoboUnlocked && companyChocoboActionReady
+            ? SentinelMountChoice.CompanyChocobo
+            : SentinelMountChoice.MountRoulette;
+
+    public static LongApproachStartupAction DecideLongApproachStartup(
+        bool flightAvailabilityKnown,
+        bool flightAvailable,
+        bool mounted,
+        bool inFlight,
+        double elapsedSeconds,
+        double startupBudgetSeconds)
+    {
+        if (inFlight)
+            return LongApproachStartupAction.BeginFlyingRoute;
+        if (elapsedSeconds >= startupBudgetSeconds)
+            return LongApproachStartupAction.AbandonWithoutGroundFallback;
+        if (!flightAvailabilityKnown)
+            return LongApproachStartupAction.WaitForFlightAvailability;
+        if (!mounted)
+            return LongApproachStartupAction.RequestMount;
+        return flightAvailable
+            ? LongApproachStartupAction.RequestTakeoff
+            : LongApproachStartupAction.BeginGroundRouteBecauseFlightUnavailable;
+    }
+
     public static HuntExitDecision DecideHuntExit(
         HuntExitRequestSource source,
         bool physicallyInCurrentContext,

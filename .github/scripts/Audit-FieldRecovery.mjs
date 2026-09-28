@@ -11,7 +11,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.39.0</Version>"],
+  [project, "<Version>0.7.40.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -32,6 +32,14 @@ const required = [
   [plugin, "Blocked automatic hunt exit: source={Source}, state={State}"],
   [plugin, "HuntExitRequestSource.FrameworkException"],
   [plugin, "HuntExitRequestSource.ManualSkip"],
+  [plugin, "CompanyChocoboMountId = 1"],
+  [plugin, "EnsureLongApproachMovementReady"],
+  [plugin, "LongApproachStartupAction.AbandonWithoutGroundFallback"],
+  [plugin, "UseGeneralAction(2)"],
+  [plugin, "ActionType.Mount, CompanyChocoboMountId"],
+  [plugin, "InFlight was lost before or during the long-distance flying route"],
+  [policy, "SentinelMountChoice.CompanyChocobo"],
+  [policy, "LongApproachStartupAction.BeginFlyingRoute"],
 ];
 
 for (const [source, contract] of required) {
@@ -74,4 +82,18 @@ if (!resetBody?.includes("TryBlockAutomaticHuntExit"))
 if (!plugin.includes('FailCurrent("Current hunt skipped manually", HuntExitRequestSource.ManualSkip)'))
   throw new Error("Manual Skip is no longer explicitly authorized through the live-entity veto");
 
-console.log("Field-recovery audit passed: latched tag, live-entity exit veto, robust Raise, bounded aggro/search/projection, preferred parking, and v0.7.34 travel guard are present.");
+const prepareApproachBody = plugin.match(/private void TickPrepareApproachDestination\(DateTime now\)([\s\S]*?)private void TickApproachAlertCoordinates/)?.[1];
+if (!prepareApproachBody?.includes("EnsureLongApproachMovementReady(now, out var useFlight)") ||
+    !prepareApproachBody.includes("TryStartApproachRoute(now, useFlight)"))
+  throw new Error("Initial local approach bypasses the confirmed-flight startup contract");
+
+const longApproachBody = plugin.match(/private bool EnsureLongApproachMovementReady\(DateTime now, out bool useFlight\)([\s\S]*?)private string DescribeConfirmedMount/)?.[1];
+if (!longApproachBody?.includes("condition[ConditionFlag.InFlight]") ||
+    !longApproachBody.includes("FailCurrent(reason, HuntExitRequestSource.RecoveryBudget)"))
+  throw new Error("Long-distance approach does not require confirmed flight with bounded failure");
+
+const startRouteBody = plugin.match(/private bool TryStartApproachRoute\(DateTime now, bool useFlight\)([\s\S]*?)private void PrepareApproachRouteCandidates/)?.[1];
+if (!startRouteBody?.includes("PathfindSafe(player, target, useFlight)"))
+  throw new Error("Approach pathfinding ignores the confirmed flight/ground mode");
+
+console.log("Field-recovery audit passed: latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");
