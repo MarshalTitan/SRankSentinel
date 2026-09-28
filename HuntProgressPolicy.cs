@@ -55,9 +55,10 @@ internal enum SentinelMountChoice
 internal static class HuntProgressPolicy
 {
     public static SentinelMountChoice SelectMount(
+        bool preferredAttemptAllowed,
         bool companyChocoboUnlocked,
         bool companyChocoboActionReady) =>
-        companyChocoboUnlocked && companyChocoboActionReady
+        preferredAttemptAllowed && companyChocoboUnlocked && companyChocoboActionReady
             ? SentinelMountChoice.CompanyChocobo
             : SentinelMountChoice.MountRoulette;
 
