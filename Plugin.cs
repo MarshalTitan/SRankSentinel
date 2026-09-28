@@ -7253,7 +7253,7 @@ public sealed class Plugin : IDalamudPlugin
                 string.IsNullOrWhiteSpace(longApproachLastMountRequest)
                     ? "already mounted/player-selected mount"
                     : longApproachLastMountRequest,
-                flightAvailabilityKnown ? flightAvailable : null);
+                flightAvailabilityKnown ? flightAvailable.ToString() : "unknown");
         }
 
         switch (action)
