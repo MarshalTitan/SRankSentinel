@@ -7856,3 +7856,5 @@ internal sealed class HuntTrainMessageDto
     public uint startTerritoryTypeId { get; set; }
     public int instance { get; set; }
     public float mapLocationX { get; set; }
+    public float mapLocationY { get; set; }
+}
