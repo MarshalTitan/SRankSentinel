@@ -138,14 +138,16 @@ static void DeadMarkPermitsRecovery() =>
 
 static void CompanyChocoboIsPreferred() =>
     Equal(SentinelMountChoice.CompanyChocobo,
-        HuntProgressPolicy.SelectMount(true, true));
+        HuntProgressPolicy.SelectMount(true, true, true));
 
 static void CompanyChocoboFallsBack()
 {
     Equal(SentinelMountChoice.MountRoulette,
-        HuntProgressPolicy.SelectMount(false, false));
+        HuntProgressPolicy.SelectMount(true, false, false));
     Equal(SentinelMountChoice.MountRoulette,
-        HuntProgressPolicy.SelectMount(true, false));
+        HuntProgressPolicy.SelectMount(true, true, false));
+    Equal(SentinelMountChoice.MountRoulette,
+        HuntProgressPolicy.SelectMount(false, true, true));
 }
 
 static void LongApproachMountsFirst() =>
