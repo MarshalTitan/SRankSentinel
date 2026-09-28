@@ -38,6 +38,7 @@ internal enum LongApproachStartupAction
     RequestTakeoff,
     BeginFlyingRoute,
     BeginGroundRouteBecauseFlightUnavailable,
+    ResetForNextCycle,
     AbandonWithoutGroundFallback,
 }
 
@@ -68,12 +69,16 @@ internal static class HuntProgressPolicy
         bool mounted,
         bool inFlight,
         double elapsedSeconds,
-        double startupBudgetSeconds)
+        double startupBudgetSeconds,
+        int startupCycle,
+        int maximumStartupCycles)
     {
         if (inFlight)
             return LongApproachStartupAction.BeginFlyingRoute;
         if (elapsedSeconds >= startupBudgetSeconds)
-            return LongApproachStartupAction.AbandonWithoutGroundFallback;
+            return startupCycle < maximumStartupCycles
+                ? LongApproachStartupAction.ResetForNextCycle
+                : LongApproachStartupAction.AbandonWithoutGroundFallback;
         if (!flightAvailabilityKnown)
             return LongApproachStartupAction.WaitForFlightAvailability;
         if (!mounted)

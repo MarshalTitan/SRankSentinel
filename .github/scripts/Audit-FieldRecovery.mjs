@@ -11,7 +11,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.40.0</Version>"],
+  [project, "<Version>0.7.41.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -35,6 +35,10 @@ const required = [
   [plugin, "CompanyChocoboMountId = 1"],
   [plugin, "EnsureLongApproachMovementReady"],
   [plugin, "LongApproachStartupAction.AbandonWithoutGroundFallback"],
+  [plugin, "LongApproachStartupAction.ResetForNextCycle"],
+  [plugin, "LongApproachFlightStartupCycleBudgetSeconds = 10"],
+  [plugin, "Flight-startup recovery/reset complete"],
+  [plugin, "Final abandonment after second flight-startup failure"],
   [plugin, "UseGeneralAction(2)"],
   [plugin, "ActionType.Mount, CompanyChocoboMountId"],
   [plugin, "InFlight was lost before or during the long-distance flying route"],

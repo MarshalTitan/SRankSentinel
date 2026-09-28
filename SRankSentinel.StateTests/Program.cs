@@ -22,7 +22,9 @@ var tests = new (string Name, Action Run)[]
     ("long approach requests a mount before takeoff", LongApproachMountsFirst),
     ("mounted long approach waits for confirmed flight", LongApproachRequiresConfirmedFlight),
     ("confirmed flight permits the flying route", ConfirmedFlightPermitsRoute),
-    ("failed takeoff never degrades into a cross-map ground run", FailedTakeoffDoesNotGroundRun),
+    ("first takeoff timeout requests an explicit reset", FirstTakeoffTimeoutRequestsReset),
+    ("second takeoff timeout abandons without a ground run", SecondTakeoffTimeoutDoesNotGroundRun),
+    ("second cycle starts immediately once flight confirms", SecondCycleConfirmedFlightPermitsRoute),
     ("a genuinely non-flyable territory permits an explicit ground route", NonFlyableTerritoryPermitsGroundRoute),
 };
 
@@ -153,27 +155,37 @@ static void CompanyChocoboFallsBack()
 static void LongApproachMountsFirst() =>
     Equal(LongApproachStartupAction.RequestMount,
         HuntProgressPolicy.DecideLongApproachStartup(
-            true, true, false, false, 0, 20));
+            true, true, false, false, 0, 10, 1, 2));
 
 static void LongApproachRequiresConfirmedFlight() =>
     Equal(LongApproachStartupAction.RequestTakeoff,
         HuntProgressPolicy.DecideLongApproachStartup(
-            true, true, true, false, 3, 20));
+            true, true, true, false, 3, 10, 1, 2));
 
 static void ConfirmedFlightPermitsRoute() =>
     Equal(LongApproachStartupAction.BeginFlyingRoute,
         HuntProgressPolicy.DecideLongApproachStartup(
-            true, true, true, true, 4, 20));
+            true, true, true, true, 4, 10, 1, 2));
 
-static void FailedTakeoffDoesNotGroundRun() =>
+static void FirstTakeoffTimeoutRequestsReset() =>
+    Equal(LongApproachStartupAction.ResetForNextCycle,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, true, false, 10, 10, 1, 2));
+
+static void SecondTakeoffTimeoutDoesNotGroundRun() =>
     Equal(LongApproachStartupAction.AbandonWithoutGroundFallback,
         HuntProgressPolicy.DecideLongApproachStartup(
-            true, true, true, false, 20, 20));
+            true, true, true, false, 10, 10, 2, 2));
+
+static void SecondCycleConfirmedFlightPermitsRoute() =>
+    Equal(LongApproachStartupAction.BeginFlyingRoute,
+        HuntProgressPolicy.DecideLongApproachStartup(
+            true, true, true, true, 2, 10, 2, 2));
 
 static void NonFlyableTerritoryPermitsGroundRoute() =>
     Equal(LongApproachStartupAction.BeginGroundRouteBecauseFlightUnavailable,
         HuntProgressPolicy.DecideLongApproachStartup(
-            true, false, true, false, 3, 20));
+            true, false, true, false, 3, 10, 1, 2));
 
 static void True(bool value)
 {
