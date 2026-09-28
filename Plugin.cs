@@ -13,6 +13,8 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using Lumina.Excel.Sheets;
 using System.Collections.Concurrent;
 using System.Numerics;
+using NativeControl = FFXIVClientStructs.FFXIV.Client.Game.Control.Control;
+using NativePlayerState = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState;
 
 namespace SRankSentinel;
 
@@ -81,6 +83,10 @@ public sealed class Plugin : IDalamudPlugin
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
     private const float ApproachScanTolerance = 3f;
+    private const uint CompanyChocoboMountId = 1;
+    private const double LongApproachFlightStartupBudgetSeconds = 20;
+    private const double LongApproachMountRetrySeconds = 2;
+    private const double LongApproachTakeoffRetrySeconds = 0.25;
     private const int ProjectionFailuresBeforeApproximateRoute = 2;
     private const double LocalApproachRecoveryBudgetSeconds = 90;
     private const double FinalLocateScanSeconds = 20;
@@ -144,6 +150,15 @@ public sealed class Plugin : IDalamudPlugin
     private bool approachSlowPathfindNoticeLogged;
     private int approachSubmittedWaypointCount;
     private int approachLastObservedWaypointCount = -1;
+    private bool approachRouteUsesFlight;
+    private DateTime longApproachFlightStartupUtc = DateTime.MinValue;
+    private DateTime nextLongApproachFlightActionUtc = DateTime.MinValue;
+    private int longApproachMountRequests;
+    private int longApproachTakeoffRequests;
+    private bool longApproachMountConfirmedLogged;
+    private bool longApproachFlightConfirmedLogged;
+    private bool longApproachGroundFallbackLogged;
+    private string longApproachLastMountRequest = string.Empty;
     private int approachEmptyProjectionPasses;
     private bool approachPointIsApproximate;
     private bool approachApproximateRecoveryUsed;
@@ -3302,12 +3317,17 @@ public sealed class Plugin : IDalamudPlugin
         if ((now - playerReadySinceUtc).TotalSeconds < 2)
             return;
 
+        log.Information(
+            "Hunt territory arrival confirmed: mark={Mark}, world={World}, territory={Territory}, instance={Instance}, mounted={Mounted}, inFlight={InFlight}; preparing local approach",
+            current.CreatureName, travel.CurrentWorld, clientState.TerritoryType,
+            travel.CurrentInstance, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
         BeginMeshWait("Zoning and player readiness confirmed");
     }
 
     private void BeginMeshWait(string reason)
     {
         vnav.StopSafe();
+        ResetLongApproachFlightStartup();
         nextActionUtc = DateTime.MinValue;
         SetState(SentinelState.WaitForMesh,
             $"{reason}; holding at the aetheryte until vnavmesh finishes preparing this territory");
@@ -3475,14 +3495,14 @@ public sealed class Plugin : IDalamudPlugin
 
         if (now < nextActionUtc)
             return;
-        if (!EnsureMounted(now))
+        if (!EnsureLongApproachMovementReady(now, out var useFlight))
             return;
-        if (TryStartApproachRoute(now))
+        if (TryStartApproachRoute(now, useFlight))
         {
             var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
                 ActiveDistanceProfile.WaitingDistance);
             SetState(SentinelState.ApproachAlertCoordinates,
-                $"Flying toward {current.CreatureName}'s reported coordinates; " +
+                $"{(useFlight ? "Flying" : "Ground-routing because flight is unavailable")} toward {current.CreatureName}'s reported coordinates; " +
                 $"entity resolution waits until within about {scanRange:0}y");
             return;
         }
@@ -3529,6 +3549,15 @@ public sealed class Plugin : IDalamudPlugin
         {
             SetState(SentinelState.PrepareApproachDestination,
                 "Direct alert-coordinate projection was lost; rebuilding it without abandoning the active hunt");
+            return;
+        }
+
+        if (approachRouteUsesFlight && !condition[ConditionFlag.InFlight] &&
+            (approachPathTask is not null || approachMovementSubmittedUtc != DateTime.MinValue ||
+             vnav.IsPathRunningSafe() || vnav.PathWaypointCountSafe() > 0))
+        {
+            PauseLongApproachForFlightRecovery(now,
+                "InFlight was lost before or during the long-distance flying route");
             return;
         }
 
@@ -3613,7 +3642,7 @@ public sealed class Plugin : IDalamudPlugin
                     "First path point for {Mark} is {Gap:0.0}y from the current navmesh position; route will be observed during the movement-start grace period",
                     current.CreatureName, firstGap);
 
-            if (!vnav.MovePathSafe(path, true))
+            if (!vnav.MovePathSafe(path, approachRouteUsesFlight))
             {
                 HandleStoppedApproachRoute(now, "Path.MoveTo rejected the computed waypoint list");
                 return;
@@ -3695,13 +3724,14 @@ public sealed class Plugin : IDalamudPlugin
 
         if (now < nextActionUtc)
             return;
-        if (!EnsureMounted(now))
+        if (!EnsureLongApproachMovementReady(now, out var useFlight))
             return;
 
-        if (TryStartApproachRoute(now))
+        if (TryStartApproachRoute(now, useFlight))
         {
             status = $"Approach resumed for {current.CreatureName}; {distance:0}y remain to the reported area";
-            log.Information("Approach resumed for {Mark}; {Distance:0}y remain", current.CreatureName, distance);
+            log.Information("Approach resumed for {Mark}; {Distance:0}y remain, mode={Mode}",
+                current.CreatureName, distance, useFlight ? "confirmed flight" : "ground because flight is unavailable");
         }
         else
         {
@@ -3806,7 +3836,7 @@ public sealed class Plugin : IDalamudPlugin
             verticalOrigins.Length);
     }
 
-    private bool TryStartApproachRoute(DateTime now)
+    private bool TryStartApproachRoute(DateTime now, bool useFlight)
     {
         if (approachPoint is null)
             return false;
@@ -3820,10 +3850,11 @@ public sealed class Plugin : IDalamudPlugin
         var target = approachRouteCandidates.Dequeue();
         var remaining = HorizontalDistance(player, approachPoint.Value);
         approachRouteIsSegment = HorizontalDistance(target, approachPoint.Value) > 2f;
-        var pathTask = vnav.PathfindSafe(player, target, true);
+        var pathTask = vnav.PathfindSafe(player, target, useFlight);
         if (pathTask is null)
             return false;
 
+        approachRouteUsesFlight = useFlight;
         approachRouteTarget = target;
         approachPathTask = pathTask;
         approachRouteStartPosition = player;
@@ -3841,10 +3872,12 @@ public sealed class Plugin : IDalamudPlugin
         nextActionUtc = DateTime.MinValue;
 
         log.Information(
-            "Submitted explicit vnavmesh pathfind for {Mark}: segment={Segment}, targetDistance={TargetDistance:0.0}y, totalRemaining={Remaining:0.0}y, mounted={Mounted}, flying={Flying}",
+            "Submitted explicit vnavmesh {Mode} pathfind for {Mark}: segment={Segment}, targetDistance={TargetDistance:0.0}y, totalRemaining={Remaining:0.0}y, mounted={Mounted}, inFlight={InFlight}",
+            useFlight ? "flying" : "ground",
             current?.CreatureName ?? "active hunt", approachRouteIsSegment,
             HorizontalDistance(player, target), remaining,
             condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+        ResetLongApproachFlightStartup();
 
         if (approachStartingEgressActive)
             log.Information(
@@ -3994,6 +4027,23 @@ public sealed class Plugin : IDalamudPlugin
                 : $"All current projections stopped early; resampling near {current.CreatureName}'s reported coordinates");
     }
 
+    private void PauseLongApproachForFlightRecovery(DateTime now, string reason)
+    {
+        if (current is null)
+            return;
+
+        vnav.StopSafe("confirmed-flight contract was lost");
+        log.Warning(
+            "Long-distance approach paused for {Mark}: {Reason}; mounted={Mounted}, inFlight={InFlight}, flightStatus={FlightStatus}",
+            current.CreatureName, reason, condition[ConditionFlag.Mounted],
+            condition[ConditionFlag.InFlight], GetFlightAllowedStatusDiagnostic());
+        ResetApproachRouteTracking(clearProjectionCandidates: false);
+        ResetLongApproachFlightStartup();
+        nextActionUtc = now;
+        SetState(SentinelState.PrepareApproachDestination,
+            $"{reason}; stopping movement and restoring confirmed flight before continuing toward {current.CreatureName}");
+    }
+
     private void ResetApproachRouteTracking(bool clearProjectionCandidates)
     {
         approachRouteCandidates.Clear();
@@ -4014,6 +4064,7 @@ public sealed class Plugin : IDalamudPlugin
         approachSlowPathfindNoticeLogged = false;
         approachSubmittedWaypointCount = 0;
         approachLastObservedWaypointCount = -1;
+        approachRouteUsesFlight = false;
         if (!clearProjectionCandidates)
             return;
         approachProjectionCandidates.Clear();
@@ -4022,12 +4073,25 @@ public sealed class Plugin : IDalamudPlugin
         approachPointIsApproximate = false;
     }
 
+    private void ResetLongApproachFlightStartup()
+    {
+        longApproachFlightStartupUtc = DateTime.MinValue;
+        nextLongApproachFlightActionUtc = DateTime.MinValue;
+        longApproachMountRequests = 0;
+        longApproachTakeoffRequests = 0;
+        longApproachMountConfirmedLogged = false;
+        longApproachFlightConfirmedLogged = false;
+        longApproachGroundFallbackLogged = false;
+        longApproachLastMountRequest = string.Empty;
+    }
+
     private void ResetLocalApproachRecovery()
     {
         approachEmptyProjectionPasses = 0;
         approachPointIsApproximate = false;
         approachApproximateRecoveryUsed = false;
         approachRecoveryStartedUtc = DateTime.MinValue;
+        ResetLongApproachFlightStartup();
     }
 
     private double CurrentLocateSearchBudgetSeconds()
@@ -7135,19 +7199,221 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (condition[ConditionFlag.Mounted])
             return true;
-        if (now < nextActionUtc)
+        if (now < nextActionUtc || condition[ConditionFlag.Mounting])
             return false;
-        UseGeneralAction(9);
-        nextActionUtc = now.AddSeconds(2);
-        status = "Mounting normally before vnavmesh flight";
+
+        var submitted = TryRequestSentinelMount(out var requestedMount, out var diagnostic);
+        nextActionUtc = now.AddSeconds(LongApproachMountRetrySeconds);
+        status = submitted
+            ? $"Mount requested: {requestedMount}; waiting for mounted confirmation"
+            : $"Mount request was not accepted ({diagnostic}); retrying without starting movement";
         return false;
     }
 
-    private unsafe void UseGeneralAction(uint id)
+    private bool EnsureLongApproachMovementReady(DateTime now, out bool useFlight)
+    {
+        useFlight = false;
+        if (longApproachFlightStartupUtc == DateTime.MinValue)
+        {
+            longApproachFlightStartupUtc = now;
+            nextLongApproachFlightActionUtc = now;
+            log.Information(
+                "Long-distance approach startup began for {Mark}: world={World}, territory={Territory}, instance={Instance}, mounted={Mounted}, inFlight={InFlight}",
+                current?.CreatureName ?? "active hunt", travel.CurrentWorld, clientState.TerritoryType,
+                travel.CurrentInstance, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+        }
+
+        var flightAvailabilityKnown = TryGetLoadedTerritoryFlightAvailability(out var flightAvailable);
+        var mounted = condition[ConditionFlag.Mounted];
+        var inFlight = condition[ConditionFlag.InFlight];
+        var elapsed = (now - longApproachFlightStartupUtc).TotalSeconds;
+        var action = HuntProgressPolicy.DecideLongApproachStartup(
+            flightAvailabilityKnown,
+            flightAvailable,
+            mounted,
+            inFlight,
+            elapsed,
+            LongApproachFlightStartupBudgetSeconds);
+
+        if (mounted && !longApproachMountConfirmedLogged)
+        {
+            longApproachMountConfirmedLogged = true;
+            log.Information(
+                "Mount confirmed before long-distance approach for {Mark}: requested={RequestedMount}, flightAvailable={FlightAvailable}",
+                current?.CreatureName ?? "active hunt",
+                string.IsNullOrWhiteSpace(longApproachLastMountRequest)
+                    ? "already mounted/player-selected mount"
+                    : longApproachLastMountRequest,
+                flightAvailabilityKnown ? flightAvailable : null);
+        }
+
+        switch (action)
+        {
+            case LongApproachStartupAction.BeginFlyingRoute:
+                useFlight = true;
+                if (!longApproachFlightConfirmedLogged)
+                {
+                    longApproachFlightConfirmedLogged = true;
+                    log.Information(
+                        "InFlight confirmed for {Mark} after {TakeoffRequests} takeoff request(s); flying route may now be submitted",
+                        current?.CreatureName ?? "active hunt", longApproachTakeoffRequests);
+                }
+                return true;
+
+            case LongApproachStartupAction.BeginGroundRouteBecauseFlightUnavailable:
+                if (!longApproachGroundFallbackLogged)
+                {
+                    longApproachGroundFallbackLogged = true;
+                    log.Warning(
+                        "Ground route selected for {Mark} only because loaded territory {Territory} reports flight unavailable; no failed-takeoff fallback was used",
+                        current?.CreatureName ?? "active hunt", clientState.TerritoryType);
+                }
+                status = $"Flight is unavailable in this loaded territory; beginning an explicitly logged mounted ground approach to {current?.CreatureName}";
+                return true;
+
+            case LongApproachStartupAction.WaitForFlightAvailability:
+                status = "Waiting for the loaded territory's flight capability to become readable; movement remains stopped";
+                return false;
+
+            case LongApproachStartupAction.RequestMount:
+                if (condition[ConditionFlag.Mounting])
+                {
+                    status = $"Mounting {longApproachLastMountRequest}; waiting for mounted confirmation before takeoff";
+                    return false;
+                }
+                if (now < nextLongApproachFlightActionUtc)
+                    return false;
+
+                var mountSubmitted = TryRequestSentinelMount(
+                    out longApproachLastMountRequest,
+                    out var mountDiagnostic);
+                longApproachMountRequests++;
+                nextLongApproachFlightActionUtc = now.AddSeconds(LongApproachMountRetrySeconds);
+                status = mountSubmitted
+                    ? $"Mount requested: {longApproachLastMountRequest}; waiting for mounted confirmation before takeoff"
+                    : $"Mount request was not accepted ({mountDiagnostic}); long-distance movement remains stopped";
+                return false;
+
+            case LongApproachStartupAction.RequestTakeoff:
+                if (now < nextLongApproachFlightActionUtc)
+                    return false;
+
+                var takeoffSubmitted = UseGeneralAction(2);
+                longApproachTakeoffRequests++;
+                nextLongApproachFlightActionUtc = now.AddSeconds(LongApproachTakeoffRetrySeconds);
+                if (longApproachTakeoffRequests == 1 || !takeoffSubmitted || longApproachTakeoffRequests % 8 == 0)
+                {
+                    log.Information(
+                        "Takeoff requested for {Mark}: attempt={Attempt}, accepted={Accepted}, mounted={Mounted}, inFlight={InFlight}, flightStatus={FlightStatus}",
+                        current?.CreatureName ?? "active hunt", longApproachTakeoffRequests,
+                        takeoffSubmitted, mounted, inFlight, GetFlightAllowedStatusDiagnostic());
+                }
+                status = $"Mounted on {DescribeConfirmedMount()}; takeoff requested, waiting for InFlight confirmation " +
+                         $"({elapsed:0.0}/{LongApproachFlightStartupBudgetSeconds:0}s)";
+                return false;
+
+            case LongApproachStartupAction.AbandonWithoutGroundFallback:
+                var reason =
+                    $"long-distance flight startup did not confirm within {LongApproachFlightStartupBudgetSeconds:0}s; " +
+                    $"mounted={mounted}, inFlight={inFlight}, mountRequests={longApproachMountRequests}, " +
+                    $"takeoffRequests={longApproachTakeoffRequests}, flightAvailabilityKnown={flightAvailabilityKnown}, " +
+                    $"flightAvailable={flightAvailable}, flightStatus={GetFlightAllowedStatusDiagnostic()}";
+                vnav.StopSafe("bounded long-distance flight startup failed");
+                log.Error("{Reason}; refusing to begin a cross-map ground run for {Mark}",
+                    reason, current?.CreatureName ?? "active hunt");
+                FailCurrent(reason, HuntExitRequestSource.RecoveryBudget);
+                return false;
+
+            default:
+                return false;
+        }
+    }
+
+    private string DescribeConfirmedMount() => string.IsNullOrWhiteSpace(longApproachLastMountRequest)
+        ? "the current mount"
+        : longApproachLastMountRequest;
+
+    private unsafe bool TryGetLoadedTerritoryFlightAvailability(out bool flightAvailable)
+    {
+        var playerState = NativePlayerState.Instance();
+        if (playerState is null)
+        {
+            flightAvailable = false;
+            return false;
+        }
+
+        flightAvailable = playerState->CanFly;
+        return true;
+    }
+
+    private unsafe string GetFlightAllowedStatusDiagnostic()
+    {
+        try
+        {
+            return NativeControl.GetFlightAllowedStatus().ToString();
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Could not read the native flight-allowed status");
+            return "unavailable";
+        }
+    }
+
+    private unsafe bool TryRequestSentinelMount(out string requestedMount, out string diagnostic)
+    {
+        requestedMount = "Company Chocobo";
+        diagnostic = string.Empty;
+        var playerState = NativePlayerState.Instance();
+        var companyChocoboUnlocked = playerState is not null &&
+                                     playerState->IsMountUnlocked(CompanyChocoboMountId);
+        var manager = ActionManager.Instance();
+        var companyChocoboActionStatus = manager is null
+            ? uint.MaxValue
+            : manager->GetActionStatus(ActionType.Mount, CompanyChocoboMountId);
+        var mountChoice = HuntProgressPolicy.SelectMount(
+            companyChocoboUnlocked,
+            companyChocoboActionStatus == 0);
+        if (mountChoice == SentinelMountChoice.CompanyChocobo)
+        {
+            var accepted = manager is not null &&
+                           manager->UseAction(ActionType.Mount, CompanyChocoboMountId);
+            log.Information(
+                "Mount requested for {Mark}: mount=Company Chocobo, id={MountId}, unlocked=true, actionStatus={ActionStatus}, accepted={Accepted}",
+                current?.CreatureName ?? "active hunt", CompanyChocoboMountId,
+                companyChocoboActionStatus, accepted);
+            if (accepted)
+            {
+                diagnostic = "Company Chocobo request accepted";
+                return true;
+            }
+
+            log.Warning(
+                "Company Chocobo request was unavailable or rejected for {Mark}; falling back to Mount Roulette without blocking the hunt",
+                current?.CreatureName ?? "active hunt");
+        }
+        else
+        {
+            log.Information(
+                "Company Chocobo is unavailable for {Mark}; unlocked={Unlocked}, actionStatus={ActionStatus}; falling back to Mount Roulette",
+                current?.CreatureName ?? "active hunt", companyChocoboUnlocked,
+                companyChocoboActionStatus);
+        }
+
+        requestedMount = "Mount Roulette";
+        var rouletteAccepted = UseGeneralAction(9);
+        diagnostic = rouletteAccepted
+            ? "Mount Roulette request accepted"
+            : "Company Chocobo unavailable/rejected and Mount Roulette was not accepted";
+        log.Information(
+            "Mount requested for {Mark}: mount=Mount Roulette, accepted={Accepted}, preferredUnlocked={PreferredUnlocked}",
+            current?.CreatureName ?? "active hunt", rouletteAccepted, companyChocoboUnlocked);
+        return rouletteAccepted;
+    }
+
+    private unsafe bool UseGeneralAction(uint id)
     {
         var manager = ActionManager.Instance();
-        if (manager is not null)
-            manager->UseAction(ActionType.GeneralAction, id);
+        return manager is not null && manager->UseAction(ActionType.GeneralAction, id);
     }
 
     private static float HorizontalDistance(Vector3 a, Vector3 b)
