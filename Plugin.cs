@@ -86,6 +86,7 @@ public sealed class Plugin : IDalamudPlugin
     private const uint CompanyChocoboMountId = 1;
     private const double LongApproachFlightStartupCycleBudgetSeconds = 10;
     private const int LongApproachFlightStartupCycleLimit = 2;
+    private const double LongApproachFlightResetBudgetSeconds = 10;
     private const double LongApproachFlightResetRetrySeconds = 1;
     private const double LongApproachMountRetrySeconds = 2;
     private const double LongApproachTakeoffRetrySeconds = 0.25;
@@ -7383,31 +7384,28 @@ public sealed class Plugin : IDalamudPlugin
             current?.CreatureName ?? "active hunt");
         longApproachFlightResetPending = true;
         longApproachFlightResetStartedUtc = now;
+        longApproachFlightStartupUtc = DateTime.MinValue;
         longApproachFlightResetRequests = 0;
-        StartLongApproachFlightStartupCycle(now, 2);
-        log.Information(
-            "Second flight-startup cycle 2/2 started for {Mark}: the 10.0s budget includes the explicit dismount/reset, Company Chocobo-first remount, takeoff, and InFlight confirmation",
-            current?.CreatureName ?? "active hunt");
+        nextLongApproachFlightActionUtc = now;
         status = $"Flight-startup cycle 1/{LongApproachFlightStartupCycleLimit} timed out; " +
-                 "cycle 2/2 started with movement stopped while mount/takeoff state resets";
+                 "movement stopped and mount/takeoff state is being reset before cycle 2";
     }
 
     private bool TickLongApproachFlightStartupReset(DateTime now)
     {
         var resetElapsed = (now - longApproachFlightResetStartedUtc).TotalSeconds;
-        var cycleElapsed = (now - longApproachFlightStartupUtc).TotalSeconds;
         var mounted = condition[ConditionFlag.Mounted];
         var inFlight = condition[ConditionFlag.InFlight];
         var mounting = condition[ConditionFlag.Mounting];
-        if (cycleElapsed >= LongApproachFlightStartupCycleBudgetSeconds)
+        if (resetElapsed >= LongApproachFlightResetBudgetSeconds)
         {
             var reason =
-                $"long-distance flight startup cycle 2/{LongApproachFlightStartupCycleLimit} failed during its mandatory reset/remount preparation " +
-                $"within {LongApproachFlightStartupCycleBudgetSeconds:0}s; mounted={mounted}, " +
+                $"flight-startup recovery could not confirm a clean unmounted reset within " +
+                $"{LongApproachFlightResetBudgetSeconds:0}s before cycle 2; mounted={mounted}, " +
                 $"inFlight={inFlight}, mounting={mounting}, resetRequests={longApproachFlightResetRequests}";
             vnav.StopSafe("flight-startup reset could not prepare the second bounded cycle");
             log.Error(
-                "Final abandonment after second flight-startup failure: {Reason}; refusing to begin a cross-map ground run for {Mark}",
+                "Final abandonment during second flight-startup preparation: {Reason}; refusing to begin a cross-map ground run for {Mark}",
                 reason, current?.CreatureName ?? "active hunt");
             FailCurrent(reason, HuntExitRequestSource.RecoveryBudget);
             return false;
@@ -7415,8 +7413,8 @@ public sealed class Plugin : IDalamudPlugin
 
         if (mounting)
         {
-            status = $"Flight-startup cycle 2/2 reset: waiting for the previous mount transition to settle " +
-                     $"({cycleElapsed:0.0}/{LongApproachFlightStartupCycleBudgetSeconds:0}s)";
+            status = $"Flight-startup reset: waiting for the previous mount transition to settle " +
+                     $"({resetElapsed:0.0}/{LongApproachFlightResetBudgetSeconds:0}s)";
             return false;
         }
 
@@ -7434,20 +7432,19 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             status = inFlight
-                ? $"Flight-startup cycle 2/2 reset: stopping flight and landing ({cycleElapsed:0.0}/{LongApproachFlightStartupCycleBudgetSeconds:0}s)"
-                : $"Flight-startup cycle 2/2 reset: dismounting ({cycleElapsed:0.0}/{LongApproachFlightStartupCycleBudgetSeconds:0}s)";
+                ? $"Flight-startup reset: stopping flight and landing ({resetElapsed:0.0}/{LongApproachFlightResetBudgetSeconds:0}s)"
+                : $"Flight-startup reset: dismounting ({resetElapsed:0.0}/{LongApproachFlightResetBudgetSeconds:0}s)";
             return false;
         }
 
         longApproachFlightResetPending = false;
         longApproachFlightResetStartedUtc = DateTime.MinValue;
         longApproachFlightResetRequests = 0;
+        StartLongApproachFlightStartupCycle(now, 2);
         log.Information(
-            "Flight-startup recovery/reset complete for {Mark} after {ResetElapsed:0.0}s; continuing cycle 2/2 with {Remaining:0.0}s remaining for Company Chocobo-first remount, takeoff, and InFlight confirmation",
-            current?.CreatureName ?? "active hunt", resetElapsed,
-            Math.Max(0, LongApproachFlightStartupCycleBudgetSeconds - cycleElapsed));
-        status = $"Flight-startup reset complete; cycle 2/2 remount/takeoff has " +
-                 $"{Math.Max(0, LongApproachFlightStartupCycleBudgetSeconds - cycleElapsed):0.0}s remaining";
+            "Flight-startup recovery/reset complete for {Mark} after {ResetElapsed:0.0}s; second-cycle start confirmed with a fresh 10.0s Company Chocobo-first remount/takeoff budget",
+            current?.CreatureName ?? "active hunt", resetElapsed);
+        status = "Flight-startup reset complete; beginning cycle 2/2 with a fresh 10.0s budget";
         return false;
     }
 
