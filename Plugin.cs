@@ -43,6 +43,14 @@ public sealed class Plugin : IDalamudPlugin
     private const int MaximumParkingRecoveryFailures = 6;
     private const double ParkingRecoveryBudgetSeconds = 90;
     private const float ParkingPreferredClearanceTolerance = 3f;
+    private const float ParkingSettleMinimumDistance = 0.5f;
+    private const float ParkingSettleMaximumDistance = 1.0f;
+    private const float ParkingSettleArrivalTolerance = 0.25f;
+    private const float ParkingSettleEndpointTolerance = 0.4f;
+    private const float ParkingSettleMaximumPathLength = 3.5f;
+    private const double ParkingSettlePathQueryTimeoutSeconds = 2;
+    private const double ParkingSettleMovementTimeoutSeconds = 3;
+    private const double ParkingSettleStoppedPathGraceSeconds = 0.5;
     private const float TagApproachClearance = 8f;
     private const double TagDispatchConfirmationTimeoutSeconds = 5;
     private const double TagRecoveryBudgetSeconds = 120;
@@ -186,6 +194,15 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime parkingRecoveryStartedUtc = DateTime.MinValue;
     private int parkingRecoveryFailures;
     private bool parkingDeviationLogged;
+    private ParkingSettlePhase parkingSettlePhase;
+    private Vector3 parkingSettleOrigin;
+    private Vector3 parkingSettleOutwardPoint;
+    private Vector3 parkingSettleMarkPosition;
+    private Task<List<Vector3>>? parkingSettlePathTask;
+    private List<Vector3>? parkingSettleOutwardPath;
+    private List<Vector3>? parkingSettleReturnPath;
+    private DateTime parkingSettlePhaseStartedUtc = DateTime.MinValue;
+    private float parkingSettleDistance;
     private Vector3? returnLandingPoint;
     private Vector3 returnLandingLastProgressPosition;
     private DateTime returnLandingStartedUtc = DateTime.MinValue;
@@ -1512,6 +1529,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void PrepareCurrentTravel()
     {
+        ResetParkingFacingSettleTracking();
         territoryAetheryteId = 0;
         alertPoint = null;
         approachPoint = null;
@@ -1710,6 +1728,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             log.Error(ex, "S Rank Sentinel state machine failed; retaining the active hunt safely.");
             vnav.StopSafe();
+            ResetParkingFacingSettleTracking();
             if (current is null)
             {
                 SetState(SentinelState.Idle, "Internal error while idle; no hunt was active");
@@ -1853,6 +1872,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             case SentinelState.Landing:
                 TickLanding(now);
+                return;
+            case SentinelState.ParkingSettle:
+                TickParkingSettle(now);
                 return;
             case SentinelState.SafeWait:
                 TickSafeWait(now);
@@ -2311,6 +2333,7 @@ public sealed class Plugin : IDalamudPlugin
     private void BeginIncidentalAggroAvoidance(IBattleChara? threat, DateTime now)
     {
         incidentalAggroResumeState = state;
+        ResetParkingFacingSettleTracking();
         incidentalAggroStartedUtc = now;
         incidentalAggroClearSinceUtc = DateTime.MinValue;
         incidentalAggroLastProgressUtc = now;
@@ -4383,9 +4406,439 @@ public sealed class Plugin : IDalamudPlugin
         }
         ResetParkingRecoveryTracking();
         var landedClearance = ClearanceFromMark(mark);
+        if (TryBeginParkingFacingSettle(mark, now, out var settleReason))
+            return;
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(mark, now,
+                "The engage gate opened as landing completed; skipping the cosmetic settle for the required tag");
+            return;
+        }
+        log.Debug(
+            "Natural post-landing facing settle skipped for {Mark}: {Reason}",
+            mark.Name.TextValue, settleReason);
         SetState(SentinelState.SafeWait,
             $"Parked {landedClearance:0.0}y clear (preferred {ActiveDistanceProfile.WaitingDistance:0}y); " +
             $"emergency floor {ActiveDistanceProfile.EmergencyDistance:0}y");
+    }
+
+    private bool TryBeginParkingFacingSettle(
+        IBattleChara target,
+        DateTime now,
+        out string reason)
+    {
+        ResetParkingFacingSettleTracking();
+        LatchTagRequirement(target, now);
+        if (!vnav.IsReadySafe())
+        {
+            reason = "vnavmesh was not ready";
+            return false;
+        }
+
+        var origin = PlayerPosition();
+        var away = origin - target.Position;
+        away.Y = 0f;
+        if (away.LengthSquared() < 0.01f)
+        {
+            reason = "the outward direction from the mark was indeterminate";
+            return false;
+        }
+        away = Vector3.Normalize(away);
+
+        var requestedDistance = ParkingSettleMinimumDistance +
+                                Random.Shared.NextSingle() *
+                                (ParkingSettleMaximumDistance - ParkingSettleMinimumDistance);
+        var intendedOutward = origin + away * requestedDistance;
+        intendedOutward.Y = origin.Y;
+        var projectedOutward = vnav.PointOnFloorSafe(intendedOutward, 1.5f);
+        if (projectedOutward is null)
+        {
+            reason = "the tiny outward ground point could not be projected";
+            return false;
+        }
+
+        var outward = projectedOutward.Value;
+        var actualDistance = HorizontalDistance(origin, outward);
+        var exactMarkVisible = identifiedMarkGameObjectId != 0 &&
+                               target.GameObjectId == identifiedMarkGameObjectId;
+        if (!HuntProgressPolicy.CanBeginParkingFacingSettle(
+                exactMarkVisible,
+                tagRequired,
+                condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight],
+                ClearanceAtPoint(origin, target),
+                ClearanceAtPoint(outward, target),
+                ActiveDistanceProfile.EmergencyDistance,
+                ActiveDistanceProfile.WaitingDistance,
+                actualDistance,
+                VerticalSeparation(origin, outward)))
+        {
+            reason = "the projected step did not preserve the configured protected clearance or tag priority";
+            return false;
+        }
+
+        var protectedRadius = ProtectedCenterRadius(target);
+        if (!ProtectedSegmentIsSafe(origin, outward, target.Position, protectedRadius, false) ||
+            !ProtectedSegmentIsSafe(outward, origin, target.Position, protectedRadius, false))
+        {
+            reason = "the tiny out-and-back segments crossed the mark's protected radius";
+            return false;
+        }
+
+        parkingSettleOrigin = origin;
+        parkingSettleOutwardPoint = outward;
+        parkingSettleMarkPosition = target.Position;
+        parkingSettleDistance = actualDistance;
+        parkingSettlePathTask = vnav.PathfindAvoidSafe(parkingSettleOrigin, parkingSettleOutwardPoint,
+            false, target.Position, protectedRadius);
+        if (parkingSettlePathTask is null)
+        {
+            ResetParkingFacingSettleTracking();
+            reason = "vnavmesh could not start the outward path validation";
+            return false;
+        }
+
+        parkingSettlePhase = ParkingSettlePhase.ValidatingOutward;
+        parkingSettlePhaseStartedUtc = now;
+        reason = string.Empty;
+        log.Information(
+            "Natural post-landing facing settle: validating a {Distance:0.00}y outward step and return to the original parking point for {Mark}",
+            actualDistance, target.Name.TextValue);
+        SetState(SentinelState.ParkingSettle,
+            $"Validating a {actualDistance:0.0}y natural facing settle at the parked position");
+        return true;
+    }
+
+    private void TickParkingSettle(DateTime now)
+    {
+        mark = FindMark();
+        if (mark is null || identifiedMarkGameObjectId == 0 ||
+            mark.GameObjectId != identifiedMarkGameObjectId)
+        {
+            FinishParkingFacingSettle(mark,
+                "the exact current mark was no longer available; cosmetic settle skipped", false);
+            return;
+        }
+
+        MarkWasIdentified(mark);
+        LatchTagRequirement(mark, now);
+        if (tagRequired)
+        {
+            BeginTagRequiredRecovery(mark, now,
+                "The engage gate opened during the cosmetic parking settle; cancelling it immediately for the required tag");
+            return;
+        }
+
+        if (condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight])
+        {
+            FinishParkingFacingSettle(mark,
+                "mounted/flight state returned after landing; cosmetic settle skipped", false);
+            return;
+        }
+
+        if (HorizontalDistance(mark.Position, parkingSettleMarkPosition) > 0.5f)
+        {
+            FinishParkingFacingSettle(mark,
+                "the mark moved while the cosmetic paths were being prepared; settle skipped", false);
+            return;
+        }
+
+        if (!ParkingFacingSettleGeometryIsSafe(mark))
+        {
+            FinishParkingFacingSettle(mark,
+                "the protected clearance or tiny route changed before completion; settle skipped", false);
+            return;
+        }
+
+        switch (parkingSettlePhase)
+        {
+            case ParkingSettlePhase.ValidatingOutward:
+                PollParkingFacingSettleOutwardPath(mark, now);
+                return;
+            case ParkingSettlePhase.ValidatingReturn:
+                PollParkingFacingSettleReturnPath(mark, now);
+                return;
+            case ParkingSettlePhase.MovingOutward:
+                TickParkingFacingSettleMovement(mark, now, returning: false);
+                return;
+            case ParkingSettlePhase.MovingBack:
+                TickParkingFacingSettleMovement(mark, now, returning: true);
+                return;
+            default:
+                FinishParkingFacingSettle(mark,
+                    "the cosmetic settle state was unavailable; settle skipped", false);
+                return;
+        }
+    }
+
+    private void PollParkingFacingSettleOutwardPath(IBattleChara target, DateTime now)
+    {
+        var task = parkingSettlePathTask;
+        if (task is null)
+        {
+            FinishParkingFacingSettle(target,
+                "the outward path validation was lost; settle skipped", false);
+            return;
+        }
+        if (!task.IsCompleted)
+        {
+            if ((now - parkingSettlePhaseStartedUtc).TotalSeconds <= ParkingSettlePathQueryTimeoutSeconds)
+            {
+                status = $"Validating the {parkingSettleDistance:0.0}y outward natural-facing step";
+                return;
+            }
+            FinishParkingFacingSettle(target,
+                "the outward path validation timed out; settle skipped", false);
+            return;
+        }
+
+        var path = GetCompletedParkingFacingSettlePath(task, "outward");
+        parkingSettlePathTask = null;
+        if (!ParkingFacingSettlePathIsUsable(
+                parkingSettleOrigin, parkingSettleOutwardPoint, path, target))
+        {
+            FinishParkingFacingSettle(target,
+                "vnavmesh did not provide a safe tiny outward path; settle skipped", false);
+            return;
+        }
+
+        parkingSettleOutwardPath = path;
+        parkingSettlePathTask = vnav.PathfindAvoidSafe(parkingSettleOutwardPoint, parkingSettleOrigin,
+            false, target.Position, ProtectedCenterRadius(target));
+        if (parkingSettlePathTask is null)
+        {
+            FinishParkingFacingSettle(target,
+                "vnavmesh could not start return-path validation; settle skipped before moving", false);
+            return;
+        }
+
+        parkingSettlePhase = ParkingSettlePhase.ValidatingReturn;
+        parkingSettlePhaseStartedUtc = now;
+        status = "Outward step is safe; validating the return to the exact parked position";
+    }
+
+    private void PollParkingFacingSettleReturnPath(IBattleChara target, DateTime now)
+    {
+        var task = parkingSettlePathTask;
+        if (task is null)
+        {
+            FinishParkingFacingSettle(target,
+                "the return path validation was lost; settle skipped before moving", false);
+            return;
+        }
+        if (!task.IsCompleted)
+        {
+            if ((now - parkingSettlePhaseStartedUtc).TotalSeconds <= ParkingSettlePathQueryTimeoutSeconds)
+            {
+                status = "Validating the return leg to the exact parked position";
+                return;
+            }
+            FinishParkingFacingSettle(target,
+                "the return path validation timed out; settle skipped before moving", false);
+            return;
+        }
+
+        var path = GetCompletedParkingFacingSettlePath(task, "return");
+        parkingSettlePathTask = null;
+        if (!ParkingFacingSettlePathIsUsable(
+                parkingSettleOutwardPoint, parkingSettleOrigin, path, target))
+        {
+            FinishParkingFacingSettle(target,
+                "vnavmesh did not provide a safe tiny return path; settle skipped before moving", false);
+            return;
+        }
+
+        parkingSettleReturnPath = path;
+        if (parkingSettleOutwardPath is null ||
+            !vnav.MovePathSafe(parkingSettleOutwardPath, false))
+        {
+            FinishParkingFacingSettle(target,
+                "the validated outward movement could not be submitted; settle skipped", false);
+            return;
+        }
+
+        parkingSettlePhase = ParkingSettlePhase.MovingOutward;
+        parkingSettlePhaseStartedUtc = now;
+        log.Information(
+            "Natural post-landing facing settle started for {Mark}: moving {Distance:0.00}y outward, then back to the original parked point",
+            target.Name.TextValue, parkingSettleDistance);
+        status = $"Natural facing settle: moving {parkingSettleDistance:0.0}y outward before returning";
+    }
+
+    private void TickParkingFacingSettleMovement(
+        IBattleChara target,
+        DateTime now,
+        bool returning)
+    {
+        var destination = returning ? parkingSettleOrigin : parkingSettleOutwardPoint;
+        if (HorizontalDistance(PlayerPosition(), destination) <= ParkingSettleArrivalTolerance)
+        {
+            if (returning)
+            {
+                FinishParkingFacingSettle(target,
+                    "natural out-and-back movement completed at the original parking point", true);
+                return;
+            }
+
+            if (!TryStartParkingFacingSettleReturn(target, now,
+                    "the outward point was reached"))
+                FinishParkingFacingSettle(target,
+                    "the validated return movement could not be submitted; holding the outward point", false);
+            return;
+        }
+
+        var elapsed = (now - parkingSettlePhaseStartedUtc).TotalSeconds;
+        var routeStopped = elapsed >= ParkingSettleStoppedPathGraceSeconds &&
+                           !vnav.IsPathRunningSafe() &&
+                           !vnav.IsPathfindInProgressSafe() &&
+                           !vnav.IsNavPathfindInProgressSafe();
+        if (elapsed < ParkingSettleMovementTimeoutSeconds && !routeStopped)
+        {
+            status = returning
+                ? "Natural facing settle: returning to the original parked position"
+                : $"Natural facing settle: moving {parkingSettleDistance:0.0}y outward before returning";
+            return;
+        }
+
+        if (!returning &&
+            HorizontalDistance(PlayerPosition(), parkingSettleOrigin) > ParkingSettleArrivalTolerance &&
+            TryStartParkingFacingSettleReturn(target, now,
+                routeStopped ? "the outward route stopped early" : "the outward route timed out"))
+            return;
+
+        FinishParkingFacingSettle(target,
+            returning
+                ? "the bounded return movement did not finish; cosmetic settle ended without retrying"
+                : "the bounded outward movement did not start; cosmetic settle skipped",
+            false);
+    }
+
+    private bool TryStartParkingFacingSettleReturn(
+        IBattleChara target,
+        DateTime now,
+        string reason)
+    {
+        if (parkingSettleReturnPath is null ||
+            !ParkingFacingSettlePathIsUsable(
+                parkingSettleOutwardPoint, parkingSettleOrigin, parkingSettleReturnPath, target) ||
+            !vnav.MovePathSafe(parkingSettleReturnPath, false))
+            return false;
+
+        parkingSettlePhase = ParkingSettlePhase.MovingBack;
+        parkingSettlePhaseStartedUtc = now;
+        log.Debug("Natural post-landing facing settle return started for {Mark}: {Reason}",
+            target.Name.TextValue, reason);
+        status = "Natural facing settle: returning to the original parked position";
+        return true;
+    }
+
+    private List<Vector3>? GetCompletedParkingFacingSettlePath(
+        Task<List<Vector3>> task,
+        string leg)
+    {
+        try
+        {
+            return task.IsCompletedSuccessfully ? task.Result : null;
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Natural parking-facing {Leg} path validation failed", leg);
+            return null;
+        }
+    }
+
+    private bool ParkingFacingSettleGeometryIsSafe(IBattleChara target)
+    {
+        if (!HuntProgressPolicy.CanBeginParkingFacingSettle(
+                true,
+                tagRequired,
+                condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight],
+                ClearanceAtPoint(parkingSettleOrigin, target),
+                ClearanceAtPoint(parkingSettleOutwardPoint, target),
+                ActiveDistanceProfile.EmergencyDistance,
+                ActiveDistanceProfile.WaitingDistance,
+                parkingSettleDistance,
+                VerticalSeparation(parkingSettleOrigin, parkingSettleOutwardPoint)))
+            return false;
+
+        var protectedRadius = ProtectedCenterRadius(target);
+        if (!ProtectedSegmentIsSafe(
+                parkingSettleOrigin, parkingSettleOutwardPoint, target.Position, protectedRadius, false) ||
+            !ProtectedSegmentIsSafe(
+                parkingSettleOutwardPoint, parkingSettleOrigin, target.Position, protectedRadius, false))
+            return false;
+
+        return (parkingSettleOutwardPath is null ||
+                ParkingFacingSettlePathIsUsable(
+                    parkingSettleOrigin, parkingSettleOutwardPoint, parkingSettleOutwardPath, target)) &&
+               (parkingSettleReturnPath is null ||
+                ParkingFacingSettlePathIsUsable(
+                    parkingSettleOutwardPoint, parkingSettleOrigin, parkingSettleReturnPath, target));
+    }
+
+    private bool ParkingFacingSettlePathIsUsable(
+        Vector3 start,
+        Vector3 destination,
+        IReadOnlyList<Vector3>? path,
+        IBattleChara target)
+    {
+        if (path is null || path.Count == 0 ||
+            HorizontalDistance(path[^1], destination) > ParkingSettleEndpointTolerance)
+            return false;
+
+        var pathLength = 0f;
+        var previous = start;
+        foreach (var waypoint in path)
+        {
+            if (VerticalSeparation(waypoint, parkingSettleOrigin) > 0.75f)
+                return false;
+            pathLength += Vector3.Distance(previous, waypoint);
+            previous = waypoint;
+        }
+        if (pathLength > ParkingSettleMaximumPathLength)
+            return false;
+
+        var protectedRadius = ProtectedCenterRadius(target);
+        return ProtectedSegmentIsSafe(start, destination, target.Position, protectedRadius, false) &&
+               PathStaysOutsideProtectedRadius(start, path, target.Position, protectedRadius, false);
+    }
+
+    private void FinishParkingFacingSettle(
+        IBattleChara? target,
+        string reason,
+        bool completed)
+    {
+        vnav.StopSafe(completed
+            ? "natural post-landing facing settle complete"
+            : "natural post-landing facing settle skipped or ended");
+        var clearance = target is null ? (float?)null : ClearanceFromMark(target);
+        if (completed)
+            log.Information(
+                "Natural post-landing facing settle complete for {Mark}; returned to the original parking point at {Clearance:0.0}y clearance",
+                target?.Name.TextValue ?? current?.CreatureName ?? "current hunt", clearance ?? 0f);
+        else
+            log.Debug(
+                "Natural post-landing facing settle ended safely for {Mark}: {Reason}",
+                target?.Name.TextValue ?? current?.CreatureName ?? "current hunt", reason);
+
+        ResetParkingFacingSettleTracking();
+        var clearanceText = clearance is null
+            ? "original safe parking clearance"
+            : $"{clearance.Value:0.0}y clearance";
+        SetState(SentinelState.SafeWait,
+            $"Parked at {clearanceText}; {(completed ? "natural facing settle complete" : "facing settle skipped safely")}");
+    }
+
+    private void ResetParkingFacingSettleTracking()
+    {
+        parkingSettlePhase = ParkingSettlePhase.None;
+        parkingSettleOrigin = default;
+        parkingSettleOutwardPoint = default;
+        parkingSettleMarkPosition = default;
+        parkingSettlePathTask = null;
+        parkingSettleOutwardPath = null;
+        parkingSettleReturnPath = null;
+        parkingSettlePhaseStartedUtc = DateTime.MinValue;
+        parkingSettleDistance = 0f;
     }
 
     private void TickSafeWait(DateTime now)
@@ -5295,6 +5748,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
+        ResetParkingFacingSettleTracking();
         LatchTagRequirement(target, DateTime.UtcNow);
         if (tagRequired)
         {
@@ -6387,6 +6841,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         killConfirmed = true;
+        ResetParkingFacingSettleTracking();
         pullResetCandidateSinceUtc = DateTime.MinValue;
         ResetPendingTagDispatch();
         discardAtUldah = false;
@@ -6468,6 +6923,7 @@ public sealed class Plugin : IDalamudPlugin
     private void ClearCurrent()
     {
         vnav.StopSafe();
+        ResetParkingFacingSettleTracking();
         if (current is not null)
             faloopReportIdsByAlertKey.Remove(current.Key);
         current = null;
@@ -6527,6 +6983,7 @@ public sealed class Plugin : IDalamudPlugin
         SentinelState.LocateMark or
         SentinelState.MoveToSafePoint or
         SentinelState.Landing or
+        SentinelState.ParkingSettle or
         SentinelState.SafeWait or
         SentinelState.TagApproach or
         SentinelState.GroundRetreat or
@@ -6593,6 +7050,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         vnav.StopSafe("tag requirement supersedes parking and landing");
+        ResetParkingFacingSettleTracking();
         parkingPathTask = null;
         parkingGroundPathTask = null;
         pendingParkingFlightPath = null;
@@ -6774,6 +7232,7 @@ public sealed class Plugin : IDalamudPlugin
         SentinelState.LocateMark or
         SentinelState.MoveToSafePoint or
         SentinelState.Landing or
+        SentinelState.ParkingSettle or
         SentinelState.SafeWait or
         SentinelState.GroundRetreat;
 
@@ -7605,6 +8064,7 @@ public sealed class Plugin : IDalamudPlugin
         ResetReturnRecoveryTracking();
         ResetReturnLandingRecovery();
         ResetParkingRecoveryTracking();
+        ResetParkingFacingSettleTracking();
         ResetApproachRouteTracking(clearProjectionCandidates: true);
         ResetLocalApproachRecovery();
         ResetLocateSearchTracking();
@@ -7909,12 +8369,22 @@ public sealed class Plugin : IDalamudPlugin
         LocateMark,
         MoveToSafePoint,
         Landing,
+        ParkingSettle,
         SafeWait,
         TagApproach,
         GroundRetreat,
         AvoidIncidentalAggro,
         PostKillSsGrace,
         SsWatch,
+    }
+
+    private enum ParkingSettlePhase
+    {
+        None,
+        ValidatingOutward,
+        ValidatingReturn,
+        MovingOutward,
+        MovingBack,
     }
 }
 

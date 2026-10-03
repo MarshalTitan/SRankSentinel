@@ -11,7 +11,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.41.0</Version>"],
+  [project, "<Version>0.7.42.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -44,6 +44,11 @@ const required = [
   [plugin, "InFlight was lost before or during the long-distance flying route"],
   [policy, "SentinelMountChoice.CompanyChocobo"],
   [policy, "LongApproachStartupAction.BeginFlyingRoute"],
+  [plugin, "SentinelState.ParkingSettle"],
+  [plugin, "TryBeginParkingFacingSettle"],
+  [plugin, "PathfindAvoidSafe(parkingSettleOrigin, parkingSettleOutwardPoint"],
+  [plugin, "PathfindAvoidSafe(parkingSettleOutwardPoint, parkingSettleOrigin"],
+  [policy, "CanBeginParkingFacingSettle"],
 ];
 
 for (const [source, contract] of required) {
@@ -100,4 +105,14 @@ const startRouteBody = plugin.match(/private bool TryStartApproachRoute\(DateTim
 if (!startRouteBody?.includes("PathfindSafe(player, target, useFlight)"))
   throw new Error("Approach pathfinding ignores the confirmed flight/ground mode");
 
-console.log("Field-recovery audit passed: latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");
+const settleBody = plugin.match(/private void TickParkingSettle\(DateTime now\)([\s\S]*?)private void TickSafeWait/)?.[1];
+if (!settleBody?.includes("BeginTagRequiredRecovery") ||
+    !settleBody.includes("FinishParkingFacingSettle"))
+  throw new Error("Post-landing facing settle does not yield to tagging or fail open to SafeWait");
+if (settleBody.includes("Player.Rotation =") ||
+    settleBody.includes("LocalPlayer.Rotation =") ||
+    settleBody.includes("Player.Position =") ||
+    settleBody.includes("LocalPlayer.Position ="))
+  throw new Error("Post-landing facing settle contains a direct rotation/position write");
+
+console.log("Field-recovery audit passed: latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, bounded natural facing settle, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");

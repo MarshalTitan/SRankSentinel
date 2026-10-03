@@ -10,6 +10,8 @@ var tests = new (string Name, Action Run)[]
     ("LocateMark expires into a final scan then unresolved abandonment", LocateBudgetIsBounded),
     ("unprojectable destination escalates to approximate flight then abandonment", ProjectionRecoveryIsBounded),
     ("parking candidates honor the configured preferred clearance", ParkingUsesPreferredClearance),
+    ("post-landing facing settle accepts a safe tiny outward step", ParkingFacingSettleAcceptsSafeStep),
+    ("post-landing facing settle is suppressed for tag or unsafe terrain", ParkingFacingSettleIsOptionalAndSafe),
     ("visible live mark blocks an automatic FailCurrent request", LiveMarkBlocksFailCurrent),
     ("visible live mark blocks recovery-budget abandonment", LiveMarkBlocksRecoveryBudgetExit),
     ("visible live mark survives framework-exception recovery", LiveMarkBlocksFrameworkExceptionExit),
@@ -101,6 +103,24 @@ static void ParkingUsesPreferredClearance()
     True(HuntProgressPolicy.IsPreferredParkingClearance(24.5f, 23f, 3f));
     False(HuntProgressPolicy.IsPreferredParkingClearance(29f, 23f, 3f));
     Equal(6f, HuntProgressPolicy.ParkingClearanceError(29f, 23f));
+}
+
+static void ParkingFacingSettleAcceptsSafeStep() =>
+    True(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, false, 23f, 23.75f, 18f, 23f, 0.75f, 0.1f));
+
+static void ParkingFacingSettleIsOptionalAndSafe()
+{
+    False(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, true, false, 23f, 23.75f, 18f, 23f, 0.75f, 0.1f));
+    False(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, true, 23f, 23.75f, 18f, 23f, 0.75f, 0.1f));
+    False(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, false, 22.4f, 23.15f, 18f, 23f, 0.75f, 0.1f));
+    False(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, false, 23f, 23.2f, 18f, 23f, 0.75f, 0.1f));
+    False(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, false, 23f, 23.75f, 18f, 23f, 1.5f, 0.1f));
 }
 
 static void LiveMarkBlocksFailCurrent() =>
