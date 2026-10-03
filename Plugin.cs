@@ -40,10 +40,12 @@ public sealed class Plugin : IDalamudPlugin
     private const double ParkingRouteStallSeconds = 12;
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
+    private const float ParkingLandingHorizontalTolerance = 0.75f;
+    private const float ParkingLandingVerticalTolerance = 5f;
     private const int MaximumParkingRecoveryFailures = 6;
     private const double ParkingRecoveryBudgetSeconds = 90;
     private const float ParkingPreferredClearanceTolerance = 3f;
-    private const float ParkingSettleMinimumDistance = 0.5f;
+    private const float ParkingSettleMinimumDistance = 0.9f;
     private const float ParkingSettleMaximumDistance = 1.0f;
     private const float ParkingSettleArrivalTolerance = 0.25f;
     private const float ParkingSettleEndpointTolerance = 0.4f;
@@ -4297,20 +4299,41 @@ public sealed class Plugin : IDalamudPlugin
             PollCrowdParkingPath(mark, now);
             return;
         }
-        if (safePoint is not null && Vector3.Distance(PlayerPosition(), safePoint.Value) <= 5f)
-        {
-            vnav.StopSafe();
-            if (!RevalidateParkingForLanding(mark, out var reason))
-            {
-                RestartSafeParkingAfterRevalidation(mark, reason);
-                return;
-            }
-            SetState(SentinelState.Landing, "At the safe parking point; landing normally");
-            return;
-        }
         if (safePoint is not null)
         {
             var player = PlayerPosition();
+            var horizontalDistance = HorizontalDistance(player, safePoint.Value);
+            var verticalDistance = VerticalSeparation(player, safePoint.Value);
+            var actualClearance = ClearanceFromMark(mark);
+            if (HuntProgressPolicy.CanEnterParkingLandingHandoff(
+                    horizontalDistance,
+                    verticalDistance,
+                    actualClearance,
+                    ActiveDistanceProfile.EmergencyDistance,
+                    ActiveDistanceProfile.WaitingDistance,
+                    ParkingLandingHorizontalTolerance,
+                    ParkingLandingVerticalTolerance))
+            {
+                vnav.StopSafe();
+                if (!RevalidateParkingForLanding(mark, out var reason))
+                {
+                    RestartSafeParkingAfterRevalidation(mark, reason);
+                    return;
+                }
+                log.Information(
+                    "Parking landing handoff aligned: horizontal={Horizontal:0.00}y, vertical={Vertical:0.00}y, actual clearance={Clearance:0.00}y, preferred={Preferred:0.0}y",
+                    horizontalDistance, verticalDistance, actualClearance,
+                    ActiveDistanceProfile.WaitingDistance);
+                SetState(SentinelState.Landing,
+                    $"Aligned over the safe point ({horizontalDistance:0.0}y horizontal); landing normally");
+                return;
+            }
+
+            if (Vector3.Distance(player, safePoint.Value) <= ParkingLandingVerticalTolerance)
+            {
+                status = $"Aligning over the selected safe point before landing: {horizontalDistance:0.0}y horizontal, " +
+                         $"{verticalDistance:0.0}y vertical, {actualClearance:0.0}y clear";
+            }
             if (Vector3.Distance(player, parkingLastProgressPosition) >= ParkingMeaningfulProgressDistance)
             {
                 parkingLastProgressPosition = player;
@@ -6311,10 +6334,13 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
+        var requiredActualClearance = MathF.Max(
+            ActiveDistanceProfile.EmergencyDistance,
+            ActiveDistanceProfile.WaitingDistance - 0.5f);
         if (ClearanceAtPoint(candidate.Position, target) < ActiveDistanceProfile.WaitingDistance - 0.5f ||
             ClearanceAtPoint(candidate.Position, target) > MaximumParkingClearance + 0.5f ||
             VerticalSeparation(candidate.Position, target.Position) > ParkingMaximumVerticalSeparation ||
-            ClearanceFromMark(target) < ActiveDistanceProfile.EmergencyDistance)
+            ClearanceFromMark(target) < requiredActualClearance)
         {
             reason = "Mark movement invalidated parking clearance or vertical reach; resampling safely";
             return false;

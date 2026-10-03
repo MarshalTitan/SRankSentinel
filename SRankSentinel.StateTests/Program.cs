@@ -10,6 +10,8 @@ var tests = new (string Name, Action Run)[]
     ("LocateMark expires into a final scan then unresolved abandonment", LocateBudgetIsBounded),
     ("unprojectable destination escalates to approximate flight then abandonment", ProjectionRecoveryIsBounded),
     ("parking candidates honor the configured preferred clearance", ParkingUsesPreferredClearance),
+    ("landing waits for horizontal alignment at the selected safe point", ParkingLandingRejectsShortStop),
+    ("landing permits vertical descent once horizontally aligned", ParkingLandingAcceptsAlignedDescent),
     ("post-landing facing settle accepts a safe tiny outward step", ParkingFacingSettleAcceptsSafeStep),
     ("post-landing facing settle is suppressed for tag or unsafe terrain", ParkingFacingSettleIsOptionalAndSafe),
     ("visible live mark blocks an automatic FailCurrent request", LiveMarkBlocksFailCurrent),
@@ -103,6 +105,22 @@ static void ParkingUsesPreferredClearance()
     True(HuntProgressPolicy.IsPreferredParkingClearance(24.5f, 23f, 3f));
     False(HuntProgressPolicy.IsPreferredParkingClearance(29f, 23f, 3f));
     Equal(6f, HuntProgressPolicy.ParkingClearanceError(29f, 23f));
+}
+
+static void ParkingLandingRejectsShortStop()
+{
+    False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
+        4.5f, 1f, 7.3f, 5f, 8f, 0.75f, 5f));
+    False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
+        0.4f, 1f, 7.3f, 5f, 8f, 0.75f, 5f));
+}
+
+static void ParkingLandingAcceptsAlignedDescent()
+{
+    True(HuntProgressPolicy.CanEnterParkingLandingHandoff(
+        0.4f, 4.8f, 7.6f, 5f, 8f, 0.75f, 5f));
+    False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
+        0.4f, 5.2f, 7.6f, 5f, 8f, 0.75f, 5f));
 }
 
 static void ParkingFacingSettleAcceptsSafeStep() =>
