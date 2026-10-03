@@ -181,6 +181,21 @@ internal static class HuntProgressPolicy
         float tolerance) =>
         ParkingClearanceError(candidateClearance, preferredClearance) <= tolerance;
 
+    public static bool CanEnterParkingLandingHandoff(
+        float horizontalDistanceToDestination,
+        float verticalDistanceToDestination,
+        float actualClearance,
+        float emergencyClearance,
+        float preferredClearance,
+        float horizontalTolerance,
+        float verticalTolerance)
+    {
+        var protectedClearance = MathF.Max(emergencyClearance, preferredClearance - 0.5f);
+        return horizontalDistanceToDestination <= horizontalTolerance &&
+               verticalDistanceToDestination <= verticalTolerance &&
+               actualClearance >= protectedClearance;
+    }
+
     public static bool CanBeginParkingFacingSettle(
         bool exactMarkVisible,
         bool tagRequired,

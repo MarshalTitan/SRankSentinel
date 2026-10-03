@@ -11,7 +11,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.42.0</Version>"],
+  [project, "<Version>0.7.43.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -45,6 +45,8 @@ const required = [
   [policy, "SentinelMountChoice.CompanyChocobo"],
   [policy, "LongApproachStartupAction.BeginFlyingRoute"],
   [plugin, "SentinelState.ParkingSettle"],
+  [plugin, "ParkingLandingHorizontalTolerance = 0.75f"],
+  [policy, "CanEnterParkingLandingHandoff"],
   [plugin, "TryBeginParkingFacingSettle"],
   [plugin, "PathfindAvoidSafe(parkingSettleOrigin, parkingSettleOutwardPoint"],
   [plugin, "PathfindAvoidSafe(parkingSettleOutwardPoint, parkingSettleOrigin"],
