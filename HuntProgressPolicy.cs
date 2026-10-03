@@ -180,4 +180,23 @@ internal static class HuntProgressPolicy
         float preferredClearance,
         float tolerance) =>
         ParkingClearanceError(candidateClearance, preferredClearance) <= tolerance;
+
+    public static bool CanBeginParkingFacingSettle(
+        bool exactMarkVisible,
+        bool tagRequired,
+        bool mountedOrFlying,
+        float originClearance,
+        float outwardClearance,
+        float emergencyClearance,
+        float preferredClearance,
+        float outwardDistance,
+        float verticalSeparation)
+    {
+        var protectedClearance = MathF.Max(emergencyClearance, preferredClearance - 0.5f);
+        return exactMarkVisible && !tagRequired && !mountedOrFlying &&
+               originClearance >= protectedClearance &&
+               outwardClearance >= originClearance + 0.25f &&
+               outwardDistance is >= 0.45f and <= 1.1f &&
+               verticalSeparation <= 0.75f;
+    }
 }
