@@ -7,6 +7,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Plugin;
 using SentinelCore.UI;
 using SRankSentinel;
 
@@ -36,10 +37,11 @@ internal static class Program
             Test("disabled canonical switch rejects pointer and keyboard activation", TestDisabledToggle);
             Test("shared shell/cards balance style and render at multiple UI scales", TestModernShell);
             Test("Classic and every Modern page render at the minimum size", TestConsumerPages);
+            Test("sidebar Classic action saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
             Test("saved position and larger size survive Classic/Modern switching", TestWindowPlacement);
             Test("undersized saved Modern window expands without moving", TestMinimumWindow);
             Test("collapse and close retain native window behavior", TestWindowControls);
-            Console.WriteLine($"{passed}/13 UI and migration tests passed.");
+            Console.WriteLine($"{passed}/14 UI and migration tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -366,6 +368,81 @@ internal static class Program
             Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Rendering a theme/page changed hunt configuration.");
         }
     });
+
+    private static void TestSidebarThemeSwitch()
+    {
+        foreach (var page in Enum.GetValues<ConfigurationPage>())
+        foreach (var key in new[] { ImGuiKey.None, ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
+            InContext(() =>
+            {
+                var config = new Configuration { WindowTheme = 1, WindowPage = (int)page };
+                var pluginInterface = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
+                var store = (RecordingPluginInterface)pluginInterface;
+                config.Initialize(pluginInterface);
+                var snapshot = HuntSnapshot(config);
+                var savedBefore = store.SaveCalls;
+                var plugin = CreateConsumer(config);
+                LoadWindowPlacement(new Vector2(620, 520));
+                Vector2 minimum = default, maximum = default;
+                var focus = false;
+                var focused = false;
+                SetField(plugin, "drawModernNavigation", (Action)(() =>
+                {
+                    typeof(Plugin).GetMethod("DrawModernNavigation", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(plugin, null);
+                    Check(ImGui.GetCurrentContext().LastItemData.ID == ImGui.GetID("Use Classic theme"),
+                        "The sidebar's last control is not the Classic theme action.");
+                    minimum = ImGui.GetItemRectMin();
+                    maximum = ImGui.GetItemRectMax();
+                    Check(ImGui.CalcTextSize("Use Classic theme").X + 2f * ImGui.GetStyle().FramePadding.X <=
+                        maximum.X - minimum.X, "The sidebar Classic button label is clipped.");
+                    focused = ImGui.IsItemFocused();
+                    if (focus) ImGui.SetKeyboardFocusHere(-1);
+                }));
+                for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+                var navigation = FindWindow(Plugin.ConfigurationWindowId, "##Navigation");
+                Check(minimum.X >= navigation.Pos.X && maximum.X <= navigation.Pos.X + navigation.Size.X &&
+                    minimum.Y >= navigation.Pos.Y && maximum.Y <= navigation.Pos.Y + navigation.Size.Y,
+                    "The Classic button is clipped or outside the left sidebar at 620x520.");
+                var io = ImGui.GetIO();
+                if (key == ImGuiKey.None)
+                {
+                    var center = (minimum + maximum) / 2f;
+                    io.AddMousePosEvent(center.X, center.Y);
+                    ConsumerFrame(plugin);
+                    io.AddMouseButtonEvent(0, true);
+                    ConsumerFrame(plugin);
+                    Check(config.WindowTheme == 1, "Theme changed before the button release.");
+                    io.AddMouseButtonEvent(0, false);
+                    ConsumerFrame(plugin);
+                }
+                else
+                {
+                    focus = true;
+                    ConsumerFrame(plugin);
+                    focus = false;
+                    ConsumerFrame(plugin);
+                    Check(focused, "The sidebar Classic action did not receive native navigation focus.");
+                    io.AddKeyEvent(key, true);
+                    ConsumerFrame(plugin);
+                    io.AddKeyEvent(key, false);
+                    ConsumerFrame(plugin);
+                }
+                ConsumerFrame(plugin);
+                Check(config.WindowTheme == 0 && config.WindowPage == (int)page,
+                    $"{key} did not switch to Classic while retaining the selected page.");
+                Check(store.SaveCalls == savedBefore + 1, "The theme action did not save exactly once.");
+                var reloaded = JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!;
+                reloaded.MigrateWindowAppearance();
+                Check(reloaded.WindowTheme == 0 && reloaded.WindowPage == (int)page,
+                    "The sidebar theme choice did not persist.");
+                Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)) &&
+                    JsonNode.DeepEquals(snapshot, HuntSnapshot(reloaded)), "Switching themes changed hunt settings.");
+                var window = FindWindow(Plugin.ConfigurationWindowId);
+                Check(window.Pos == new Vector2(145, 95) && window.Size == new Vector2(620, 520),
+                    "The actual sidebar action reset saved window placement.");
+            });
+    }
 
     private static void TestWindowPlacement() => InContext(() =>
     {
