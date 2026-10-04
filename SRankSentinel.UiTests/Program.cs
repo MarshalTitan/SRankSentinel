@@ -28,6 +28,7 @@ internal static class Program
         {
             Test("v15 migration preserves all hunt values, credentials, and queues", TestLegacyMigration);
             Test("Modern choice and selected page survive save/load", TestThemeRoundTrip);
+            Test("merged pages migrate to Main without changing theme or hunt settings", TestMergedPageSelection);
             Test("new and invalid appearance states default safely to Classic", TestAppearanceDefaults);
             Test("canonical switch toggles once on a mouse click/release", TestMouseToggle);
             Test("canonical switch accepts keyboard navigation activation", () => TestNavigationToggle(ImGuiKey.Space));
@@ -38,7 +39,7 @@ internal static class Program
             Test("saved position and larger size survive Classic/Modern switching", TestWindowPlacement);
             Test("undersized saved Modern window expands without moving", TestMinimumWindow);
             Test("collapse and close retain native window behavior", TestWindowControls);
-            Console.WriteLine($"{passed}/12 UI and migration tests passed.");
+            Console.WriteLine($"{passed}/13 UI and migration tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -94,12 +95,40 @@ internal static class Program
 
     private static void TestThemeRoundTrip()
     {
-        var config = new Configuration { WindowTheme = 1, WindowPage = 3 };
-        config.MigrateWindowAppearance();
-        var reloaded = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!;
-        reloaded.MigrateWindowAppearance();
-        Check(reloaded.WindowTheme == 1 && reloaded.WindowPage == 3, "Saved Modern selection/page were lost.");
+        foreach (var page in Enum.GetValues<ConfigurationPage>())
+        {
+            var config = new Configuration { WindowTheme = 1, WindowPage = (int)page };
+            config.MigrateWindowAppearance();
+            var reloaded = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!;
+            reloaded.MigrateWindowAppearance();
+            Check(reloaded.WindowTheme == 1 && reloaded.WindowPage == (int)page, "Saved Modern selection/page were lost.");
+        }
         Check(Plugin.ConfigurationWindowId == "S Rank Sentinel###SRankSentinel", "Window identity changed.");
+    }
+
+    private static void TestMergedPageSelection()
+    {
+        foreach (var theme in new[] { 0, 1 })
+        foreach (var (previous, expected) in new[] { (0, 0), (1, 0), (2, 2), (3, 0), (4, 4) })
+        {
+            var config = new Configuration
+            {
+                Version = 16, WindowTheme = theme, WindowPage = previous,
+                Enabled = false, EnableCenturio = true, EnableEndwalker = false,
+                AlertFreshnessMinutes = 73,
+                FaloopUsername = "page-migration-fixture", FaloopSessionId = "fixture-session",
+                CloseSafeProfile = new() { FlagApproachDistance = 17, WaitingDistance = 14, EmergencyDistance = 8, EngageHpPercent = 55 },
+            };
+            var before = HuntSnapshot(config);
+            config.MigrateWindowAppearance();
+            Check(config.WindowTheme == theme && config.WindowPage == expected,
+                $"Saved theme/page mapping regressed for {theme}/{previous}.");
+            Check(JsonNode.DeepEquals(before, HuntSnapshot(config)), "Merging pages changed hunt settings.");
+            var reloaded = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!;
+            reloaded.MigrateWindowAppearance();
+            Check(reloaded.WindowTheme == theme && reloaded.WindowPage == expected &&
+                JsonNode.DeepEquals(before, HuntSnapshot(reloaded)), "Merged page migration did not persist idempotently.");
+        }
     }
 
     private static void TestAppearanceDefaults()
@@ -217,11 +246,11 @@ internal static class Program
                     SentinelModernConfigurationShell.Draw(
                         new SentinelModernShellOptions("Test", "SENTINEL", "S RANK SENTINEL", "Hunt status")
                         { Scale = scale },
-                        () => { navigationCalls++; SentinelModernNavigation.Item("Overview", "Overview", true, scale); },
+                        () => { navigationCalls++; SentinelModernNavigation.Item("Main", "Main", true, scale); },
                         () =>
                         {
                             contentCalls++;
-                            SentinelModernUi.PageHeading("Overview", "Hunt state");
+                            SentinelModernUi.PageHeading("Main", string.Empty);
                             using var card = SentinelModernCard.Begin("Test-card");
                             if (card.IsVisible) SentinelModernUi.SectionHeader("HUNTING");
                         });
