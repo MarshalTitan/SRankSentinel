@@ -89,9 +89,6 @@ public sealed partial class Plugin
         SentinelModernNavigation.GroupLabel("HUNTS");
         DrawNavigationItem(ConfigurationPage.Main, "Main");
         DrawNavigationItem(ConfigurationPage.DistanceProfiles, "Distance Profiles");
-        ImGui.Spacing();
-        SentinelModernNavigation.GroupLabel("SETTINGS");
-        DrawNavigationItem(ConfigurationPage.Appearance, "Appearance");
     }
 
     private void DrawNavigationItem(ConfigurationPage page, string label)
@@ -107,14 +104,11 @@ public sealed partial class Plugin
     private void DrawModernContent()
     {
         var page = (ConfigurationPage)config.WindowPage;
-        var (title, description) = page switch
+        if (page == ConfigurationPage.DistanceProfiles)
         {
-            ConfigurationPage.DistanceProfiles => ("Distance Profiles", "Clearance and engagement preferences."),
-            ConfigurationPage.Appearance => ("Appearance", "Choose the configuration window presentation."),
-            _ => ("Main", string.Empty),
-        };
-        SentinelModernUi.PageHeading(title, description);
-        ImGui.Spacing();
+            SentinelModernUi.PageHeading("Distance Profiles", "Clearance and engagement preferences.");
+            ImGui.Spacing();
+        }
         using var card = SentinelModernCard.Begin("SRankSentinel-Page");
         if (!card.IsVisible)
             return;
@@ -127,10 +121,6 @@ public sealed partial class Plugin
                 if (ImGui.Button("Save settings"))
                     config.Save();
                 break;
-            case ConfigurationPage.Appearance:
-                SentinelModernUi.SectionHeader("APPEARANCE");
-                DrawAppearanceControls();
-                break;
             default:
                 DrawEnabledControl();
                 ImGui.Spacing();
@@ -139,6 +129,8 @@ public sealed partial class Plugin
                 DrawExpansionControls();
                 SentinelModernUi.SectionHeader("RECOVERY");
                 DrawRecoveryControls();
+                SentinelModernUi.SectionHeader("APPEARANCE");
+                DrawAppearanceControls();
                 break;
         }
     }
@@ -287,7 +279,8 @@ public sealed partial class Plugin
             config.WindowTheme = (int)SentinelThemeState<ConfigurationPage>.NormalizeTheme(selected);
             config.Save();
         }
-        ImGui.TextWrapped("Classic uses the compact one-page layout. Sentinel Modern groups the same settings into pages.");
+        if (!modernUiFrame)
+            ImGui.TextWrapped("Classic uses the compact one-page layout. Sentinel Modern groups the same settings into pages.");
     }
 
     private float DrawFloat(string label, float value, float min, float max, string format = "%.0f y")
@@ -332,8 +325,7 @@ public sealed partial class Plugin
 internal enum ConfigurationPage
 {
     Main = 0,
-    // Retain the persisted IDs of the pages that were not merged. Former Hunting (1)
-    // and Recovery Controls (3) normalize to Main through the existing config migration.
+    // Keep the persisted Distance Profiles ID. Former Hunting (1), Recovery Controls (3),
+    // and Appearance (4) selections normalize to Main through the existing config migration.
     DistanceProfiles = 2,
-    Appearance = 4,
 }
