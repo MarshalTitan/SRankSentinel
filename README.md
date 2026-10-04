@@ -95,7 +95,8 @@ Existing users remain on **Classic** through an explicit version-16 configuratio
 Select **Sentinel Modern** in the window's **Window theme** setting to opt in. Modern groups
 the same controls into Main and Distance Profiles. Both pages start directly with their
 settings without a separate page heading or introductory text. Main combines hunt status,
-expansion switches, recovery actions, and appearance settings.
+expansion switches, and recovery actions. Modern's left sidebar includes a **Use Classic theme**
+button; Classic retains the **Window theme** selector for switching back to Modern.
 The existing window identity, saved position, close/collapse controls, hunt configuration, and
 keyboard/controller activation are retained.
 

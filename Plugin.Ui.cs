@@ -89,6 +89,10 @@ public sealed partial class Plugin
         SentinelModernNavigation.GroupLabel("HUNTS");
         DrawNavigationItem(ConfigurationPage.Main, "Main");
         DrawNavigationItem(ConfigurationPage.DistanceProfiles, "Distance Profiles");
+        ImGui.Spacing();
+        ImGui.Separator();
+        SentinelModernNavigation.GroupLabel("APPEARANCE");
+        DrawAppearanceControls();
     }
 
     private void DrawNavigationItem(ConfigurationPage page, string label)
@@ -123,8 +127,6 @@ public sealed partial class Plugin
                 DrawExpansionControls();
                 SentinelModernUi.SectionHeader("RECOVERY");
                 DrawRecoveryControls();
-                SentinelModernUi.SectionHeader("APPEARANCE");
-                DrawAppearanceControls();
                 break;
         }
     }
@@ -261,21 +263,23 @@ public sealed partial class Plugin
 
     private void DrawAppearanceControls()
     {
-        var selected = config.WindowTheme;
-        var themeLabel = "Window theme";
         if (modernUiFrame)
         {
-            ImGui.TextWrapped(themeLabel);
-            ImGui.SetNextItemWidth(-1f);
-            themeLabel = "##" + themeLabel;
+            if (ImGui.Button("Use Classic theme", new Vector2(-1f, 0f)))
+                SetWindowTheme((int)SentinelThemeKind.Classic);
+            return;
         }
-        if (ImGui.Combo(themeLabel, ref selected, WindowThemes, WindowThemes.Length))
-        {
-            config.WindowTheme = (int)SentinelThemeState<ConfigurationPage>.NormalizeTheme(selected);
-            config.Save();
-        }
-        if (!modernUiFrame)
-            ImGui.TextWrapped("Classic uses the compact one-page layout. Sentinel Modern groups the same settings into pages.");
+
+        var selected = config.WindowTheme;
+        if (ImGui.Combo("Window theme", ref selected, WindowThemes, WindowThemes.Length))
+            SetWindowTheme(selected);
+        ImGui.TextWrapped("Classic uses the compact one-page layout. Sentinel Modern groups the same settings into pages.");
+    }
+
+    private void SetWindowTheme(int selected)
+    {
+        config.WindowTheme = (int)SentinelThemeState<ConfigurationPage>.NormalizeTheme(selected);
+        config.Save();
     }
 
     private float DrawFloat(string label, float value, float min, float max, string format = "%.0f y")
