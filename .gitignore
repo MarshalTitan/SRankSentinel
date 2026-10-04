@@ -1,5 +1,7 @@
 bin/
 obj/
+.sentinelcore-packages/*
+!.sentinelcore-packages/.gitkeep
 .vs/
 .idea/
 *.user

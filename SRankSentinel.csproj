@@ -1,9 +1,10 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.7.44.0</Version>
+    <Version>0.7.45.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,5 +15,19 @@
     <!-- Keep the separate Sentinel Hunts project out of S Rank Sentinel's default recursive compile glob. -->
     <Compile Remove="SentinelHunts\**\*.cs" />
     <Compile Remove="SRankSentinel.StateTests\**\*.cs" />
+    <Compile Remove="SRankSentinel.UiTests\**\*.cs" />
   </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MarshalTitan.SentinelCore" Version="[0.2.1]" />
+    <PackageReference Include="MarshalTitan.SentinelCore.UI" Version="[0.2.1]" />
+    <InternalsVisibleTo Include="SRankSentinel.UiTests" />
+  </ItemGroup>
+
+  <Target Name="ExcludeLibraryDevelopmentFiles" BeforeTargets="_CopyFilesMarkedCopyLocal">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.pdb' or '%(ReferenceCopyLocalPaths.Extension)' == '.xml'" />
+    </ItemGroup>
+  </Target>
 </Project>

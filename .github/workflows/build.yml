@@ -26,6 +26,13 @@ jobs:
       - name: Audit field-recovery state contracts
         run: node .github/scripts/Audit-FieldRecovery.mjs Plugin.cs CombatController.cs HuntProgressPolicy.cs SRankSentinel.csproj
 
+      - name: Audit shared Sentinel Modern integration
+        run: node .github/scripts/Audit-SentinelModern.mjs
+
+      - name: Download and verify published SentinelCore packages
+        shell: pwsh
+        run: ./.github/scripts/Prepare-SentinelCore.ps1
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -43,6 +50,14 @@ jobs:
       - name: Restore
         run: dotnet restore SRankSentinel.csproj
 
+      - name: Verify restored shared-package content hashes
+        shell: pwsh
+        run: ./.github/scripts/Prepare-SentinelCore.ps1 -VerifyOnly -AssetsPath obj/project.assets.json
+
+      - name: Record dependency lock
+        shell: pwsh
+        run: Get-Content -LiteralPath packages.lock.json
+
       - name: Run state-machine regression tests
         run: dotnet run --project SRankSentinel.StateTests/SRankSentinel.StateTests.csproj -c Release
 
@@ -56,6 +71,9 @@ jobs:
           [xml]$project = Get-Content -LiteralPath 'SRankSentinel.csproj' -Raw
           $version = [string]$project.Project.PropertyGroup.Version
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Run appearance migration and native ImGui input tests
+        run: dotnet run --project SRankSentinel.UiTests/SRankSentinel.UiTests.csproj -c Release
 
       - name: Validate installable ZIP
         shell: pwsh

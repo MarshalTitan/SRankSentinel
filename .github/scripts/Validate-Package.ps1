@@ -16,7 +16,8 @@ if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "Version must contain four numeric components: $ExpectedVersion"
 }
 
-$staging = Join-Path $env:RUNNER_TEMP ("sranksentinel-package-" + [Guid]::NewGuid().ToString('N'))
+$packageTempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+$staging = Join-Path $packageTempRoot ("sranksentinel-package-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging | Out-Null
 
 try {
@@ -66,10 +67,16 @@ try {
         }
     }
 
+    & (Join-Path $PSScriptRoot 'Validate-SentinelCorePackage.ps1') -StagingPath $staging
     Write-Host "Validated SRankSentinel $ExpectedVersion package layout and manifest."
 }
 finally {
     if (Test-Path -LiteralPath $staging) {
+        $resolvedStaging = [IO.Path]::GetFullPath($staging)
+        $allowedPrefix = [IO.Path]::GetFullPath($packageTempRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedStaging.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe package cleanup path: $resolvedStaging"
+        }
         Remove-Item -LiteralPath $staging -Recurse -Force
     }
 }
