@@ -40,7 +40,7 @@ public sealed class Plugin : IDalamudPlugin
     private const double ParkingRouteStallSeconds = 12;
     private const float ParkingMeaningfulProgressDistance = 1f;
     private const double LandingAttemptTimeoutSeconds = 10;
-    private const float ParkingLandingHorizontalTolerance = 0.75f;
+    private const float ParkingLandingHorizontalTolerance = 2f;
     private const float ParkingLandingVerticalTolerance = 5f;
     private const int MaximumParkingRecoveryFailures = 6;
     private const double ParkingRecoveryBudgetSeconds = 90;
@@ -314,6 +314,7 @@ public sealed class Plugin : IDalamudPlugin
     private string faloopLoginStatus = string.Empty;
     private string lastFaloopDecision = "No recognized Faloop hunt event processed yet";
     private DateTime lastFaloopDecisionUtc = DateTime.MinValue;
+    private bool persistentQueueRestorePending = true;
     private string status = "Idle";
 
     public Plugin(
@@ -378,13 +379,10 @@ public sealed class Plugin : IDalamudPlugin
             foreach (var issue in ssStagingAudit.Issues)
                 log.Error("Fixed SS staging coverage audit: {Issue}", issue);
 
-        RestorePersistentQueue();
-        if (TryDequeueNextValid(out var restored))
-            StartAlert(restored, "restored persistent queue");
-
         StartFaloopWithSavedAuthentication();
 
-        log.Information("S Rank Sentinel standalone orchestrator loaded.");
+        log.Information(
+            "S Rank Sentinel standalone orchestrator loaded; persistent queue restoration is deferred to the first main-thread framework tick.");
     }
 
     public void Dispose()
@@ -1710,6 +1708,7 @@ public sealed class Plugin : IDalamudPlugin
 
         try
         {
+            RestorePersistentQueueOnFrameworkThread();
             CompleteFaloopLoginIfReady();
             if (!config.Enabled)
                 return;
@@ -1743,6 +1742,32 @@ public sealed class Plugin : IDalamudPlugin
             SetState(SentinelState.ResetToUldah,
                 $"Internal error while handling {current.CreatureName}; active hunt retained and retrying through Ul'dah",
                 HuntExitRequestSource.FrameworkException);
+        }
+    }
+
+    private void RestorePersistentQueueOnFrameworkThread()
+    {
+        if (!persistentQueueRestorePending)
+            return;
+
+        // Dalamud may construct plugins on a worker thread. Queue freshness classification reads
+        // ObjectTable.LocalPlayer through NativeTravel, so restoration must begin from the
+        // framework callback instead of the constructor.
+        persistentQueueRestorePending = false;
+        try
+        {
+            RestorePersistentQueue();
+            if (current is null && TryDequeueNextValid(out var restored))
+                StartAlert(restored, "restored persistent queue on the main framework thread");
+            log.Information(
+                "Persistent hunt queue restored on the main framework thread: {Pending} queued hunt(s)",
+                pendingAlerts.Count);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex,
+                "Persistent hunt queue could not be restored on the main framework thread; Sentinel will continue without crashing the plugin load.");
+            status = "Persistent hunt queue restore failed; see the plugin log";
         }
     }
 
@@ -4437,7 +4462,7 @@ public sealed class Plugin : IDalamudPlugin
                 "The engage gate opened as landing completed; skipping the cosmetic settle for the required tag");
             return;
         }
-        log.Debug(
+        log.Information(
             "Natural post-landing facing settle skipped for {Mark}: {Reason}",
             mark.Name.TextValue, settleReason);
         SetState(SentinelState.SafeWait,
@@ -8127,15 +8152,29 @@ public sealed class Plugin : IDalamudPlugin
 
         LatchTagRequirement(liveMark, now);
         status = $"Blocked automatic exit from {requestedFromState}: {active.CreatureName} is visibly alive at {hp:0.0}% HP";
-        if (tagRequired)
+        var recoveryAction = HuntProgressPolicy.DecideBlockedLiveEntityRecovery(
+            tagRequired,
+            condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight],
+            requestedFromState is SentinelState.MoveToSafePoint or
+                SentinelState.Landing or
+                SentinelState.ParkingSettle or
+                SentinelState.GroundRetreat);
+        switch (recoveryAction)
         {
-            BeginTagRequiredRecovery(liveMark, now,
-                $"Automatic exit blocked: exact live {active.CreatureName} still requires one confirmed ranged tag");
-        }
-        else
-        {
-            SetState(SentinelState.SafeWait,
-                $"Automatic exit blocked: exact live {active.CreatureName} retained locally at {hp:0.0}% HP");
+            case BlockedLiveEntityRecoveryAction.ResumeTagRecovery:
+                BeginTagRequiredRecovery(liveMark, now,
+                    $"Automatic exit blocked: exact live {active.CreatureName} still requires one confirmed ranged tag");
+                break;
+            case BlockedLiveEntityRecoveryAction.ResumeParking:
+                log.Warning(
+                    "Automatic exit veto recovery: exact live {Mark} remains mounted={Mounted}, flying={Flying}; resuming dynamic parking rather than entering SafeWait while mounted/flying",
+                    active.CreatureName, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+                BeginSafeParking(liveMark, fly: condition[ConditionFlag.InFlight]);
+                break;
+            default:
+                SetState(SentinelState.SafeWait,
+                    $"Automatic exit blocked: exact live {active.CreatureName} retained locally at {hp:0.0}% HP");
+                break;
         }
 
         return true;

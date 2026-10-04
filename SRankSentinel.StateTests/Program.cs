@@ -11,13 +11,14 @@ var tests = new (string Name, Action Run)[]
     ("unprojectable destination escalates to approximate flight then abandonment", ProjectionRecoveryIsBounded),
     ("parking candidates honor the configured preferred clearance", ParkingUsesPreferredClearance),
     ("landing waits for horizontal alignment at the selected safe point", ParkingLandingRejectsShortStop),
-    ("landing permits vertical descent once horizontally aligned", ParkingLandingAcceptsAlignedDescent),
+    ("landing accepts normal vnavmesh endpoint tolerance once safely aligned", ParkingLandingAcceptsAlignedDescent),
     ("post-landing facing settle accepts a safe tiny outward step", ParkingFacingSettleAcceptsSafeStep),
     ("post-landing facing settle is suppressed for tag or unsafe terrain", ParkingFacingSettleIsOptionalAndSafe),
     ("visible live mark blocks an automatic FailCurrent request", LiveMarkBlocksFailCurrent),
     ("visible live mark blocks recovery-budget abandonment", LiveMarkBlocksRecoveryBudgetExit),
     ("visible live mark survives framework-exception recovery", LiveMarkBlocksFrameworkExceptionExit),
     ("visible live mark rejects conflicting external death evidence", LiveMarkBlocksConflictingDeathEvidence),
+    ("visible live mark never enters SafeWait while still mounted", BlockedLiveMarkResumesParkingWhileMounted),
     ("manual Skip remains allowed while the mark is alive", ManualSkipRemainsAllowed),
     ("genuinely missing unresolved mark may still be abandoned", MissingUnresolvedMarkMayBeAbandoned),
     ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
@@ -110,22 +111,26 @@ static void ParkingUsesPreferredClearance()
 static void ParkingLandingRejectsShortStop()
 {
     False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
-        4.5f, 1f, 7.3f, 5f, 8f, 0.75f, 5f));
+        4.5f, 1f, 7.3f, 5f, 8f, 2f, 5f));
     False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
-        0.4f, 1f, 7.3f, 5f, 8f, 0.75f, 5f));
+        1.5f, 1f, 5.4f, 5f, 8f, 2f, 5f));
 }
 
 static void ParkingLandingAcceptsAlignedDescent()
 {
     True(HuntProgressPolicy.CanEnterParkingLandingHandoff(
-        0.4f, 4.8f, 7.6f, 5f, 8f, 0.75f, 5f));
+        1.5f, 4.8f, 7.3f, 5f, 8f, 2f, 5f));
     False(HuntProgressPolicy.CanEnterParkingLandingHandoff(
-        0.4f, 5.2f, 7.6f, 5f, 8f, 0.75f, 5f));
+        1.5f, 5.2f, 7.3f, 5f, 8f, 2f, 5f));
 }
 
-static void ParkingFacingSettleAcceptsSafeStep() =>
+static void ParkingFacingSettleAcceptsSafeStep()
+{
     True(HuntProgressPolicy.CanBeginParkingFacingSettle(
         true, false, false, 23f, 23.75f, 18f, 23f, 0.75f, 0.1f));
+    True(HuntProgressPolicy.CanBeginParkingFacingSettle(
+        true, false, false, 7.3f, 8.2f, 5f, 8f, 0.9f, 0.1f));
+}
 
 static void ParkingFacingSettleIsOptionalAndSafe()
 {
@@ -134,7 +139,7 @@ static void ParkingFacingSettleIsOptionalAndSafe()
     False(HuntProgressPolicy.CanBeginParkingFacingSettle(
         true, false, true, 23f, 23.75f, 18f, 23f, 0.75f, 0.1f));
     False(HuntProgressPolicy.CanBeginParkingFacingSettle(
-        true, false, false, 22.4f, 23.15f, 18f, 23f, 0.75f, 0.1f));
+        true, false, false, 17.9f, 18.8f, 18f, 23f, 0.9f, 0.1f));
     False(HuntProgressPolicy.CanBeginParkingFacingSettle(
         true, false, false, 23f, 23.2f, 18f, 23f, 0.75f, 0.1f));
     False(HuntProgressPolicy.CanBeginParkingFacingSettle(
@@ -160,6 +165,18 @@ static void LiveMarkBlocksConflictingDeathEvidence() =>
     Equal(HuntExitDecision.BlockForVisibleLiveEntity,
         HuntProgressPolicy.DecideHuntExit(
             HuntExitRequestSource.ExternalDeathEvidence, true, true, true));
+
+static void BlockedLiveMarkResumesParkingWhileMounted()
+{
+    Equal(BlockedLiveEntityRecoveryAction.ResumeParking,
+        HuntProgressPolicy.DecideBlockedLiveEntityRecovery(false, true, false));
+    Equal(BlockedLiveEntityRecoveryAction.ResumeParking,
+        HuntProgressPolicy.DecideBlockedLiveEntityRecovery(false, false, true));
+    Equal(BlockedLiveEntityRecoveryAction.ResumeTagRecovery,
+        HuntProgressPolicy.DecideBlockedLiveEntityRecovery(true, true, true));
+    Equal(BlockedLiveEntityRecoveryAction.SafeWait,
+        HuntProgressPolicy.DecideBlockedLiveEntityRecovery(false, false, false));
+}
 
 static void ManualSkipRemainsAllowed() =>
     Equal(HuntExitDecision.Allow,
