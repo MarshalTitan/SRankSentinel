@@ -28,6 +28,13 @@ jobs:
       - name: Audit supported Faloop POI coverage
         run: node .github/scripts/Audit-FaloopCatalog.mjs FaloopCatalog.cs HuntCatalog.cs FaloopClient.cs
 
+      - name: Audit shared Sentinel Modern integration
+        run: node .github/scripts/Audit-SentinelModern.mjs
+
+      - name: Download and verify published SentinelCore packages
+        shell: pwsh
+        run: ./.github/scripts/Prepare-SentinelCore.ps1
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -57,8 +64,27 @@ jobs:
       - name: Restore
         run: dotnet restore SRankSentinel.csproj
 
+      - name: Verify restored shared-package content hashes
+        shell: pwsh
+        run: ./.github/scripts/Prepare-SentinelCore.ps1 -VerifyOnly -AssetsPath obj/project.assets.json
+
+      - name: Record dependency lock
+        shell: pwsh
+        run: Get-Content -LiteralPath packages.lock.json
+
+      - name: Audit restored travel and field-recovery contracts
+        run: |
+          node .github/scripts/Audit-V734TravelRestore.mjs Plugin.cs NativeTravel.cs HuntCatalog.cs VNavmeshIpc.cs
+          node .github/scripts/Audit-FieldRecovery.mjs Plugin.cs CombatController.cs HuntProgressPolicy.cs SRankSentinel.csproj
+
+      - name: Run state-machine regression tests
+        run: dotnet run --project SRankSentinel.StateTests/SRankSentinel.StateTests.csproj -c Release
+
       - name: Build release package
         run: dotnet build SRankSentinel.csproj -c Release --no-restore
+
+      - name: Run appearance migration and native ImGui input tests
+        run: dotnet run --project SRankSentinel.UiTests/SRankSentinel.UiTests.csproj -c Release
 
       - name: Validate installable ZIP
         shell: pwsh

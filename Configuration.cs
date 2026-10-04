@@ -6,7 +6,10 @@ namespace SRankSentinel;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 15;
+    public int Version { get; set; } = 16;
+    // Presentation only. Existing installs explicitly migrate to Classic.
+    public int WindowTheme { get; set; }
+    public int WindowPage { get; set; }
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;
@@ -228,8 +231,30 @@ public sealed class Configuration : IPluginConfiguration
             Save();
         }
 
+        MigrateWindowAppearance();
+
         CloseSafeProfile.EnforceClearanceInvariant();
         ProximitySensitiveProfile.EnforceClearanceInvariant();
+    }
+
+    internal void MigrateWindowAppearance()
+    {
+        if (Version < 16)
+        {
+            WindowTheme = 0;
+            WindowPage = 0;
+            Version = 16;
+            Save();
+        }
+
+        var normalizedTheme = (int)SentinelCore.UI.SentinelThemeState<ConfigurationPage>.NormalizeTheme(WindowTheme);
+        var normalizedPage = Enum.IsDefined((ConfigurationPage)WindowPage) ? WindowPage : 0;
+        if (WindowTheme != normalizedTheme || WindowPage != normalizedPage)
+        {
+            WindowTheme = normalizedTheme;
+            WindowPage = normalizedPage;
+            Save();
+        }
     }
 
     internal bool IsExpansionEnabled(SupportedExpansion expansion) => expansion switch

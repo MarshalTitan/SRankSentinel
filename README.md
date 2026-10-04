@@ -89,3 +89,14 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
 
 For automatic central-catalog updates, use a fine-grained GitHub token limited to `MarshalTitan/Sentinel` with **Contents: Read and write** permission. Save it only as the `DALAMUD_CATALOG_TOKEN` Actions repository secret in `MarshalTitan/SRankSentinel`; never commit or log it.
+# Configuration appearance
+
+Existing users remain on **Classic** through an explicit version-16 configuration migration.
+Select **Sentinel Modern** in the window's **Window theme** setting to opt in. Modern groups
+the same controls into Overview, Hunting, Distance Profiles, Recovery Controls, and Appearance.
+The existing window identity, saved position, close/collapse controls, hunt configuration, and
+keyboard/controller activation are retained.
+
+The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.2.1 assemblies.
+No separately installed SentinelCore plugin is required. See
+[the integration and validation notes](docs/SentinelModern.md) for build instructions.

@@ -12,7 +12,8 @@ if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "Version must contain four numeric components: $ExpectedVersion"
 }
 
-$testRoot = Join-Path $env:RUNNER_TEMP ("sranksentinel-fresh-install-" + [Guid]::NewGuid().ToString('N'))
+$installTempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+$testRoot = Join-Path $installTempRoot ("sranksentinel-fresh-install-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 try {
@@ -78,7 +79,7 @@ try {
     Expand-Archive -LiteralPath $packagePath -DestinationPath $emptyInstallDirectory -Force
 
     $topLevelNames = @(Get-ChildItem -LiteralPath $emptyInstallDirectory | ForEach-Object Name)
-    foreach ($required in @('SRankSentinel.dll', 'SRankSentinel.json', 'SRankSentinel.deps.json')) {
+    foreach ($required in @('SRankSentinel.dll', 'SRankSentinel.json', 'SRankSentinel.deps.json', 'SentinelCore.dll', 'SentinelCore.UI.dll')) {
         if ($required -notin $topLevelNames) {
             throw "Fresh extraction did not produce required top-level file: $required"
         }
@@ -88,6 +89,11 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {
+        $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot)
+        $allowedPrefix = [IO.Path]::GetFullPath($installTempRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedTestRoot.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe install-test cleanup path: $resolvedTestRoot"
+        }
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }

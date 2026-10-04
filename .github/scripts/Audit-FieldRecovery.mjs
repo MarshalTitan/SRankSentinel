@@ -5,13 +5,14 @@ if (!pluginPath || !combatPath || !policyPath || !projectPath) {
   throw new Error("Usage: node Audit-FieldRecovery.mjs <Plugin.cs> <CombatController.cs> <HuntProgressPolicy.cs> <project>");
 }
 
-const plugin = readFileSync(pluginPath, "utf8");
+// Recovery buttons now live in the presentation-only partial class.
+const plugin = readFileSync(pluginPath, "utf8") + readFileSync("Plugin.Ui.cs", "utf8");
 const combat = readFileSync(combatPath, "utf8");
 const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.44.0</Version>"],
+  [project, "<Version>0.7.45.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
