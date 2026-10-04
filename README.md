@@ -93,9 +93,9 @@ For automatic central-catalog updates, use a fine-grained GitHub token limited t
 
 Existing users remain on **Classic** through an explicit version-16 configuration migration.
 Select **Sentinel Modern** in the window's **Window theme** setting to opt in. Modern groups
-the same controls into Main and Distance Profiles. Main combines hunt status, expansion
-switches, recovery actions, and appearance settings without a separate page heading or
-introductory text.
+the same controls into Main and Distance Profiles. Both pages start directly with their
+settings without a separate page heading or introductory text. Main combines hunt status,
+expansion switches, recovery actions, and appearance settings.
 The existing window identity, saved position, close/collapse controls, hunt configuration, and
 keyboard/controller activation are retained.
 

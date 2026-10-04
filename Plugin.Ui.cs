@@ -104,11 +104,6 @@ public sealed partial class Plugin
     private void DrawModernContent()
     {
         var page = (ConfigurationPage)config.WindowPage;
-        if (page == ConfigurationPage.DistanceProfiles)
-        {
-            SentinelModernUi.PageHeading("Distance Profiles", "Clearance and engagement preferences.");
-            ImGui.Spacing();
-        }
         using var card = SentinelModernCard.Begin("SRankSentinel-Page");
         if (!card.IsVisible)
             return;
@@ -116,7 +111,6 @@ public sealed partial class Plugin
         switch (page)
         {
             case ConfigurationPage.DistanceProfiles:
-                SentinelModernUi.SectionHeader("DISTANCE PROFILES");
                 DrawDistanceControls();
                 if (ImGui.Button("Save settings"))
                     config.Save();
@@ -211,7 +205,8 @@ public sealed partial class Plugin
 
     private void DrawDistanceControls()
     {
-        ImGui.TextWrapped("Behavior profiles are independent from the expansion hunting checkboxes.");
+        if (!modernUiFrame)
+            ImGui.TextWrapped("Behavior profiles are independent from the expansion hunting checkboxes.");
         DrawDistanceProfile(
             "Close-safe profile — Centurio + Shadowbringers",
             "close-safe",
