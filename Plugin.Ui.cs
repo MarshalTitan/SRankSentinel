@@ -43,7 +43,7 @@ public sealed partial class Plugin
                     SentinelModernConfigurationShell.Draw(
                         new SentinelModernShellOptions(
                             "SRankSentinel", "MARSHALTITAN  /  SENTINEL", "S RANK SENTINEL",
-                            "Travel, parking, one ranged tag, and recovery")
+                            string.Empty)
                         {
                             Scale = scale,
                             ContextLabel = "Sentinel Modern",
@@ -72,7 +72,7 @@ public sealed partial class Plugin
     {
         DrawEnabledControl();
         ImGui.Separator();
-        DrawOverview();
+        DrawHuntStatus();
         ImGui.Separator();
         ImGui.TextUnformatted("EXPANSION HUNTING");
         DrawExpansionControls();
@@ -87,10 +87,8 @@ public sealed partial class Plugin
     private void DrawModernNavigation()
     {
         SentinelModernNavigation.GroupLabel("HUNTS");
-        DrawNavigationItem(ConfigurationPage.Overview, "Overview");
-        DrawNavigationItem(ConfigurationPage.Hunting, "Hunting");
+        DrawNavigationItem(ConfigurationPage.Main, "Main");
         DrawNavigationItem(ConfigurationPage.DistanceProfiles, "Distance Profiles");
-        DrawNavigationItem(ConfigurationPage.RecoveryControls, "Recovery Controls");
         ImGui.Spacing();
         SentinelModernNavigation.GroupLabel("SETTINGS");
         DrawNavigationItem(ConfigurationPage.Appearance, "Appearance");
@@ -111,11 +109,9 @@ public sealed partial class Plugin
         var page = (ConfigurationPage)config.WindowPage;
         var (title, description) = page switch
         {
-            ConfigurationPage.Hunting => ("Hunting", "Enable Sentinel and choose expansions."),
             ConfigurationPage.DistanceProfiles => ("Distance Profiles", "Clearance and engagement preferences."),
-            ConfigurationPage.RecoveryControls => ("Recovery Controls", "Save settings, skip a hunt, or reset through Ul'dah."),
             ConfigurationPage.Appearance => ("Appearance", "Choose the configuration window presentation."),
-            _ => ("Overview", "Current hunt, queue, and orchestrator status."),
+            _ => ("Main", string.Empty),
         };
         SentinelModernUi.PageHeading(title, description);
         ImGui.Spacing();
@@ -125,21 +121,11 @@ public sealed partial class Plugin
 
         switch (page)
         {
-            case ConfigurationPage.Hunting:
-                SentinelModernUi.SectionHeader("HUNTING");
-                DrawEnabledControl();
-                ImGui.Spacing();
-                DrawExpansionControls();
-                break;
             case ConfigurationPage.DistanceProfiles:
                 SentinelModernUi.SectionHeader("DISTANCE PROFILES");
                 DrawDistanceControls();
                 if (ImGui.Button("Save settings"))
                     config.Save();
-                break;
-            case ConfigurationPage.RecoveryControls:
-                SentinelModernUi.SectionHeader("RECOVERY");
-                DrawRecoveryControls();
                 break;
             case ConfigurationPage.Appearance:
                 SentinelModernUi.SectionHeader("APPEARANCE");
@@ -148,7 +134,11 @@ public sealed partial class Plugin
             default:
                 DrawEnabledControl();
                 ImGui.Spacing();
-                DrawOverview();
+                DrawHuntStatus();
+                SentinelModernUi.SectionHeader("EXPANSION HUNTING");
+                DrawExpansionControls();
+                SentinelModernUi.SectionHeader("RECOVERY");
+                DrawRecoveryControls();
                 break;
         }
     }
@@ -172,11 +162,8 @@ public sealed partial class Plugin
         }
     }
 
-    private void DrawOverview()
+    private void DrawHuntStatus()
     {
-        ImGui.TextUnformatted("STANDALONE S-RANK ORCHESTRATOR");
-        ImGui.TextWrapped("HuntAlerts and Sonar supply alerts. Sentinel handles World Visit, teleport, safe movement, one gated ranged tag, SS watch, and recovery.");
-        ImGui.Spacing();
         ImGui.TextUnformatted($"State: {state}");
         ImGui.TextWrapped($"Status: {status}");
         if (current is not null)
@@ -344,9 +331,9 @@ public sealed partial class Plugin
 
 internal enum ConfigurationPage
 {
-    Overview,
-    Hunting,
-    DistanceProfiles,
-    RecoveryControls,
-    Appearance,
+    Main = 0,
+    // Retain the persisted IDs of the pages that were not merged. Former Hunting (1)
+    // and Recovery Controls (3) normalize to Main through the existing config migration.
+    DistanceProfiles = 2,
+    Appearance = 4,
 }

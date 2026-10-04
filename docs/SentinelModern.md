@@ -1,6 +1,6 @@
 # Sentinel Modern integration
 
-SRankSentinel 0.7.45.0 uses the published Core and Core.UI packages from SentinelCore
+SRankSentinel 0.7.46.0 uses the published Core and Core.UI packages from SentinelCore
 v0.2.1.0, commit d1c5798b42cc1e542db3786deaf03e449a991cd9. The approved visual
 reference is Sentinel HUD 0.8.3.0 at 622429c8eceeafae35e078b9b053aa71ca9f87fd.
 
@@ -20,7 +20,7 @@ node .github/scripts/Audit-SentinelModern.mjs
 dotnet run --project SRankSentinel.StateTests -c Release
 dotnet build SRankSentinel.csproj -c Release --no-restore
 dotnet run --project SRankSentinel.UiTests -c Release
-./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.45.0
+./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.46.0
 ```
 
 The build and publication workflows run the same guards and tests. Downloaded packages are
@@ -48,7 +48,11 @@ when the user changes themes during that frame; all style and window scopes are 
 
 Configuration schema 16 explicitly migrates existing users to Classic and preserves every
 hunt/configuration value and queue. Modern selection and selected page persist in that same
-configuration. Invalid presentation values normalize to Classic/Overview.
+configuration. Main combines hunt status, expansion switches, and recovery controls without
+introductory text. Its persisted page ID is 0; Distance Profiles and Appearance retain IDs 2
+and 4. Saved Hunting (1) and Recovery Controls (3) selections normalize to Main through the
+existing migration, retaining the user's selected theme and all other settings. Invalid
+presentation values normalize to Classic/Main.
 
 Core 0.2.1's switch uses a non-navigable InvisibleButton. `ConsumerToggleActivation` invokes
 that exact shared renderer, then overlays a transparent native Button solely for navigation
@@ -66,7 +70,8 @@ tests.
 State tests exercise the existing 29 hunt policies. UI tests exercise real configuration
 migration/serialization and native ImGui mouse, keyboard, controller, disabled-control,
 shell/card, and style-restoration behavior in an isolated context. They do not connect to FFXIV
-or submit hunt actions. The 12 test groups also render every consumer page at 620 x 520, assert
+or submit hunt actions. The 13 test groups also cover merged-page selection migration,
+render every consumer page at 620 x 520, assert
 left navigation/header flags, check settings fit the right pane, retain saved position/larger
 size across theme switches, and cover restored collapsed windows. The runner prints managed
 exceptions and returns failure instead of raising an unhandled .NET crash popup.
