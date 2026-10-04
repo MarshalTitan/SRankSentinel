@@ -109,7 +109,7 @@ internal static class Program
     private static void TestMergedPageSelection()
     {
         foreach (var theme in new[] { 0, 1 })
-        foreach (var (previous, expected) in new[] { (0, 0), (1, 0), (2, 2), (3, 0), (4, 4) })
+        foreach (var (previous, expected) in new[] { (0, 0), (1, 0), (2, 2), (3, 0), (4, 0) })
         {
             var config = new Configuration
             {
@@ -357,8 +357,13 @@ internal static class Program
                 CheckShellGeometry(Plugin.ConfigurationWindowId, 1f);
                 var content = FindWindow(Plugin.ConfigurationWindowId, "##Content");
                 var card = FindWindow(Plugin.ConfigurationWindowId, "SRankSentinel-Page");
-                Check(card.Pos.X >= content.Pos.X && card.Pos.Y > content.Pos.Y,
-                    "Page heading/description and settings did not remain together in the right pane.");
+                Check(card.Pos.X >= content.Pos.X, "Settings left the right content pane.");
+                if (page == ConfigurationPage.Main)
+                    Check(MathF.Abs(card.Pos.Y - content.Pos.Y - content.WindowPadding.Y) < 1f,
+                        "A redundant heading is still taking space above Main settings.");
+                else
+                    Check(card.Pos.Y > content.Pos.Y,
+                        "Distance heading/description and settings did not remain together in the right pane.");
                 Check(card.ContentSize.X <= card.Size.X + 1f,
                     $"{page} controls overflow the right pane at 620x520.");
             }
