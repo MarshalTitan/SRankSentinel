@@ -31,6 +31,13 @@ internal enum HuntExitDecision
     BlockForVisibleLiveEntity,
 }
 
+internal enum BlockedLiveEntityRecoveryAction
+{
+    ResumeTagRecovery,
+    ResumeParking,
+    SafeWait,
+}
+
 internal enum LongApproachStartupAction
 {
     WaitForFlightAvailability,
@@ -100,6 +107,18 @@ internal static class HuntProgressPolicy
         return physicallyInCurrentContext && exactCurrentEntityVisible && exactCurrentEntityAlive
             ? HuntExitDecision.BlockForVisibleLiveEntity
             : HuntExitDecision.Allow;
+    }
+
+    public static BlockedLiveEntityRecoveryAction DecideBlockedLiveEntityRecovery(
+        bool tagRequired,
+        bool mountedOrFlying,
+        bool parkingRecoveryState)
+    {
+        if (tagRequired)
+            return BlockedLiveEntityRecoveryAction.ResumeTagRecovery;
+        if (mountedOrFlying || parkingRecoveryState)
+            return BlockedLiveEntityRecoveryAction.ResumeParking;
+        return BlockedLiveEntityRecoveryAction.SafeWait;
     }
 
     public static bool ShouldLatchTag(
@@ -190,7 +209,13 @@ internal static class HuntProgressPolicy
         float horizontalTolerance,
         float verticalTolerance)
     {
-        var protectedClearance = MathF.Max(emergencyClearance, preferredClearance - 0.5f);
+        // vnavmesh normally completes a submitted route slightly before its final waypoint.
+        // Bound that endpoint error by the horizontal envelope instead of demanding sub-yalm
+        // precision, while still keeping the player near the configured preference and never
+        // inside the emergency clearance.
+        var protectedClearance = MathF.Max(
+            emergencyClearance,
+            preferredClearance - horizontalTolerance - 0.5f);
         return horizontalDistanceToDestination <= horizontalTolerance &&
                verticalDistanceToDestination <= verticalTolerance &&
                actualClearance >= protectedClearance;
@@ -207,7 +232,10 @@ internal static class HuntProgressPolicy
         float outwardDistance,
         float verticalSeparation)
     {
-        var protectedClearance = MathF.Max(emergencyClearance, preferredClearance - 0.5f);
+        // The settle moves only outward and then returns to the already validated landing origin.
+        // Emergency clearance is therefore the safety boundary; requiring near-exact preferred
+        // clearance here can suppress the facing movement after normal vnavmesh endpoint error.
+        var protectedClearance = emergencyClearance;
         return exactMarkVisible && !tagRequired && !mountedOrFlying &&
                originClearance >= protectedClearance &&
                outwardClearance >= originClearance + 0.25f &&

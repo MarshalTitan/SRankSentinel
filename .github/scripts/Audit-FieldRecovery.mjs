@@ -11,7 +11,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.43.0</Version>"],
+  [project, "<Version>0.7.44.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -45,12 +45,16 @@ const required = [
   [policy, "SentinelMountChoice.CompanyChocobo"],
   [policy, "LongApproachStartupAction.BeginFlyingRoute"],
   [plugin, "SentinelState.ParkingSettle"],
-  [plugin, "ParkingLandingHorizontalTolerance = 0.75f"],
+  [plugin, "ParkingLandingHorizontalTolerance = 2f"],
   [policy, "CanEnterParkingLandingHandoff"],
+  [policy, "DecideBlockedLiveEntityRecovery"],
+  [plugin, "resuming dynamic parking rather than entering SafeWait while mounted/flying"],
   [plugin, "TryBeginParkingFacingSettle"],
   [plugin, "PathfindAvoidSafe(parkingSettleOrigin, parkingSettleOutwardPoint"],
   [plugin, "PathfindAvoidSafe(parkingSettleOutwardPoint, parkingSettleOrigin"],
   [policy, "CanBeginParkingFacingSettle"],
+  [plugin, "RestorePersistentQueueOnFrameworkThread"],
+  [plugin, "persistent queue restoration is deferred to the first main-thread framework tick"],
 ];
 
 for (const [source, contract] of required) {
@@ -90,6 +94,21 @@ const resetBody = plugin.match(/private void TickResetToUldah\(DateTime now\)([\
 if (!resetBody?.includes("TryBlockAutomaticHuntExit"))
   throw new Error("ResetToUldah can submit Teleport/Return without rechecking the exact live entity");
 
+const constructorBody = plugin.match(/public Plugin\([\s\S]*?\r?\n    }\r?\n\r?\n    public void Dispose/)?.[0];
+if (!constructorBody)
+  throw new Error("Could not locate the Plugin constructor");
+if (constructorBody.includes("RestorePersistentQueue();"))
+  throw new Error("Plugin construction restores the queue off the main framework thread");
+
+const frameworkBody = plugin.match(/private void OnFrameworkUpdate\(IFramework _\)([\s\S]*?)private void RestorePersistentQueueOnFrameworkThread/)?.[1];
+if (!frameworkBody?.includes("RestorePersistentQueueOnFrameworkThread();"))
+  throw new Error("Framework update does not perform deferred persistent-queue restoration");
+
+const queueRestoreBody = plugin.match(/private void RestorePersistentQueueOnFrameworkThread\(\)([\s\S]*?)private void Tick\(DateTime now\)/)?.[1];
+if (!queueRestoreBody?.includes("RestorePersistentQueue();") ||
+    !queueRestoreBody.includes("persistentQueueRestorePending = false;"))
+  throw new Error("Deferred persistent-queue restoration is incomplete");
+
 if (!plugin.includes('FailCurrent("Current hunt skipped manually", HuntExitRequestSource.ManualSkip)'))
   throw new Error("Manual Skip is no longer explicitly authorized through the live-entity veto");
 
@@ -117,4 +136,4 @@ if (settleBody.includes("Player.Rotation =") ||
     settleBody.includes("LocalPlayer.Position ="))
   throw new Error("Post-landing facing settle contains a direct rotation/position write");
 
-console.log("Field-recovery audit passed: latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, bounded natural facing settle, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");
+console.log("Field-recovery audit passed: main-thread queue restoration, latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, bounded natural facing settle, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");
