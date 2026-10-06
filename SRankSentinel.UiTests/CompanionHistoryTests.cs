@@ -225,7 +225,7 @@ internal static partial class Program
             Check(HuntRewardReceipt.Match(text, names) is null, "Non-reward became credit: " + text);
     }
 
-    private static void TestPopulatedHistory()
+    private static unsafe void TestPopulatedHistory()
     {
         foreach (var scale in new[] { 1f, 1.5f, 2f }) InContext(() =>
         {
@@ -236,33 +236,35 @@ internal static partial class Program
             {
                 var now = DateTime.UtcNow.AddHours(-index * 3);
                 var alert = HistoryAlert(now);
+                if (index % 3 == 0)
+                {
+                    journal.Spawn(alert, "Sonar");
+                    continue;
+                }
                 journal.Tag(alert, now);
+                if (index % 3 == 1) continue;
                 journal.Kill(alert, true, now.AddSeconds(5));
                 journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(6), "Sack of Nuts");
             }
             var plugin = CreateConsumer(config);
-            var scrollToBottom = false;
-            var content = (Action)typeof(Plugin).GetMethod("DrawModernContent", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .CreateDelegate(typeof(Action), plugin);
-            SetField(plugin, "drawModernContent", (Action)(() =>
-            {
-                if (scrollToBottom) ImGui.SetScrollY(ImGui.GetScrollMaxY());
-                content();
-            }));
+            var savedHistory = JsonSerializer.Serialize(config);
             foreach (var size in new[] { new Vector2(620, 520), new Vector2(1040, 860) })
             {
-                scrollToBottom = false;
                 LoadWindowPlacement(size * scale);
-                for (var frame = 0; frame < 4; frame++) ConsumerFrame(plugin);
+                for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
                 CheckShellGeometry(Plugin.ConfigurationWindowId, scale);
                 var spawns = FindWindow(Plugin.ConfigurationWindowId, "##SpawnHistory");
                 Check(spawns.ContentSize.Y > spawns.Size.Y && spawns.ContentSize.X <= spawns.Size.X + 1,
                     "Spawn history cannot scroll independently or overflows horizontally.");
-                scrollToBottom = true;
-                for (var frame = 0; frame < 4; frame++) ConsumerFrame(plugin);
-                var credits = FindWindow(Plugin.ConfigurationWindowId, "##CreditedHistory");
-                Check(credits.ContentSize.Y > credits.Size.Y && credits.ContentSize.X <= credits.Size.X + 1,
-                    "Credit history is unreachable, cannot scroll independently, or overflows horizontally.");
+                var activity = FindWindow(Plugin.ConfigurationWindowId, "History.Activity");
+                Check(activity.DC.CursorMaxPos.X <= activity.Pos.X + activity.Size.X + 1f &&
+                    activity.DC.CursorMaxPos.Y <= activity.Pos.Y + activity.Size.Y + 1f && !activity.ScrollbarX && !activity.ScrollbarY,
+                    "Stacked history chart overflows its Core card.");
+                var windows = ImGui.GetCurrentContext().Windows;
+                for (var index = 0; index < windows.Size; index++)
+                    Check(!Marshal.PtrToStringUTF8((nint)windows[index].Name)!.Contains("##CreditedHistory"),
+                        "The redundant credit section returned.");
+                Check(JsonSerializer.Serialize(config) == savedHistory, "Rendering unified history changed saved reports or credit evidence.");
             }
         });
     }
@@ -372,7 +374,6 @@ internal static partial class Program
 
     private static void TestHistoryClearInput()
     {
-        foreach (var credited in new[] { false, true })
         foreach (var key in new[] { ImGuiKey.None, ImGuiKey.Space, ImGuiKey.GamepadFaceDown }) InContext(() =>
         {
             var pi = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
@@ -385,7 +386,6 @@ internal static partial class Program
             journal.Tag(alert, now);
             journal.Kill(alert, true, now.AddSeconds(1));
             journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts");
-            var other = JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory);
             var plugin = CreateConsumer(config);
             SetField(plugin, "historyJournal", journal);
             var draw = typeof(Plugin).GetMethod("DrawClearHistoryButton", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -405,7 +405,7 @@ internal static partial class Program
                     try
                     {
                         if (focus) ImGui.SetKeyboardFocusHere();
-                        draw.Invoke(plugin, [credited, (credited ? config.CreditedHistory : config.SpawnHistory).Count]);
+                        draw.Invoke(plugin, [config.SpawnHistory.Count + config.CreditedHistory.Count]);
                         minimum = ImGui.GetItemRectMin(); maximum = ImGui.GetItemRectMax();
                     }
                     finally { ImGui.End(); }
@@ -428,16 +428,122 @@ internal static partial class Program
                 io.AddKeyEvent(key, true); Frame();
                 io.AddKeyEvent(key, false); Frame();
             }
-            Check((credited ? config.CreditedHistory : config.SpawnHistory).Count == 0 && store.SaveCalls == savedBefore + 1 &&
-                JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory) == other,
-                $"{key} did not clear and persist only its selected history.");
+            Check(config.SpawnHistory.Count == 0 && config.CreditedHistory.Count == 0 && store.SaveCalls == savedBefore + 1,
+                $"{key} did not clear unified history and save exactly once.");
             var reloaded = JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!;
-            Check((credited ? reloaded.CreditedHistory : reloaded.SpawnHistory).Count == 0 && reloaded.WindowTheme == 1 &&
+            Check(reloaded.SpawnHistory.Count == 0 && reloaded.CreditedHistory.Count == 0 && reloaded.WindowTheme == 1 &&
                 reloaded.WindowPage == (int)ConfigurationPage.History, "Clear-history persistence changed appearance.");
             io.AddKeyEvent(ImGuiKey.Space, true); Frame();
             io.AddKeyEvent(ImGuiKey.Space, false); Frame();
             Check(store.SaveCalls == savedBefore + 1, "Disabled empty clear button saved again.");
         });
+    }
+
+    private static void TestHistoryExpansionFilters()
+    {
+        var config = new Configuration();
+        var journal = new HuntHistoryJournal(config);
+        var now = DateTime.UtcNow;
+        var centurio = HistoryAlert(now, "Chernobog") with { TerritoryId = HuntCatalog.ChernobogTerritoryId };
+        Check(!journal.Spawn(centurio, "Sonar") && !journal.Tag(centurio, now) && !journal.Kill(centurio, false, now),
+            "Disabled Centurio reports or local observations were recorded.");
+        config.EnableCenturio = true;
+        Check(journal.Spawn(centurio, "Sonar"), "Enabling Centurio did not allow new reports.");
+        var alert = HistoryAlert(now);
+        Check(journal.Spawn(alert, "HuntAlerts"), "Enabled Shadowbringers report was dropped.");
+        var saved = JsonSerializer.Serialize(config.SpawnHistory);
+        config.EnableCenturio = false;
+        Check(journal.VisibleReports().Length == 1 && journal.VisibleReports()[0].TerritoryId == 813 &&
+            JsonSerializer.Serialize(config.SpawnHistory) == saved, "Filtering erased saved history or displayed disabled reports.");
+        config.EnableCenturio = true;
+        Check(journal.VisibleReports().Length == 2, "Re-enabling Centurio did not reveal its previously saved report.");
+        foreach (var territory in HuntCatalog.SupportedTerritoryIds)
+        {
+            var expansion = HuntCatalog.GetExpansion(territory);
+            var filtered = new Configuration
+            {
+                EnableCenturio = false, EnableShadowbringers = false, EnableEndwalker = false, EnableDawntrail = false,
+            };
+            var filteredJournal = new HuntHistoryJournal(filtered);
+            var report = alert with { TerritoryId = territory };
+            Check(!filteredJournal.Spawn(report, "Sonar"), "Disabled expansion was recorded: " + expansion);
+            switch (expansion)
+            {
+                case SupportedExpansion.Centurio: filtered.EnableCenturio = true; break;
+                case SupportedExpansion.Shadowbringers: filtered.EnableShadowbringers = true; break;
+                case SupportedExpansion.Endwalker: filtered.EnableEndwalker = true; break;
+                case SupportedExpansion.Dawntrail: filtered.EnableDawntrail = true; break;
+            }
+            Check(filteredJournal.Spawn(report, "Sonar"), "Enabled expansion was not recorded: " + expansion);
+        }
+        var ss = alert with { HuntType = "ssrank", CreatureName = HuntCatalog.ForgivenRebellionName,
+            MarkDataId = HuntCatalog.ForgivenRebellionDataId };
+        config.EnableShadowbringers = false;
+        Check(!journal.Spawn(ss, "Sonar"), "Disabled SS expansion was recorded.");
+        config.EnableShadowbringers = true;
+        Check(journal.Spawn(ss, "Sonar"), "Enabled SS expansion was not recorded.");
+        // A filter change must not destroy proof for a hunt already recorded and tagged.
+        journal.Tag(alert, now);
+        config.EnableShadowbringers = false;
+        journal.Kill(alert, true, now.AddSeconds(1));
+        Check(journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts"),
+            "Changing an expansion filter lost active credit evidence.");
+        var reload = new HuntHistoryJournal(JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!);
+        Check(reload.VisibleReports().Length == 1 && reload.Snapshot().Spawns.Length == 3,
+            "Filtered display or saved history failed to survive reload.");
+        // These early rejections must not touch game services or save a fabricated report.
+        var plugin = CreateConsumer(new Configuration { Enabled = false, EnableCenturio = true });
+        var observe = typeof(Plugin).GetMethod("ObserveHistorySpawn", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        observe.Invoke(plugin, ["srank", "Coeurl", "Chernobog", HuntCatalog.ChernobogTerritoryId, 1, "Sonar", now]);
+        SetField(plugin, "config", new Configuration());
+        observe.Invoke(plugin, ["srank", "Coeurl", "Chernobog", HuntCatalog.ChernobogTerritoryId, 1, "Sonar", now]);
+        Check(typeof(Plugin).GetField("historyJournal", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin) is null,
+            "Disabled plugin/expansion reached the recorder.");
+    }
+
+    private static void TestHistoryActivity()
+    {
+        var today = new DateTime(2026, 10, 6);
+        HuntHistoryEntry Entry(int daysAgo, bool tagged = false) => new()
+        {
+            ReportedAtUtc = today.AddDays(-daysAgo).AddHours(12).ToUniversalTime(),
+            TaggedAtUtc = tagged ? today.AddHours(13).ToUniversalTime() : null,
+        };
+        var entries = new[] { Entry(0), Entry(0, true), Entry(0, true), Entry(6), Entry(6, true), Entry(7, true), Entry(-1, true) };
+        var week = HuntHistoryActivity.BuildWeek(entries, today.AddHours(19));
+        Check(week.Length == 7 && week[0].Date == today.AddDays(-6) && week[^1].Date == today,
+            "Activity did not use seven local calendar days.");
+        Check(week[0].Reported == 2 && week[0].Tagged == 1 && week[0].Untagged == 1 &&
+            week[^1].Reported == 3 && week[^1].Tagged == 2 && week[^1].Untagged == 1,
+            "Tagged segments were double counted or assigned to tag date instead of report date.");
+        Check(week.Sum(day => day.Reported) == 5 && week.All(day => day.Tagged + day.Untagged == day.Reported) &&
+            week.Skip(1).Take(5).All(day => day.Reported == 0), "Outside-week or empty-day data was fabricated.");
+        Check(HuntHistoryActivity.BuildWeek([], today).All(day => day.Reported == 0 && day.Tagged == 0),
+            "Empty history fabricated chart data.");
+    }
+
+    private static void TestUnifiedHistoryClearing()
+    {
+        foreach (var rewardFirst in new[] { false, true })
+        {
+            var config = new Configuration();
+            var journal = new HuntHistoryJournal(config);
+            var now = DateTime.UtcNow;
+            var alert = HistoryAlert(now);
+            journal.Tag(alert, now);
+            if (rewardFirst) journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(1), "Sack of Nuts");
+            else journal.Kill(alert, true, now.AddSeconds(1));
+            config.CreditedHistory.Add(new HuntHistoryEntry { CreatureName = "Legacy credit", CreditedAtUtc = now });
+            Check(journal.ClearAll() && config.SpawnHistory.Count == 0 && config.CreditedHistory.Count == 0,
+                "Unified clear left visible or legacy records.");
+            Check(!journal.ClearAll(), "Empty unified history claimed a change.");
+            if (rewardFirst) journal.Kill(alert, true, now.AddSeconds(2));
+            else journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts");
+            Check(config.SpawnHistory.Count == 0 && config.CreditedHistory.Count == 1,
+                "Unified clear discarded active credit evidence or restored cleared reports.");
+            Check(!journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(3), "Sack of Nuts"),
+                "Unified clear duplicated confirmed credit.");
+        }
     }
 }
 

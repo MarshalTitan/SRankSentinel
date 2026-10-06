@@ -15,7 +15,8 @@ public sealed partial class Plugin
     {
         ObserveHistory(() =>
         {
-            if (string.IsNullOrWhiteSpace(creature)) return false;
+            if (!config.Enabled || !config.IsExpansionEnabled(HuntCatalog.GetExpansion(territory)) ||
+                string.IsNullOrWhiteSpace(creature)) return false;
             var definition = HuntCatalog.ResolveStrict(territory, creature);
             var ss = HuntCatalog.IsAnySsName(creature);
             if (definition is null || !ss && !string.Equals(huntType, "srank", StringComparison.OrdinalIgnoreCase))
