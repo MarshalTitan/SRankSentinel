@@ -11,6 +11,7 @@ public class RecordingPluginInterface : DispatchProxy
     public string? SavedJson { get; private set; }
     public bool ReducedMotion { get; set; }
     public uint LastSaveItemId { get; private set; }
+    public bool FocusNextAfterSave { get; set; }
 
     protected override unsafe object? Invoke(MethodInfo? method, object?[]? args)
     {
@@ -27,6 +28,7 @@ public class RecordingPluginInterface : DispatchProxy
         if (ImGui.GetCurrentContext().Handle != null)
             LastSaveItemId = ImGui.GetCurrentContext().LastItemData.ID;
         SaveCalls++;
+        if (FocusNextAfterSave) ImGui.SetKeyboardFocusHere();
         return null;
     }
 }

@@ -526,6 +526,12 @@ internal static class Program
             window.Pos == new Vector2(145, 95), "Modern minimize lost expanded size or placement.");
         Check(JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!.ModernWindowCollapsed,
             "Modern minimize state did not persist.");
+        config = JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!;
+        config.Initialize(pluginInterface);
+        plugin = CreateConsumer(config);
+        for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+        Check(window.Size == new Vector2(920, 56) && window.Pos == new Vector2(145, 95),
+            "Reloading a minimized Modern window lost its size or position.");
         // Focus the actual Core button captured by the persistence callback, then send real input events.
         foreach (var key in new[] { ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
         {
@@ -552,6 +558,20 @@ internal static class Program
         ClickConsumer(plugin, minimize);
         ConsumerFrame(plugin);
         header = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Header");
+        foreach (var key in new[] { ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
+        {
+            // The minimize save occurs immediately before Core submits the Close button.
+            // Request native focus there, without adding a consumer activation overlay.
+            store.FocusNextAfterSave = true;
+            ClickConsumer(plugin, minimize);
+            store.FocusNextAfterSave = false;
+            ConsumerFrame(plugin);
+            TapConsumerKey(plugin, key);
+            Check(!(bool)typeof(Plugin).GetField("configOpen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin)!,
+                $"{key} did not activate the focused Core close button.");
+            SetField(plugin, "configOpen", true);
+            for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+        }
         ClickConsumer(plugin, header.Pos + new Vector2(header.Size.X - 29f, header.Size.Y / 2f));
         Check(!(bool)typeof(Plugin).GetField("configOpen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin)!,
             "Core close action did not close the configuration window.");
@@ -567,6 +587,14 @@ internal static class Program
         io.AddMouseButtonEvent(0, true);
         ConsumerFrame(plugin);
         io.AddMouseButtonEvent(0, false);
+        ConsumerFrame(plugin);
+    }
+
+    private static void TapConsumerKey(Plugin plugin, ImGuiKey key)
+    {
+        ImGui.GetIO().AddKeyEvent(key, true);
+        ConsumerFrame(plugin);
+        ImGui.GetIO().AddKeyEvent(key, false);
         ConsumerFrame(plugin);
     }
 
