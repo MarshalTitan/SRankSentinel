@@ -56,7 +56,9 @@ internal static partial class Program
             Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
             Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);
             Test("both populated histories render and balance scopes at multiple sizes/scales", TestPopulatedHistory);
-            Console.WriteLine($"{passed}/25 UI, migration, companion, and history tests passed.");
+            Test("compact companion cards contain their status/actions at all UI scales", TestCompanionCardLayout);
+            Test("empty History renders summary cards without fabricating records", TestEmptyHistoryLayout);
+            Console.WriteLine($"{passed}/27 UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -438,6 +440,7 @@ internal static partial class Program
                     minimum.Y >= navigation.Pos.Y + navigation.Size.Y && maximum.Y <= dock.Pos.Y + dock.Size.Y &&
                     minimum.X < dock.Pos.X + dock.Size.X / 2,
                     "The Classic button is clipped or is not separate at the bottom left at 620x520.");
+                Check(maximum - minimum == new Vector2(170f, 34f), "The Classic switch expanded into a full-width bar.");
                 var io = ImGui.GetIO();
                 if (key == ImGuiKey.None)
                 {
