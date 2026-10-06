@@ -10,6 +10,10 @@ public sealed class Configuration : IPluginConfiguration
     // Presentation only. Existing installs explicitly migrate to Classic.
     public int WindowTheme { get; set; }
     public int WindowPage { get; set; }
+    // Custom Modern header state only; Classic retains native ImGui collapse behavior.
+    public bool ModernWindowCollapsed { get; set; }
+    public float ModernExpandedWidth { get; set; }
+    public float ModernExpandedHeight { get; set; }
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;

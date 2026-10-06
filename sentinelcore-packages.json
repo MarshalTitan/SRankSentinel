@@ -1,20 +1,20 @@
 {
-  "release": "v0.2.1.0",
-  "commit": "d1c5798b42cc1e542db3786deaf03e449a991cd9",
-  "version": "0.2.1",
+  "release": "v0.3.1.0",
+  "commit": "300703b360a58fb4b73bf7675d31fe8cab4614cd",
+  "version": "0.3.1",
   "packages": [
     {
       "id": "MarshalTitan.SentinelCore",
-      "file": "MarshalTitan.SentinelCore.0.2.1.nupkg",
-      "url": "https://github.com/MarshalTitan/SentinelCore/releases/download/v0.2.1.0/MarshalTitan.SentinelCore.0.2.1.nupkg",
-      "sha256": "5b80a7d8063b1371a11fe87cbe4a6b2e02fd1d492b5389ad4e242d5f1b4a211b",
+      "file": "MarshalTitan.SentinelCore.0.3.1.nupkg",
+      "url": "https://github.com/MarshalTitan/SentinelCore/releases/download/v0.3.1.0/MarshalTitan.SentinelCore.0.3.1.nupkg",
+      "sha256": "acdbde4e83c3fef325f9a134a5697c2ab87fed1e00cabd3ceff904ba407a4d59",
       "assembly": "SentinelCore.dll"
     },
     {
       "id": "MarshalTitan.SentinelCore.UI",
-      "file": "MarshalTitan.SentinelCore.UI.0.2.1.nupkg",
-      "url": "https://github.com/MarshalTitan/SentinelCore/releases/download/v0.2.1.0/MarshalTitan.SentinelCore.UI.0.2.1.nupkg",
-      "sha256": "87adc6ad755500e44a4e719448e83e7f753c0f7eeba5158c1796dc65f25b6207",
+      "file": "MarshalTitan.SentinelCore.UI.0.3.1.nupkg",
+      "url": "https://github.com/MarshalTitan/SentinelCore/releases/download/v0.3.1.0/MarshalTitan.SentinelCore.UI.0.3.1.nupkg",
+      "sha256": "e1a9ce4e1ce36042c0fcd53f4c23874d918640be10eef16c21f1cd436c6ba747",
       "assembly": "SentinelCore.UI.dll"
     }
   ]

@@ -6,20 +6,23 @@ const read = path => readFileSync(path, "utf8").replace(/\r/g, "");
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const project = read("SRankSentinel.csproj");
 const pin = JSON.parse(read("sentinelcore-packages.json"));
-assert(pin.version === "0.2.1" && pin.release === "v0.2.1.0" &&
-  pin.commit === "d1c5798b42cc1e542db3786deaf03e449a991cd9", "Wrong Core release pin.");
+const locked = JSON.parse(read("packages.lock.json")).dependencies["net10.0-windows7.0"];
+assert(pin.version === "0.3.1" && pin.release === "v0.3.1.0" &&
+  pin.commit === "300703b360a58fb4b73bf7675d31fe8cab4614cd", "Wrong Core release pin.");
 const expected = {
-  "MarshalTitan.SentinelCore": "5b80a7d8063b1371a11fe87cbe4a6b2e02fd1d492b5389ad4e242d5f1b4a211b",
-  "MarshalTitan.SentinelCore.UI": "87adc6ad755500e44a4e719448e83e7f753c0f7eeba5158c1796dc65f25b6207"
+  "MarshalTitan.SentinelCore": "acdbde4e83c3fef325f9a134a5697c2ab87fed1e00cabd3ceff904ba407a4d59",
+  "MarshalTitan.SentinelCore.UI": "e1a9ce4e1ce36042c0fcd53f4c23874d918640be10eef16c21f1cd436c6ba747"
 };
 assert(pin.packages.length === 2, "Only Core and Core.UI are required.");
 for (const [id, hash] of Object.entries(expected)) {
   const packagePin = pin.packages.find(p => p.id === id);
   assert(packagePin?.sha256 === hash && packagePin.url ===
-    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.2.1.0/${id}.0.2.1.nupkg`,
+    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.3.1.0/${id}.0.3.1.nupkg`,
     `Wrong published package/hash: ${id}`);
-  assert(project.includes(`<PackageReference Include="${id}" Version="[0.2.1]" />`),
+  assert(project.includes(`<PackageReference Include="${id}" Version="[0.3.1]" />`),
     `Reference must pin exact published version: ${id}`);
+  assert(locked[id]?.resolved === "0.3.1" && locked[id]?.requested === "[0.3.1, 0.3.1]",
+    `Dependency lock must pin exact published version: ${id}`);
 }
 assert(!project.includes("SentinelCore.Dalamud") && !project.includes("<ProjectReference"),
   "Consumer must use published packages only.");
@@ -40,28 +43,29 @@ for (const [path, source] of sources) {
     `Local canonical primitive: ${path}`);
 }
 const ui = read("Plugin.Ui.cs");
-for (const api of ["SentinelModernStyleScope", "SentinelModernConfigurationShell",
-  "SentinelModernNavigation", "SentinelModernCard", "SentinelModernUi.SectionHeader"]) {
+for (const api of ["PushAppShell", "SentinelModernWindowChrome.UseCustomHeader", "SentinelModernAppShell",
+  "SentinelModernNavItem", "SentinelModernGlassCard", "SentinelModernSettingsRow", "SentinelModernSwitch",
+  "SentinelModernStatusPillOptions", "SentinelModernAppSurfaceStyle.Unified", "AmbientIntensity = 0.9f"]) {
   assert(ui.includes(api), `Shared UI component missing: ${api}`);
 }
 assert(ui.includes('ConfigurationWindowId = "S Rank Sentinel###SRankSentinel"'),
   "Saved window identity changed.");
 assert(ui.includes("new Vector2(680, 720), ImGuiCond.FirstUseEver") &&
-  !ui.includes("SetNextWindowPos") && !ui.includes("NoCollapse") && !ui.includes("NoNav") &&
-  !ui.includes("NoTitleBar"), "Classic size/position or standard window controls regressed.");
-assert(ui.includes("new Vector2(620f, 520f) * scale") &&
+  !ui.includes("SetNextWindowPos") && !ui.includes("NoNav"), "Classic size/position or standard window controls regressed.");
+assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : 520f") && ui.includes("new Vector2(620f,") &&
   !/HeaderHeight\s*=|Layout\s*=|AllowStackedNavigation|CompactBreakpoint|IsCompact/.test(ui),
-  "Use Core 0.2.1's default left sidebar and non-scrolling 84px header, with a 620x520 minimum.");
+  "Use Core 0.3.1's default non-stacking application layout, with a 620x520 expanded minimum.");
 for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistanceControls",
-  "DrawRecoveryControls", "DrawAppearanceControls"]) {
+  "DrawRecoveryControls"]) {
   assert(ui.split(helper + "();").length >= 3, `Themes must share ${helper}`);
 }
 assert(!/AddRect|AddCircle|DrawRings|new Vector4/.test(ui),
   "The consumer must not draw canonical Modern primitives.");
-const bridge = read("ConsumerToggleActivation.cs");
-assert(bridge.includes("SentinelModernControls.Toggle(") && bridge.includes('ImGui.Button("##Activation"') &&
-  bridge.includes("ImGui.SetItemAllowOverlap()") && bridge.includes("!ImGui.IsMouseReleased") &&
-  !/AddRect|AddCircle|DrawRings/.test(bridge), "Keyboard/controller toggle activation bridge regressed.");
+assert(ui.includes('CreateModernNavItem("Classic", "Switch to Classic", FontAwesomeIcon.Palette)') &&
+  ui.includes('ImGui.Combo("Window theme"') && ui.split("SetWindowTheme(").length >= 4,
+  "Modern must have one left-side Classic action; Classic must retain the shared theme setter.");
+assert(!ui.includes("SentinelModernConfigurationShell") && !ui.includes("ConsumerToggleActivation") &&
+  !ui.includes("SentinelModernUi.PageHeading"), "Legacy shell/bridge or redundant page-top information returned.");
 const config = read("Configuration.cs");
 assert(config.includes("if (Version < 16)") && config.includes("WindowTheme = 0;") &&
   config.includes("WindowPage = 0;") && config.includes("MigrateWindowAppearance();") &&
@@ -79,4 +83,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern audit passed: exact published packages, canonical shared UI, Classic migration, saved window identity, shared handlers, navigation activation bridge, unchanged hunt sources, and CI/release guards.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, unified shared application shell, icon rail, responsive rows, native switch input, Classic migration, saved window identity, shared handlers, unchanged hunt sources, and CI/release guards.");

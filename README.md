@@ -95,11 +95,13 @@ Existing users remain on **Classic** through an explicit version-16 configuratio
 Select **Sentinel Modern** in the window's **Window theme** setting to opt in. Modern groups
 the same controls into Main and Distance Profiles. Both pages start directly with their
 settings without a separate page heading or introductory text. Main combines hunt status,
-expansion switches, and recovery actions. Modern's left sidebar includes a **Use Classic theme**
-button; Classic retains the **Window theme** selector for switching back to Modern.
+expansion switches, and recovery actions. Modern uses one compact custom header, a slim
+Font Awesome icon rail, and responsive settings rows on a continuous shared surface.
+The left rail includes **Switch to Classic**; Classic retains its native title bar and
+the **Window theme** selector for switching back to Modern.
 The existing window identity, saved position, close/collapse controls, hunt configuration, and
 keyboard/controller activation are retained.
 
-The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.2.1 assemblies.
+The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.3.1 assemblies.
 No separately installed SentinelCore plugin is required. See
 [the integration and validation notes](docs/SentinelModern.md) for build instructions.

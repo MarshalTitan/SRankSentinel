@@ -1,83 +1,84 @@
 # Sentinel Modern integration
 
-SRankSentinel 0.7.49.0 uses the published Core and Core.UI packages from SentinelCore
-v0.2.1.0, commit d1c5798b42cc1e542db3786deaf03e449a991cd9. The approved visual
-reference is Sentinel HUD 0.8.3.0 at 622429c8eceeafae35e078b9b053aa71ca9f87fd.
+SRankSentinel 0.7.50.0 consumes the published Core and Core.UI packages from SentinelCore
+v0.3.1.0, commit `300703b360a58fb4b73bf7675d31fe8cab4614cd`. Sentinel Core owns the visual
+language shared with Sentinel HUD.
 
-The package IDs, immutable release URLs, and SHA256 hashes are pinned in
-`sentinelcore-packages.json`. `NuGet.Config` maps these IDs to the verified local feed.
-Both references use exact `[0.2.1]` constraints. Core.Dalamud is not consumed.
+`sentinelcore-packages.json` pins release URLs, package IDs, and SHA256 hashes. Core.UI's
+package hash is `e1a9ce4e1ce36042c0fcd53f4c23874d918640be10eef16c21f1cd436c6ba747`.
+Both project references use exact `[0.3.1]` constraints, and `packages.lock.json` records
+the published NuGet content hashes. `NuGet.Config` maps those IDs to the verified offline
+feed. Downloaded packages are ignored by git. Core.Dalamud is not consumed, and users do
+not install SentinelCore separately.
 
 ## Build
 
-Run these steps from the repository root with .NET 10 and Dalamud API 15 development files:
+With .NET 10 and Dalamud API 15 development files, run from the repository root:
 
 ```powershell
 ./.github/scripts/Prepare-SentinelCore.ps1
-dotnet restore SRankSentinel.csproj
+dotnet restore SRankSentinel.csproj --locked-mode
 ./.github/scripts/Prepare-SentinelCore.ps1 -VerifyOnly -AssetsPath obj/project.assets.json
 node .github/scripts/Audit-SentinelModern.mjs
 dotnet run --project SRankSentinel.StateTests -c Release
 dotnet build SRankSentinel.csproj -c Release --no-restore
+./.github/scripts/Prepare-UiTestFont.ps1 -Destination "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
+$env:DALAMUD_ICON_FONT = "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 dotnet run --project SRankSentinel.UiTests -c Release
-./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.49.0
+./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.50.0
 ```
 
-The build and publication workflows run the same guards and tests. Downloaded packages are
-ignored by git; their complete byte hashes are checked before restore and their NuGet content
-hashes are compared with the resolved assets after restore. Package validation verifies
-`SentinelCore.dll` and `SentinelCore.UI.dll` at the ZIP root, assembly version 0.2.1.0,
-runtime dependency entries, and exact DLL hashes against the published packages. Development
-executables, test assemblies, debug symbols, source files, and packages are rejected from the ZIP.
-Fresh public-install validation repeats these checks using the public catalog download.
+The font preparation script verifies the official Dalamud Font Awesome asset from a pinned
+commit. Local tests can also use an existing Dalamud asset or `DALAMUD_ICON_FONT`.
+CI and publication run the same tests and guards. Package validation requires Core and
+Core.UI assemblies at the ZIP root, version 0.3.1.0, correct runtime dependency entries,
+and exact DLL bytes from the published packages. Tests, development executables, symbols,
+source files, and NuGet packages are rejected from the public ZIP. Fresh-install validation
+downloads the actual public release and repeats the checks.
 
 ## Presentation and preservation
 
-`Plugin.Ui.cs` contains both presentations and their shared settings/action handlers.
-Classic retains the one-page control order; Modern uses Core's shell, navigation, page cards,
-style, switches, headings, status chip, and ambient background. No canonical primitive is
-defined or drawn in this consumer. Modern uses Core 0.2.1's default shell: an 84 logical pixel
-header without scrollbars, a left sidebar at every supported width, and headings/settings
-together in the right content pane. Stacked navigation and local layout overrides are disabled.
-The Modern minimum is 620 x 520 logical pixels, scaled with Dalamud's UI scale.
+`Plugin.Ui.cs` retains both presentations and their shared settings/action handlers. Classic
+keeps its compact one-page controls and native window title bar. Modern uses
+`SentinelModernWindowChrome.UseCustomHeader`, `SentinelModernStyleScope.PushAppShell`, and
+`SentinelModernAppShell` with `SentinelModernAppSurfaceStyle.Unified`. Core owns the compact
+56 logical pixel header, Font Awesome icon placement, left rail, cards, settings rows,
+switches, status pill, motion, and procedural ambience at intensity 0.9.
 
-Both modes use the unchanged `S Rank Sentinel###SRankSentinel` top-level window ID and
-first-use Classic size. The shared shell draws inside the existing ImGui window, preserving
-its native close/collapse controls and saved position. A frame retains its starting style even
-when the user changes themes during that frame; all style and window scopes are balanced.
+The rail stays on the left, without secondary navigation for these two pages. Main combines
+hunt status, expansion switches, and recovery controls; Distance Profiles retains its
+existing values and invariants. Both start directly with settings, without redundant page-top
+information. One rail action switches to Classic through the same persisted theme setter.
+Classic retains its theme selector. The shared native Core switch supports mouse, keyboard,
+and controller activation, so the previous consumer activation bridge is removed.
 
-Configuration schema 16 explicitly migrates existing users to Classic and preserves every
-hunt/configuration value and queue. Modern selection and selected page persist in that same
-configuration. Main combines hunt status, expansion switches, and recovery controls. Modern's
-left navigation includes a full-width **Use Classic theme** button under Appearance, matching
-Sentinel HUD's action. Classic retains its theme selector. Both presentations call the same
-normalizing/saving method, and the frame retains its original style while a theme switch saves.
-Both Main and Distance Profiles start directly with their controls, without a separate
-page heading or introductory text. Main's persisted page ID is 0; Distance Profiles retains ID 2.
-Saved Hunting (1), Recovery Controls (3), and Appearance (4)
-selections normalize to Main through the existing migration, retaining the user's selected
-theme and all other settings. Invalid
-presentation values normalize to Classic/Main.
+Modern's expanded minimum is 620 x 520 logical pixels. It retains the original window ID
+`S Rank Sentinel###SRankSentinel`, saved position, and larger saved size. The custom minimize
+action keeps the header visible and saves the expanded dimensions; expanding restores those
+dimensions. Close uses the existing open flag, header dragging moves the original top-level
+window, and its native resize grip remains available. The consumer honors Dalamud's reduced
+motion setting. Every style, font, and Begin/End scope remains balanced across theme changes.
 
-Core 0.2.1's switch uses a non-navigable InvisibleButton. `ConsumerToggleActivation` invokes
-that exact shared renderer, then overlays a transparent native Button solely for navigation
-activation and the native focus cursor. Core owns pointer toggling; mouse release is excluded
-from the bridge to avoid double activation. There is no local track, knob, palette, or style
-implementation.
+Configuration schema 16 and its existing Classic migration remain unchanged. Main keeps ID 0
+and Distance Profiles ID 2; retired Hunting, Recovery Controls, and Appearance page selections
+normalize to Main. Theme selection, hunt configuration, credentials, and queues persist.
+The migration audit compares hunt/service source hashes against the existing reviewed baseline;
+this release changes presentation only.
 
-The migration audit pins the unchanged hunt/service sources to the verified 0.7.44.0 baseline.
-For Plugin.cs the only changes are extracting its UI methods and declaring the class partial.
-Future deliberate hunt changes must update that baseline evidence along with their regression
-tests.
+## Validation and distribution
 
-## Validation scope
+The 29 state-machine tests exercise existing hunt policies. The 17 UI/migration test groups
+use real native ImGui and configuration serialization in isolated contexts, without connecting
+to FFXIV or submitting hunt actions. They cover canonical switch input and disabled state,
+the sidebar Classic action with all three input methods, window identity and persistence,
+custom minimize/close, header dragging, native resizing, reduced motion, and scope balancing.
+The actual consumer is rendered at 620 x 520, 800 x 640, and 1040 x 860 logical pixels at
+100%, 150%, and 200% UI scale. Native child geometry checks verify the left rail, header without
+scrollbars, and control bounds inside responsive rows. The runner reports managed exceptions
+and exits with failure instead of an unhandled .NET crash popup. In-game visual acceptance
+remains a separate user observation.
 
-State tests exercise the existing 29 hunt policies. UI tests exercise real configuration
-migration/serialization and native ImGui mouse, keyboard, controller, disabled-control,
-shell/card, and style-restoration behavior in an isolated context. They do not connect to FFXIV
-or submit hunt actions. The 13 test groups also cover merged-page selection migration,
-render every consumer page at 620 x 520, assert
-left navigation/header flags, check settings fit the right pane, retain saved position/larger
-size across theme switches, and cover restored collapsed windows. The runner prints managed
-exceptions and returns failure instead of raising an unhandled .NET crash popup.
-An in-game visual check remains the final user observation after update.
+Publish Beta updates this repository's authoritative `repo.json`, verifies the public ZIP,
+then sends `plugin-released` to the Sentinel catalog generator using `DALAMUD_CATALOG_TOKEN`.
+The generator owns `MarshalTitan/Sentinel/repo.json`; this repository does not write it directly.
+The workflow waits for the generated version and validates the central public install path.

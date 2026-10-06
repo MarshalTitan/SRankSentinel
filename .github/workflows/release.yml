@@ -62,7 +62,7 @@ jobs:
           "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Restore
-        run: dotnet restore SRankSentinel.csproj
+        run: dotnet restore SRankSentinel.csproj --locked-mode
 
       - name: Verify restored shared-package content hashes
         shell: pwsh
@@ -84,7 +84,11 @@ jobs:
         run: dotnet build SRankSentinel.csproj -c Release --no-restore
 
       - name: Run appearance migration and native ImGui input tests
-        run: dotnet run --project SRankSentinel.UiTests/SRankSentinel.UiTests.csproj -c Release
+        shell: pwsh
+        run: |
+          ./.github/scripts/Prepare-UiTestFont.ps1
+          $env:DALAMUD_ICON_FONT = Join-Path $env:RUNNER_TEMP 'Sentinel-FontAwesomeFreeSolid.otf'
+          dotnet run --project SRankSentinel.UiTests/SRankSentinel.UiTests.csproj -c Release
 
       - name: Validate installable ZIP
         shell: pwsh
