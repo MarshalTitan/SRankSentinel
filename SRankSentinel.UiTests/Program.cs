@@ -8,12 +8,16 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin;
+using Dalamud.Interface;
+using Dalamud.Interface.Utility;
 using SentinelCore.UI;
 using SRankSentinel;
 
 internal static class Program
 {
     private static int passed;
+    private static SentinelModernMotion testMotion = null!;
+    private static ImFontPtr testIconFont;
     private static string DalamudDirectory => Environment.GetEnvironmentVariable("DALAMUD_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "XIVLauncher", "addon", "Hooks", "dev");
@@ -40,8 +44,11 @@ internal static class Program
             Test("sidebar Classic action saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
             Test("saved position and larger size survive Classic/Modern switching", TestWindowPlacement);
             Test("undersized saved Modern window expands without moving", TestMinimumWindow);
-            Test("collapse and close retain native window behavior", TestWindowControls);
-            Console.WriteLine($"{passed}/14 UI and migration tests passed.");
+            Test("Classic native controls and Modern custom minimize/close work", TestWindowControls);
+            Test("responsive settings remain within the right pane at multiple sizes/scales", TestResponsiveConsumer);
+            Test("Modern header dragging and native resizing preserve placement", TestDragAndResize);
+            Test("Dalamud reduced motion disables decorative animation", TestReducedMotion);
+            Console.WriteLine($"{passed}/17 UI and migration tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -70,6 +77,9 @@ internal static class Program
         snapshot.Remove("Version");
         snapshot.Remove("WindowTheme");
         snapshot.Remove("WindowPage");
+        snapshot.Remove("ModernWindowCollapsed");
+        snapshot.Remove("ModernExpandedWidth");
+        snapshot.Remove("ModernExpandedHeight");
         return snapshot;
     }
 
@@ -151,13 +161,23 @@ internal static class Program
             var io = ImGui.GetIO();
             io.IniFilename = null;
             io.LogFilename = null;
-            io.DisplaySize = new Vector2(1600, 1200);
+            io.DisplaySize = new Vector2(2800, 2200);
             io.DeltaTime = 1f / 60f;
             io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard | ImGuiConfigFlags.NavEnableGamepad;
             io.BackendFlags |= ImGuiBackendFlags.HasGamepad;
             io.Fonts.AddFontDefault();
-            Check(io.Fonts.Build(), "Font atlas did not build.");
-            action();
+            var iconPath = Environment.GetEnvironmentVariable("DALAMUD_ICON_FONT")
+                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "XIVLauncher", "dalamudAssets", "dev", "UIRes", "FontAwesomeFreeSolid.otf");
+            ushort[] iconRanges = [0xF000, 0xF8FF, 0];
+            fixed (ushort* range = iconRanges)
+            {
+                testIconFont = io.Fonts.AddFontFromFileTTF(iconPath, 16f, null, range);
+                Check(io.Fonts.Build(), "Font atlas did not build.");
+                testMotion = new SentinelModernMotion();
+                try { action(); }
+                finally { testMotion.Dispose(); }
+            }
         }
         finally { ImGui.DestroyContext(context); }
     }
@@ -165,11 +185,12 @@ internal static class Program
     private static (Vector2 Minimum, Vector2 Maximum, bool Focused) ToggleFrame(ref bool value, bool focus = false, bool disabled = false)
     {
         ImGui.NewFrame();
+        testMotion.BeginFrame(ImGui.GetIO().DeltaTime, false);
         ImGui.SetNextWindowPos(Vector2.Zero, ImGuiCond.Always);
         ImGui.SetNextWindowSize(new Vector2(520, 320), ImGuiCond.Always);
         ImGui.Begin("Toggle-test", ImGuiWindowFlags.NoSavedSettings);
         ImGui.BeginDisabled(disabled);
-        ConsumerToggleActivation.Draw("Test", "Enable hunting", ref value, 1f);
+        SentinelModernSwitch.Draw("Test", "Enable hunting", ref value, testMotion, 1f);
         var result = (ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), ImGui.IsItemFocused());
         if (focus) ImGui.SetKeyboardFocusHere(-1);
         ImGui.EndDisabled();
@@ -188,10 +209,10 @@ internal static class Program
         ToggleFrame(ref value);
         io.AddMouseButtonEvent(0, true);
         ToggleFrame(ref value);
-        Check(value, "Pointer press did not activate the canonical switch.");
+        Check(!value, "The native switch activated before pointer release.");
         io.AddMouseButtonEvent(0, false);
         ToggleFrame(ref value);
-        Check(value, "Pointer release toggled the value twice.");
+        Check(value, "Pointer release did not activate the canonical switch.");
     });
 
     private static void TestNavigationToggle(ImGuiKey key) => InContext(() =>
@@ -199,7 +220,7 @@ internal static class Program
         var value = false;
         ToggleFrame(ref value, focus: true);
         var focused = ToggleFrame(ref value);
-        Check(focused.Focused, "The invisible activation bridge did not receive native navigation focus.");
+        Check(focused.Focused, "The canonical switch did not receive native navigation focus.");
         var io = ImGui.GetIO();
         io.AddKeyEvent(key, true);
         ToggleFrame(ref value);
@@ -212,7 +233,7 @@ internal static class Program
     private static void TestDisabledToggle() => InContext(() =>
     {
         var value = false;
-        var row = ToggleFrame(ref value, focus: true, disabled: true);
+        var row = ToggleFrame(ref value, disabled: true);
         var io = ImGui.GetIO();
         var center = (row.Minimum + row.Maximum) / 2f;
         io.AddMousePosEvent(center.X, center.Y);
@@ -230,6 +251,7 @@ internal static class Program
     private static void TestModernShell() => InContext(() =>
     {
         var scope = new SentinelModernStyleScope();
+        using var shell = new SentinelModernAppShellState();
         foreach (var scale in new[] { 1f, 1.5f })
         foreach (var size in new[] { new Vector2(620, 520), new Vector2(700, 600), new Vector2(920, 720) })
         {
@@ -238,22 +260,24 @@ internal static class Program
             {
                 var navigationCalls = 0;
                 var contentCalls = 0;
-                scope.Push(scale);
+                scope.PushAppShell(scale);
                 try
                 {
                     ImGui.NewFrame();
                     ImGui.SetNextWindowPos(Vector2.Zero, ImGuiCond.Always);
                     ImGui.SetNextWindowSize(size * scale, ImGuiCond.Always);
-                    ImGui.Begin("Modern-shell-test", ImGuiWindowFlags.NoSavedSettings);
-                    SentinelModernConfigurationShell.Draw(
-                        new SentinelModernShellOptions("Test", "SENTINEL", "S RANK SENTINEL", "Hunt status")
-                        { Scale = scale },
-                        () => { navigationCalls++; SentinelModernNavigation.Item("Main", "Main", true, scale); },
+                    ImGui.Begin("Modern-shell-test", SentinelModernWindowChrome.UseCustomHeader(ImGuiWindowFlags.NoSavedSettings));
+                    SentinelModernAppShell.Draw(
+                        new SentinelModernAppShellOptions("Test", "S Rank Sentinel", "Main")
+                        { Scale = scale, ReducedMotion = true, SurfaceStyle = SentinelModernAppSurfaceStyle.Unified,
+                          AmbientIntensity = 0.9f, DrawPluginIcon = _ => { } },
+                        shell,
+                        [new SentinelModernNavItem("Main", null, "Main") { DrawIcon = _ => navigationCalls++ }],
+                        _ => { },
                         () =>
                         {
                             contentCalls++;
-                            SentinelModernUi.PageHeading("Main", string.Empty);
-                            using var card = SentinelModernCard.Begin("Test-card");
+                            using var card = SentinelModernGlassCard.Begin("Test-card", scale: scale);
                             if (card.IsVisible) SentinelModernUi.SectionHeader("HUNTING");
                         });
                     ImGui.End();
@@ -287,17 +311,20 @@ internal static class Program
 
     private static void CheckShellGeometry(string parent, float scale)
     {
-        var header = FindWindow(parent, "##Header");
-        var navigation = FindWindow(parent, "##Navigation");
-        var content = FindWindow(parent, "##Content");
-        Check(header.Size.Y >= 84f * scale, "Header is below Core's corrected minimum.");
+        var header = FindWindow(parent, "##Modern2Header");
+        var navigation = FindWindow(parent, "##Modern2Rail");
+        var content = FindWindow(parent, "##Modern2Page");
+        Check(MathF.Abs(header.Size.Y - 56f * scale) < 1f, "The compact Core header size changed.");
         Check((header.Flags & (ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)) ==
             (ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse) &&
             !header.ScrollbarX && !header.ScrollbarY, "Header scrollbars or mouse scrolling were enabled.");
         Check(navigation.Pos.X + navigation.Size.X <= content.Pos.X &&
             MathF.Abs(navigation.Pos.Y - content.Pos.Y) < 1f, "Navigation stacked above content or left the left pane.");
         Check(header.Pos.Y + header.Size.Y <= navigation.Pos.Y, "Navigation was inserted into the header.");
-        Check(content.Size.X >= 250f * scale, "Right pane is unusable at the minimum window width.");
+        Check(content.Size.X >= 320f * scale && MathF.Abs(navigation.Size.X - 64f * scale) < 1f,
+            "Icon rail or right pane is unusable at the minimum window width.");
+        Check((FindWindow(parent).Flags & ImGuiWindowFlags.NoTitleBar) != 0,
+            "Modern drew a duplicate native title bar.");
     }
 
     private static Plugin CreateConsumer(Configuration config)
@@ -309,6 +336,8 @@ internal static class Program
         SetField(plugin, "pendingAlerts", new Queue<HuntAlertSnapshot>());
         SetField(plugin, "status", "UI regression fixture");
         SetField(plugin, "modernStyle", new SentinelModernStyleScope());
+        SetField(plugin, "modernShell", new SentinelModernAppShellState());
+        SetField(plugin, "modernIconFont", (Func<ImFontPtr>)(() => testIconFont));
         return plugin;
     }
 
@@ -321,10 +350,12 @@ internal static class Program
         var colors = context.ColorStack.Size;
         var styles = context.StyleVarStack.Size;
         var windows = context.CurrentWindowStack.Size;
+        var fonts = context.FontStack.Size;
         try { typeof(Plugin).GetMethod("DrawUi", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(plugin, null); }
         catch (TargetInvocationException exception) { ExceptionDispatchInfo.Capture(exception.InnerException!).Throw(); }
         Check(context.ColorStack.Size == colors && context.StyleVarStack.Size == styles &&
-            context.CurrentWindowStack.Size == windows, "Consumer style or Begin/End stack is unbalanced.");
+            context.CurrentWindowStack.Size == windows && context.FontStack.Size == fonts,
+            "Consumer style, font, or Begin/End stack is unbalanced.");
     }
 
     private static void ConsumerFrame(Plugin plugin)
@@ -352,17 +383,13 @@ internal static class Program
         {
             config.WindowTheme = theme;
             config.WindowPage = (int)page;
-            for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+            for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
             Check(ImGui.GetDrawData().TotalVtxCount > 0, "Consumer page did not render.");
             if (theme == 1)
             {
                 CheckShellGeometry(Plugin.ConfigurationWindowId, 1f);
-                var content = FindWindow(Plugin.ConfigurationWindowId, "##Content");
-                var card = FindWindow(Plugin.ConfigurationWindowId, "SRankSentinel-Page");
-                Check(card.Pos.X >= content.Pos.X, "Settings left the right content pane.");
-                Check(MathF.Abs(card.Pos.Y - content.Pos.Y - content.WindowPadding.Y) < 1f,
-                    $"A redundant heading is still taking space above {page} settings.");
-                Check(card.ContentSize.X <= card.Size.X + 1f,
+                var content = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Page");
+                Check(content.ContentSize.X <= content.Size.X + 1f,
                     $"{page} controls overflow the right pane at 620x520.");
             }
             Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Rendering a theme/page changed hunt configuration.");
@@ -386,21 +413,20 @@ internal static class Program
                 Vector2 minimum = default, maximum = default;
                 var focus = false;
                 var focused = false;
-                SetField(plugin, "drawModernNavigation", (Action)(() =>
+                var items = (SentinelModernNavItem[])typeof(Plugin).GetMethod("CreateModernNavigation",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(plugin, null)!;
+                var classic = items.Single(item => item.Id == "Classic");
+                items[2] = classic with { DrawIcon = context =>
                 {
-                    typeof(Plugin).GetMethod("DrawModernNavigation", BindingFlags.Instance | BindingFlags.NonPublic)!
-                        .Invoke(plugin, null);
-                    Check(ImGui.GetCurrentContext().LastItemData.ID == ImGui.GetID("Use Classic theme"),
-                        "The sidebar's last control is not the Classic theme action.");
-                    minimum = ImGui.GetItemRectMin();
-                    maximum = ImGui.GetItemRectMax();
-                    Check(ImGui.CalcTextSize("Use Classic theme").X + 2f * ImGui.GetStyle().FramePadding.X <=
-                        maximum.X - minimum.X, "The sidebar Classic button label is clipped.");
+                    minimum = context.Minimum;
+                    maximum = context.Maximum;
                     focused = ImGui.IsItemFocused();
                     if (focus) ImGui.SetKeyboardFocusHere(-1);
-                }));
+                    classic.DrawIcon!(context);
+                } };
+                SetField(plugin, "modernNavigation", items);
                 for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
-                var navigation = FindWindow(Plugin.ConfigurationWindowId, "##Navigation");
+                var navigation = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Rail");
                 Check(minimum.X >= navigation.Pos.X && maximum.X <= navigation.Pos.X + navigation.Size.X &&
                     minimum.Y >= navigation.Pos.Y && maximum.Y <= navigation.Pos.Y + navigation.Size.Y,
                     "The Classic button is clipped or outside the left sidebar at 620x520.");
@@ -475,18 +501,196 @@ internal static class Program
         CheckShellGeometry(Plugin.ConfigurationWindowId, 1f);
     });
 
-    private static void TestWindowControls() => InContext(() =>
+    private static unsafe void TestWindowControls() => InContext(() =>
     {
-        var config = new Configuration { WindowTheme = 1 };
+        var config = new Configuration();
+        var pluginInterface = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
+        var store = (RecordingPluginInterface)pluginInterface;
+        config.Initialize(pluginInterface);
         var plugin = CreateConsumer(config);
         LoadWindowPlacement(new Vector2(920, 720), collapsed: true);
         ConsumerFrame(plugin);
         var window = FindWindow(Plugin.ConfigurationWindowId);
         Check(window.Collapsed && (window.Flags & (ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoNav)) == 0,
-            "Native collapse/title/navigation behavior regressed.");
-        SetField(plugin, "configOpen", false);
+            "Classic native collapse/title/navigation behavior regressed.");
+        config.WindowTheme = 1;
+        for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
         var snapshot = HuntSnapshot(config);
+        var header = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Header");
+        var minimize = header.Pos + new Vector2(header.Size.X - 65f, header.Size.Y / 2f);
+        ClickConsumer(plugin, minimize);
         ConsumerFrame(plugin);
-        Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Closing the window modified hunt settings.");
+        Check(config.ModernWindowCollapsed && !window.Collapsed && window.Size == new Vector2(920, 56),
+            "Modern minimize did not leave its custom header visible.");
+        Check(config.ModernExpandedHeight == 720 && config.ModernExpandedWidth == 920 &&
+            window.Pos == new Vector2(145, 95), "Modern minimize lost expanded size or placement.");
+        Check(JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!.ModernWindowCollapsed,
+            "Modern minimize state did not persist.");
+        config = JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!;
+        config.Initialize(pluginInterface);
+        plugin = CreateConsumer(config);
+        for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+        Check(window.Size == new Vector2(920, 56) && window.Pos == new Vector2(145, 95),
+            "Reloading a minimized Modern window lost its size or position.");
+        // Focus the actual Core button captured by the persistence callback, then send real input events.
+        foreach (var key in new[] { ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
+        {
+            var io = ImGui.GetIO();
+            io.AddMousePosEvent(-100, -100);
+            ConsumerFrame(plugin);
+            var ctx = ImGui.GetCurrentContext();
+            ctx.NavWindow = header;
+            ctx.NavId = store.LastSaveItemId;
+            ctx.NavDisableHighlight = false;
+            ctx.NavDisableMouseHover = true;
+            ConsumerFrame(plugin);
+            io.AddKeyEvent(key, true);
+            ConsumerFrame(plugin);
+            io.AddKeyEvent(key, false);
+            ConsumerFrame(plugin);
+            Check(!config.ModernWindowCollapsed && window.Size == new Vector2(920, 720),
+                $"{key} did not restore the original expanded size.");
+            CheckShellGeometry(Plugin.ConfigurationWindowId, 1f);
+            ClickConsumer(plugin, minimize);
+            ConsumerFrame(plugin);
+            Check(config.ModernWindowCollapsed, "Core minimize stopped responding after navigation activation.");
+        }
+        ClickConsumer(plugin, minimize);
+        ConsumerFrame(plugin);
+        header = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Header");
+        foreach (var key in new[] { ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
+        {
+            // The minimize save occurs immediately before Core submits the Close button.
+            // Request native focus there, without adding a consumer activation overlay.
+            store.FocusNextAfterSave = true;
+            ClickConsumer(plugin, minimize);
+            store.FocusNextAfterSave = false;
+            ConsumerFrame(plugin);
+            TapConsumerKey(plugin, key);
+            Check(!(bool)typeof(Plugin).GetField("configOpen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin)!,
+                $"{key} did not activate the focused Core close button.");
+            SetField(plugin, "configOpen", true);
+            for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+        }
+        ClickConsumer(plugin, header.Pos + new Vector2(header.Size.X - 29f, header.Size.Y / 2f));
+        Check(!(bool)typeof(Plugin).GetField("configOpen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin)!,
+            "Core close action did not close the configuration window.");
+        ConsumerFrame(plugin);
+        Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Window controls changed hunt settings.");
+    });
+
+    private static void ClickConsumer(Plugin plugin, Vector2 position)
+    {
+        var io = ImGui.GetIO();
+        io.AddMousePosEvent(position.X, position.Y);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, true);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, false);
+        ConsumerFrame(plugin);
+    }
+
+    private static void TapConsumerKey(Plugin plugin, ImGuiKey key)
+    {
+        ImGui.GetIO().AddKeyEvent(key, true);
+        ConsumerFrame(plugin);
+        ImGui.GetIO().AddKeyEvent(key, false);
+        ConsumerFrame(plugin);
+    }
+
+    private static unsafe void TestResponsiveConsumer()
+    {
+        foreach (var scale in new[] { 1f, 1.5f, 2f })
+        foreach (var size in new[] { new Vector2(620, 520), new Vector2(800, 640), new Vector2(1040, 860) })
+            InContext(() =>
+            {
+                ImGui.GetIO().FontGlobalScale = scale;
+                Check(MathF.Abs(ImGuiHelpers.GlobalScale - scale) < 0.01f, "Dalamud UI scale fixture failed.");
+                var config = new Configuration { WindowTheme = 1 };
+                var snapshot = HuntSnapshot(config);
+                var plugin = CreateConsumer(config);
+                LoadWindowPlacement(size * scale);
+                foreach (var page in Enum.GetValues<ConfigurationPage>())
+                {
+                    config.WindowPage = (int)page;
+                    for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
+                    CheckShellGeometry(Plugin.ConfigurationWindowId, scale);
+                    var content = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Page");
+                    Check(content.ContentSize.X <= content.Size.X + 1f, $"{page} overflow at {size}/{scale}.");
+                    var rows = 0;
+                    var windows = ImGui.GetCurrentContext().Windows;
+                    for (var index = 0; index < windows.Size; index++)
+                    {
+                        var row = windows[index];
+                        var name = Marshal.PtrToStringUTF8((nint)row.Name)!;
+                        if (!row.Active || !(name.Contains("Freshness") || name.Contains("Initial coordinate stop") ||
+                            name.Contains("Safe parking clearance") || name.Contains("Emergency clearance") || name.Contains("Engage only")))
+                            continue;
+                        rows++;
+                        // Check the actual native control extent against the Core row's measured text/control layout.
+                        var layout = SentinelModernSettingsRowLayout.Resolve(row.Size.X, ImGui.GetTextLineHeight(), 0f,
+                            ImGui.GetFrameHeight(), false, scale);
+                        Check(row.DC.CursorMaxPos.X <= row.Pos.X + row.Size.X + 1f &&
+                            row.DC.CursorMaxPos.Y <= row.Pos.Y + row.Size.Y + 1f,
+                            $"A control escapes its responsive Core row: {name} at {size}/{scale}.");
+                        Check(layout.ControlOffset.Y >= layout.TextOffset.Y + ImGui.GetTextLineHeight() ||
+                            layout.ControlOffset.X >= layout.TextOffset.X + layout.TextWidth,
+                            "Core placed the control over its label.");
+                        Check(!row.ScrollbarX && !row.ScrollbarY, "A settings row acquired an internal scrollbar.");
+                    }
+                    Check(rows == (page == ConfigurationPage.Main ? 1 : 8), $"Missing responsive rows on {page}: {rows}.");
+                    Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Scale/size changes modified configuration.");
+                }
+            });
+    }
+
+    private static void TestDragAndResize() => InContext(() =>
+    {
+        var config = new Configuration { WindowTheme = 1 };
+        var plugin = CreateConsumer(config);
+        LoadWindowPlacement(new Vector2(800, 640));
+        for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+        var window = FindWindow(Plugin.ConfigurationWindowId);
+        var header = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Header");
+        var start = header.Pos + new Vector2(header.Size.X - 150f, header.Size.Y / 2f);
+        var io = ImGui.GetIO();
+        io.AddMousePosEvent(start.X, start.Y);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, true);
+        ConsumerFrame(plugin);
+        io.AddMousePosEvent(start.X + 47, start.Y + 26);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, false);
+        ConsumerFrame(plugin);
+        Check(window.Pos == new Vector2(192, 121), "The Core header drag did not move the original top-level window.");
+        var grip = window.Pos + window.Size - new Vector2(2f);
+        io.AddMousePosEvent(grip.X, grip.Y);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, true);
+        ConsumerFrame(plugin);
+        io.AddMousePosEvent(grip.X + 120f, grip.Y + 80f);
+        ConsumerFrame(plugin);
+        io.AddMouseButtonEvent(0, false);
+        ConsumerFrame(plugin);
+        Check(window.Size.X > 900f && window.Size.Y > 700f, "Native resize grip no longer resizes Modern.");
+        Check(ImGui.SaveIniSettingsToMemory().Contains("Pos=192,121"), "Header dragging did not persist window position.");
+    });
+
+    private static void TestReducedMotion() => InContext(() =>
+    {
+        var config = new Configuration { WindowTheme = 1 };
+        var pluginInterface = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
+        ((RecordingPluginInterface)pluginInterface).ReducedMotion = true;
+        var plugin = CreateConsumer(config);
+        SetField(plugin, "pi", pluginInterface);
+        LoadWindowPlacement(new Vector2(620, 520));
+        var shell = (SentinelModernAppShellState)typeof(Plugin).GetField("modernShell", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(plugin)!;
+        foreach (var page in Enum.GetValues<ConfigurationPage>())
+        {
+            config.WindowPage = (int)page;
+            for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+            Check(shell.Motion.ReducedMotion && shell.Motion.ElapsedSeconds == 0f && shell.PageRevealProgress == 1f,
+                "Core did not honor Dalamud's reduced-motion preference.");
+        }
     });
 }
