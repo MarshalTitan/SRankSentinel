@@ -1,0 +1,43 @@
+name: Verify Public Distribution
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/verify-distribution.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Read published version contract
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath 'SRankSentinel.csproj' -Raw
+          "value=$([string]$project.Project.PropertyGroup.Version)" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Download and verify pinned shared packages
+        shell: pwsh
+        run: ./.github/scripts/Prepare-SentinelCore.ps1
+
+      - name: Verify child manifest and fresh public install
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Test-PublicDistribution.ps1
+          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
+
+      - name: Verify central catalog and fresh public install
+        shell: pwsh
+        run: >-
+          ./.github/scripts/Test-PublicDistribution.ps1
+          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json'
+          -ExpectedVersion '${{ steps.version.outputs.value }}'
