@@ -143,75 +143,60 @@ jobs:
           -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json'
           -ExpectedVersion '${{ steps.version.outputs.value }}'
 
-      - name: Detect central catalog authorization
-        id: catalog-auth
+      - name: Trigger central Sentinel catalog reconciliation
         shell: pwsh
         env:
-          CATALOG_TOKEN: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
+          GH_TOKEN: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:CATALOG_TOKEN)) {
-            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "::notice::DALAMUD_CATALOG_TOKEN is not configured. The SRankSentinel release is complete; run the Sentinel 'Update Plugin Entry' workflow manually for SRankSentinel ${{ steps.version.outputs.value }}."
-          }
-          else {
-            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            throw 'DALAMUD_CATALOG_TOKEN is required to publish S Rank Sentinel to the central Sentinel catalog.'
           }
 
-      - name: Check out the central catalog
-        if: steps.catalog-auth.outputs.enabled == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: MarshalTitan/Sentinel
-          ref: main
-          token: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
-          path: central-catalog
+          $payload = @{
+            event_type = 'plugin-released'
+            client_payload = @{
+              source_repository = '${{ github.repository }}'
+              source_commit = '${{ github.sha }}'
+              internal_name = 'SRankSentinel'
+              version = '${{ steps.version.outputs.value }}'
+              tag = '${{ steps.version.outputs.tag }}'
+            }
+          } | ConvertTo-Json -Depth 5
 
-      - name: Update only the SRankSentinel central-catalog entry
-        if: steps.catalog-auth.outputs.enabled == 'true'
-        shell: pwsh
-        run: >-
-          ./central-catalog/.github/scripts/Update-PluginEntry.ps1
-          -ManifestPath 'central-catalog/repo.json'
-          -InternalName 'SRankSentinel'
-          -Version '${{ steps.version.outputs.value }}'
-
-      - name: Validate the central catalog before publishing
-        if: steps.catalog-auth.outputs.enabled == 'true'
-        shell: pwsh
-        run: |
-          # This release owns only the SRankSentinel object. Validate that object in isolation
-          # so unrelated in-development catalog entries cannot block a Sentinel hotfix.
-          $entries = @(Get-Content -LiteralPath 'central-catalog/repo.json' -Raw | ConvertFrom-Json)
-          $entry = $entries | Where-Object { $_.InternalName -eq 'SRankSentinel' } | Select-Object -First 1
-          if ($null -eq $entry) {
-            throw 'The central catalog does not contain SRankSentinel.'
-          }
-          $entryPath = Join-Path $env:RUNNER_TEMP 'sranksentinel-central-entry.json'
-          ConvertTo-Json -InputObject @($entry) -Depth 20 | Set-Content -LiteralPath $entryPath -Encoding utf8
-          ./central-catalog/.github/scripts/Test-Catalog.ps1 `
-            -CatalogPath $entryPath `
-            -VerifyRemoteAssets `
-            -ExpectedInternalName 'SRankSentinel' `
-            -ExpectedVersion '${{ steps.version.outputs.value }}'
-
-      - name: Commit the central-catalog update
-        if: steps.catalog-auth.outputs.enabled == 'true'
-        shell: pwsh
-        working-directory: central-catalog
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- repo.json
-          git diff --cached --quiet
+          $payload | gh api `
+            --method POST `
+            'repos/MarshalTitan/Sentinel/dispatches' `
+            --input -
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "Update SRankSentinel to ${{ steps.version.outputs.value }}"
-            git push origin HEAD:main
+            throw 'Failed to dispatch the central Sentinel catalog reconciliation.'
           }
 
       - name: Verify the public central catalog
-        if: steps.catalog-auth.outputs.enabled == 'true'
         shell: pwsh
-        run: >-
-          ./.github/scripts/Test-PublicDistribution.ps1
-          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json'
-          -ExpectedVersion '${{ steps.version.outputs.value }}'
+        run: |
+          $catalogUrl = 'https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json'
+          $expectedVersion = '${{ steps.version.outputs.value }}'
+          $expectedAsset = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/SRankSentinel.zip"
+
+          for ($attempt = 1; $attempt -le 60; $attempt++) {
+            try {
+              $catalog = @(Invoke-RestMethod -Uri "$catalogUrl`?release=${{ github.run_id }}-$attempt")
+              $entry = @($catalog | Where-Object InternalName -eq 'SRankSentinel')
+              if ($entry.Count -eq 1 `
+                  -and $entry[0].AssemblyVersion -eq $expectedVersion `
+                  -and $entry[0].TestingAssemblyVersion -eq $expectedVersion `
+                  -and $entry[0].DownloadLinkInstall -eq $expectedAsset `
+                  -and $entry[0].DownloadLinkUpdate -eq $expectedAsset `
+                  -and $entry[0].DownloadLinkTesting -eq $expectedAsset) {
+                Write-Host "Verified S Rank Sentinel $expectedVersion in the public central catalog."
+                exit 0
+              }
+            }
+            catch {
+              Write-Host "Central catalog verification attempt $attempt failed: $($_.Exception.Message)"
+            }
+
+            Start-Sleep -Seconds 5
+          }
+
+          throw "The public central Sentinel catalog did not reach S Rank Sentinel $expectedVersion within five minutes."
