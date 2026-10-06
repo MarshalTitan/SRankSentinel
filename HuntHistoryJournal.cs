@@ -29,6 +29,23 @@ internal sealed class HuntHistoryJournal(Configuration config)
     private readonly HashSet<string> taggedThisSession = [];
     private readonly HashSet<string> completedTaggedPulls = [];
     private readonly Dictionary<string, (DateTime At, string Reward)> pendingRewards = [];
+    // Clearing the visible list must not discard a tag/receipt still awaiting its kill or reward.
+    private readonly List<HuntHistoryEntry> clearedActiveSpawns = [];
+    private IEnumerable<HuntHistoryEntry> CreditCandidates => (config.SpawnHistory ?? []).Concat(clearedActiveSpawns);
+
+    internal bool Clear(bool credited)
+    {
+        lock (sync)
+        {
+            var entries = credited ? config.CreditedHistory : config.SpawnHistory;
+            if (entries is null || entries.Count == 0) return false;
+            if (!credited)
+                clearedActiveSpawns.AddRange(entries.Where(entry => entry.CreditedAtUtc is null && taggedThisSession.Contains(entry.Id)));
+            entries.Clear();
+            Trim();
+            return true;
+        }
+    }
 
     internal (HuntHistoryEntry[] Spawns, HuntHistoryEntry[] Credits) Snapshot()
     {
@@ -93,7 +110,7 @@ internal sealed class HuntHistoryJournal(Configuration config)
     {
         lock (sync)
         {
-            var candidates = (config.SpawnHistory ?? []).Where(entry =>
+            var candidates = CreditCandidates.Where(entry =>
                 entry.CreditedAtUtc is null && taggedThisSession.Contains(entry.Id) &&
                 entry.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&
                 entry.TerritoryId == territory && entry.Instance == Math.Max(1, instance) &&
@@ -124,17 +141,19 @@ internal sealed class HuntHistoryJournal(Configuration config)
         return true;
     }
 
-    private HuntHistoryEntry? Find(HuntAlertSnapshot alert) => (config.SpawnHistory ?? [])
+    private HuntHistoryEntry? Find(HuntAlertSnapshot alert) => CreditCandidates
         .LastOrDefault(entry => entry.AlertKey == alert.Key &&
             (entry.ReportedAtUtc - alert.ReceivedAtUtc).Duration() < TimeSpan.FromHours(2));
 
     private void Trim()
     {
-        if (config.SpawnHistory!.Count > Capacity)
+        if (config.SpawnHistory is { Count: > Capacity })
             config.SpawnHistory.RemoveRange(0, config.SpawnHistory.Count - Capacity);
         if (config.CreditedHistory is { Count: > Capacity })
             config.CreditedHistory.RemoveRange(0, config.CreditedHistory.Count - Capacity);
-        var retained = config.SpawnHistory.Select(entry => entry.Id).ToHashSet();
+        if (clearedActiveSpawns.Count > Capacity)
+            clearedActiveSpawns.RemoveRange(0, clearedActiveSpawns.Count - Capacity);
+        var retained = CreditCandidates.Select(entry => entry.Id).ToHashSet();
         taggedThisSession.IntersectWith(retained);
         completedTaggedPulls.IntersectWith(retained);
         foreach (var key in pendingRewards.Keys.Where(key => !retained.Contains(key)).ToArray())

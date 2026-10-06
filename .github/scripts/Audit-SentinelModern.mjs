@@ -61,8 +61,8 @@ for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistan
 }
 assert(!/AddRect|AddCircle|DrawRings|new Vector4/.test(ui),
   "The consumer must not draw canonical Modern primitives.");
-assert(ui.includes('"SRankSentinel.SwitchToClassic", "Switch to Classic"') &&
-  ui.includes('drawActionDock: config.ModernWindowCollapsed ? null : drawModernActionDock') &&
+assert(ui.includes('"SRankSentinel.SwitchToClassic", "Use Classic Theme"') &&
+  ui.includes('drawActionDock: !config.ModernWindowCollapsed && config.WindowPage == (int)ConfigurationPage.Theme') &&
   !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("Window theme"'),
   "Modern must have a separate bottom-left Core dock button; Classic must retain its theme selector.");
 assert(ui.includes('ImGui.GetIO().NavVisible && ImGui.IsItemFocused()') &&
@@ -72,7 +72,11 @@ assert(ui.includes('"Plugins", FontAwesomeIcon.Plug') && ui.includes('"History",
   ui.includes('new Vector2(170f, 34f) * ImGuiHelpers.GlobalScale'),
   "Keep the ecosystem Plug icon, existing History icon, and compact Classic button.");
 const companionPages = read("Plugin.CompanionPages.cs");
-assert(companionPages.includes('SentinelModernSettingsRow.Draw("Companion."') &&
+assert(companionPages.includes('SentinelModernGlassCard.Begin("Companion."') &&
+  companionPages.includes('loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error') &&
+  companionPages.includes('Accent = colour, AccentStrength = 0.65f') &&
+  ui.includes('"Theme", FontAwesomeIcon.Palette') &&
+  companionPages.includes('"History.ClearCredits" : "History.ClearSpawns"') &&
   companionPages.includes('SentinelModernGlassCard.Begin("History.Metric."') &&
   companionPages.includes('SentinelModernGlassCard.Begin("History.Activity"') &&
   !/AddRect|AddCircle|new Vector4/.test(companionPages),

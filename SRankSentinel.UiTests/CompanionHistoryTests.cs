@@ -318,6 +318,127 @@ internal static partial class Program
                 "Rendering empty History fabricated records or changed configuration.");
         });
     }
+
+    private static void TestHistoryClearing()
+    {
+        foreach (var credited in new[] { false, true })
+        {
+            var config = new Configuration();
+            var journal = new HuntHistoryJournal(config);
+            var now = DateTime.UtcNow;
+            var alert = HistoryAlert(now);
+            journal.Tag(alert, now);
+            journal.Kill(alert, true, now.AddSeconds(1));
+            journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts");
+            var other = JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory);
+            Check(journal.Clear(credited), "Nonempty history did not clear.");
+            Check((credited ? config.CreditedHistory : config.SpawnHistory).Count == 0 &&
+                JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory) == other,
+                "Clearing one history altered the other section.");
+            Check(!journal.Clear(credited), "Empty history claimed to change.");
+            Check(!journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(3), "Sack of Nuts"), "Clearing history duplicated an existing credit.");
+            var reload = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!;
+            Check((credited ? reload.CreditedHistory : reload.SpawnHistory).Count == 0,
+                "Cleared history reappeared after reload.");
+        }
+        foreach (var rewardFirst in new[] { false, true })
+        foreach (var betweenEvidence in new[] { false, true })
+        {
+            var config = new Configuration();
+            var journal = new HuntHistoryJournal(config);
+            var now = DateTime.UtcNow;
+            var alert = HistoryAlert(now);
+            journal.Tag(alert, now);
+            if (betweenEvidence)
+            {
+                if (rewardFirst) journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(1), "Sack of Nuts");
+                else journal.Kill(alert, true, now.AddSeconds(1));
+            }
+            journal.Clear(false);
+            if (rewardFirst)
+            {
+                if (!betweenEvidence) journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(1), "Sack of Nuts");
+                journal.Kill(alert, true, now.AddSeconds(2));
+            }
+            else
+            {
+                if (!betweenEvidence) journal.Kill(alert, true, now.AddSeconds(1));
+                journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts");
+            }
+            Check(config.SpawnHistory.Count == 0 && config.CreditedHistory.Count == 1,
+                "Clearing reports lost an active tag/receipt or restored the cleared reports.");
+        }
+    }
+
+    private static void TestHistoryClearInput()
+    {
+        foreach (var credited in new[] { false, true })
+        foreach (var key in new[] { ImGuiKey.None, ImGuiKey.Space, ImGuiKey.GamepadFaceDown }) InContext(() =>
+        {
+            var pi = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
+            var store = (RecordingPluginInterface)pi;
+            var config = new Configuration { WindowTheme = 1, WindowPage = (int)ConfigurationPage.History };
+            config.Initialize(pi);
+            var journal = new HuntHistoryJournal(config);
+            var now = DateTime.UtcNow;
+            var alert = HistoryAlert(now);
+            journal.Tag(alert, now);
+            journal.Kill(alert, true, now.AddSeconds(1));
+            journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(2), "Sack of Nuts");
+            var other = JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory);
+            var plugin = CreateConsumer(config);
+            SetField(plugin, "historyJournal", journal);
+            var draw = typeof(Plugin).GetMethod("DrawClearHistoryButton", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var savedBefore = store.SaveCalls;
+            var focus = false;
+            Vector2 minimum = default, maximum = default;
+            using var style = new SentinelModernStyleScope();
+            void Frame()
+            {
+                ImGui.NewFrame();
+                style.PushAppShell();
+                try
+                {
+                    ImGui.SetNextWindowPos(Vector2.Zero, ImGuiCond.Always);
+                    ImGui.SetNextWindowSize(new Vector2(520, 320), ImGuiCond.Always);
+                    ImGui.Begin("History-clear-test", ImGuiWindowFlags.NoSavedSettings);
+                    try
+                    {
+                        if (focus) ImGui.SetKeyboardFocusHere();
+                        draw.Invoke(plugin, [credited, (credited ? config.CreditedHistory : config.SpawnHistory).Count]);
+                        minimum = ImGui.GetItemRectMin(); maximum = ImGui.GetItemRectMax();
+                    }
+                    finally { ImGui.End(); }
+                }
+                finally { style.Pop(); }
+                ImGui.Render();
+            }
+            Frame(); Frame();
+            var io = ImGui.GetIO();
+            if (key == ImGuiKey.None)
+            {
+                var center = (minimum + maximum) / 2;
+                io.AddMousePosEvent(center.X, center.Y); Frame();
+                io.AddMouseButtonEvent(0, true); Frame();
+                io.AddMouseButtonEvent(0, false); Frame();
+            }
+            else
+            {
+                focus = true; Frame(); focus = false; Frame();
+                io.AddKeyEvent(key, true); Frame();
+                io.AddKeyEvent(key, false); Frame();
+            }
+            Check((credited ? config.CreditedHistory : config.SpawnHistory).Count == 0 && store.SaveCalls == savedBefore + 1 &&
+                JsonSerializer.Serialize(credited ? config.SpawnHistory : config.CreditedHistory) == other,
+                $"{key} did not clear and persist only its selected history.");
+            var reloaded = JsonSerializer.Deserialize<Configuration>(store.SavedJson!)!;
+            Check((credited ? reloaded.CreditedHistory : reloaded.SpawnHistory).Count == 0 && reloaded.WindowTheme == 1 &&
+                reloaded.WindowPage == (int)ConfigurationPage.History, "Clear-history persistence changed appearance.");
+            io.AddKeyEvent(ImGuiKey.Space, true); Frame();
+            io.AddKeyEvent(ImGuiKey.Space, false); Frame();
+            Check(store.SaveCalls == savedBefore + 1, "Disabled empty clear button saved again.");
+        });
+    }
 }
 
 public class ExposedPluginFixture : DispatchProxy

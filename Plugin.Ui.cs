@@ -81,7 +81,8 @@ public sealed partial class Plugin
                             RequestCollapse = ToggleModernCollapse,
                             CollapseTooltip = config.ModernWindowCollapsed ? "Expand" : "Minimize",
                         }, modernShell, modernNavigation, selectModernPage, drawModernContent,
-                        drawActionDock: config.ModernWindowCollapsed ? null : drawModernActionDock);
+                        drawActionDock: !config.ModernWindowCollapsed && config.WindowPage == (int)ConfigurationPage.Theme
+                            ? drawModernActionDock : null);
                 }
                 else
                 {
@@ -122,6 +123,7 @@ public sealed partial class Plugin
         CreateModernNavItem(ConfigurationPage.DistanceProfiles.ToString(), "Distance Profiles", FontAwesomeIcon.RulerHorizontal),
         CreateModernNavItem(ConfigurationPage.Plugins.ToString(), "Plugins", FontAwesomeIcon.Plug),
         CreateModernNavItem(ConfigurationPage.History.ToString(), "History", FontAwesomeIcon.History),
+        CreateModernNavItem(ConfigurationPage.Theme.ToString(), "Theme", FontAwesomeIcon.Palette),
     ];
 
     private SentinelModernNavItem CreateModernNavItem(string id, string label, FontAwesomeIcon icon) =>
@@ -161,7 +163,7 @@ public sealed partial class Plugin
 
     private void DrawModernActionDock()
     {
-        if (SentinelModernActionDock.PrimaryButton("SRankSentinel.SwitchToClassic", "Switch to Classic",
+        if (SentinelModernActionDock.PrimaryButton("SRankSentinel.SwitchToClassic", "Use Classic Theme",
                 new Vector2(170f, 34f) * ImGuiHelpers.GlobalScale, ImGuiHelpers.GlobalScale))
             SetWindowTheme((int)SentinelThemeKind.Classic);
     }
@@ -174,6 +176,10 @@ public sealed partial class Plugin
 
         switch (page)
         {
+            case ConfigurationPage.Theme:
+                SentinelModernActionDock.Status("Sentinel Modern 2 is active.");
+                ImGui.TextWrapped("Use the button below to switch to Classic Theme.");
+                break;
             case ConfigurationPage.Plugins:
                 DrawPluginsPage();
                 break;
@@ -435,4 +441,5 @@ internal enum ConfigurationPage
     DistanceProfiles = 2,
     Plugins = 5,
     History = 6,
+    Theme = 7,
 }

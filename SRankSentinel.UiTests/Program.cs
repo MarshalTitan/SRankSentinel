@@ -41,7 +41,7 @@ internal static partial class Program
             Test("disabled canonical switch rejects pointer and keyboard activation", TestDisabledToggle);
             Test("shared shell/cards balance style and render at multiple UI scales", TestModernShell);
             Test("Classic and every Modern page render at the minimum size", TestConsumerPages);
-            Test("separate bottom-left Classic button saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
+            Test("Classic button appears only on Theme and saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
             Test("saved position and larger size survive Classic/Modern switching", TestWindowPlacement);
             Test("undersized saved Modern window expands without moving", TestMinimumWindow);
             Test("Classic native controls and Modern custom minimize/close work", TestWindowControls);
@@ -58,7 +58,9 @@ internal static partial class Program
             Test("both populated histories render and balance scopes at multiple sizes/scales", TestPopulatedHistory);
             Test("compact companion cards contain their status/actions at all UI scales", TestCompanionCardLayout);
             Test("empty History renders summary cards without fabricating records", TestEmptyHistoryLayout);
-            Console.WriteLine($"{passed}/27 UI, migration, companion, and history tests passed.");
+            Test("clearing each history is independent and preserves active credit evidence", TestHistoryClearing);
+            Test("both clear-history buttons persist only their own list and reject empty activation", TestHistoryClearInput);
+            Console.WriteLine($"{passed}/29 UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -406,9 +408,20 @@ internal static partial class Program
         }
     });
 
-    private static void TestSidebarThemeSwitch()
+    private static unsafe void TestSidebarThemeSwitch()
     {
-        foreach (var page in Enum.GetValues<ConfigurationPage>())
+        foreach (var nonThemePage in Enum.GetValues<ConfigurationPage>().Where(page => page != ConfigurationPage.Theme))
+            InContext(() =>
+            {
+                var plugin = CreateConsumer(new Configuration { WindowTheme = 1, WindowPage = (int)nonThemePage });
+                LoadWindowPlacement(new Vector2(620, 520));
+                for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+                var windows = ImGui.GetCurrentContext().Windows;
+                for (var index = 0; index < windows.Size; index++)
+                    Check(!windows[index].Active || !Marshal.PtrToStringUTF8((nint)windows[index].Name)!.Contains("##Modern2Dock"),
+                        $"The Classic theme dock appeared on {nonThemePage}.");
+            });
+        var page = ConfigurationPage.Theme;
         foreach (var key in new[] { ImGuiKey.None, ImGuiKey.Space, ImGuiKey.GamepadFaceDown })
             InContext(() =>
             {
