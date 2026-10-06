@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Plugin;
 using SentinelCore.UI;
@@ -33,56 +34,7 @@ public sealed partial class Plugin
         foreach (var companion in CompanionPlugins.All)
         {
             var plugin = CompanionPlugins.Find(installed, companion);
-            var requirement = companion.Name == "vnavmesh" ? "REQUIRED" : companion.Name == "Lifestream" ? "OPTIONAL" : "ALERT PROVIDER";
-            var controlWidth = plugin?.IsLoaded == true && !plugin.HasConfigUi ? 110f : 182f;
-            // Core owns the entire responsive card: wrapped text and the compact action column never overlap.
-            SentinelModernSettingsRow.Draw("Companion." + companion.Name, $"{companion.Name} · {requirement}",
-                companion.Setup, () =>
-            {
-                if (plugin?.IsLoaded == true)
-                {
-                    SentinelModernStatusPill.Draw(new("ENABLED", SentinelModernPillTone.Enabled), modernShell.Motion, ImGuiHelpers.GlobalScale);
-                    if (plugin.HasConfigUi)
-                    {
-                        ImGui.SameLine();
-                        if (CompanionButton(companion.Name + ".Settings", "Settings", 78f))
-                        {
-                            try { plugin.OpenConfigUi(); }
-                            catch (Exception exception) { companionEnableStatus = $"Could not open {companion.Name} settings: {exception.Message}"; }
-                        }
-                    }
-                    return;
-                }
-                if (plugin is null)
-                {
-                    SentinelModernStatusPill.Draw(new("MISSING", SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
-                    ImGui.SameLine();
-                }
-                else
-                {
-                    var reason = CompanionPluginActivation.UnavailableReason(plugin);
-                    ImGui.BeginDisabled(reason is not null || companionEnableTask is not null);
-                    try
-                    {
-                        if (CompanionButton(companion.Name + ".Enable", "Enable", 78f))
-                        {
-                            companionEnableName = companion.Name;
-                            companionEnableStatus = $"Enabling {companion.Name}...";
-                            companionEnableTask = Task.Run(() => CompanionPluginActivation.EnableAsync(plugin));
-                        }
-                    }
-                    finally { ImGui.EndDisabled(); }
-                    if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                        ImGui.SetTooltip(reason ?? "Enable this installed plugin.");
-                    ImGui.SameLine();
-                }
-                if (CompanionButton(companion.Name + ".Installer", "Installer", 78f))
-                    pi?.OpenPluginInstallerTo(searchText: companion.Name);
-            }, SentinelModernSettingsRowLayoutOptions.Default with
-            {
-                PreferredControlWidth = controlWidth, MinimumControlWidth = controlWidth,
-                MinimumTextWidth = 160f, MinimumHeight = 68f,
-            }, ImGuiHelpers.GlobalScale);
+            DrawCompanionCard(companion, plugin);
             ImGui.Spacing();
         }
         if (CompanionButton("Installer", "Open Plugin Installer", 180f))
@@ -90,6 +42,104 @@ public sealed partial class Plugin
         ImGui.TextWrapped("Lifestream is optional. HuntAlerts and Sonar are alternative alert sources.");
         ImGui.TextWrapped("Use Installer to install or update a companion. Enable S-rank announcements and map links for your data center.");
         if (companionEnableStatus is not null) ImGui.TextWrapped(companionEnableStatus);
+    }
+
+    private void DrawCompanionCard(CompanionPlugin companion, IExposedPlugin? plugin)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var loaded = plugin?.IsLoaded == true;
+        var colour = SentinelModernStatusPill.ResolveColour(new("Plugin", loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error));
+        var requirement = new SentinelModernStatusPillOptions(
+            companion.Name == "vnavmesh" ? "REQUIRED" : companion.Name == "Lifestream" ? "OPTIONAL" : "ALERT PROVIDER",
+            companion.Name == "Lifestream" ? SentinelModernPillTone.Neutral : SentinelModernPillTone.Accent);
+        var controlWidth = (loaded && !plugin!.HasConfigUi ? 110f : 182f) * scale;
+        // Consumer content uses native table columns; Core still owns the card, tint, pills, and controls.
+        var textWidth = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (24f + 28f) * scale
+            - controlWidth - 6f * ImGui.GetStyle().CellPadding.X);
+        var badgeSize = SentinelModernStatusPill.Measure(requirement, scale);
+        var inlineBadge = ImGui.CalcTextSize(companion.Name).X + ImGui.GetStyle().ItemSpacing.X + badgeSize.X <= textWidth;
+        var titleHeight = inlineBadge ? MathF.Max(ImGui.GetTextLineHeight(), badgeSize.Y)
+            : ImGui.GetTextLineHeightWithSpacing() + badgeSize.Y;
+        var contentHeight = titleHeight + ImGui.GetStyle().ItemSpacing.Y + ImGui.CalcTextSize(companion.Setup, false, textWidth).Y;
+        var height = MathF.Max(30f * scale, contentHeight) + 20f * scale + 2f * ImGui.GetStyle().CellPadding.Y;
+        using var card = SentinelModernGlassCard.Begin("Companion." + companion.Name,
+            new SentinelModernGlassCardOptions
+            {
+                Size = new Vector2(0f, height / scale), Padding = new Vector2(12f, 10f),
+                Accent = colour, AccentStrength = 0.65f,
+            }, scale);
+        if (!card.IsVisible || !ImGui.BeginTable("##CompanionContent", 3, ImGuiTableFlags.SizingStretchProp)) return;
+        try
+        {
+            ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 28f * scale);
+            ImGui.TableSetupColumn("Plugin", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, controlWidth);
+            ImGui.TableNextColumn();
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + MathF.Max(0f, (contentHeight - 26f * scale) / 2f));
+            var glyph = (loaded ? FontAwesomeIcon.CheckCircle : FontAwesomeIcon.TimesCircle).ToIconString();
+            ImGui.PushFont(modernIconFont());
+            try
+            {
+                ImGui.GetWindowDrawList().AddText(ImGui.GetFont(), 26f * scale, ImGui.GetCursorScreenPos(),
+                    ImGui.ColorConvertFloat4ToU32(colour), glyph);
+            }
+            finally { ImGui.PopFont(); }
+            ImGui.Dummy(new Vector2(26f) * scale);
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(companion.Name);
+            if (inlineBadge) ImGui.SameLine();
+            SentinelModernStatusPill.Draw(requirement, modernShell.Motion, scale);
+            ImGui.PushTextWrapPos(0f);
+            try { SentinelModernActionDock.Status(companion.Setup); }
+            finally { ImGui.PopTextWrapPos(); }
+            ImGui.TableNextColumn();
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + MathF.Max(0f, (contentHeight - 30f * scale) / 2f));
+            DrawCompanionActions(companion, plugin);
+        }
+        finally { ImGui.EndTable(); }
+    }
+
+    private void DrawCompanionActions(CompanionPlugin companion, IExposedPlugin? plugin)
+    {
+        if (plugin?.IsLoaded == true)
+        {
+            SentinelModernStatusPill.Draw(new("ENABLED", SentinelModernPillTone.Enabled), modernShell.Motion, ImGuiHelpers.GlobalScale);
+            if (plugin.HasConfigUi)
+            {
+                ImGui.SameLine();
+                if (CompanionButton(companion.Name + ".Settings", "Settings", 78f))
+                {
+                    try { plugin.OpenConfigUi(); }
+                    catch (Exception exception) { companionEnableStatus = $"Could not open {companion.Name} settings: {exception.Message}"; }
+                }
+            }
+            return;
+        }
+        if (plugin is null)
+        {
+            SentinelModernStatusPill.Draw(new("MISSING", SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
+            ImGui.SameLine();
+        }
+        else
+        {
+            var reason = CompanionPluginActivation.UnavailableReason(plugin);
+            ImGui.BeginDisabled(reason is not null || companionEnableTask is not null);
+            try
+            {
+                if (CompanionButton(companion.Name + ".Enable", "Enable", 78f))
+                {
+                    companionEnableName = companion.Name;
+                    companionEnableStatus = $"Enabling {companion.Name}...";
+                    companionEnableTask = Task.Run(() => CompanionPluginActivation.EnableAsync(plugin));
+                }
+            }
+            finally { ImGui.EndDisabled(); }
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip(reason ?? "Enable this installed plugin.");
+            ImGui.SameLine();
+        }
+        if (CompanionButton(companion.Name + ".Installer", "Installer", 78f))
+            pi?.OpenPluginInstallerTo(searchText: companion.Name);
     }
 
     private static bool CompanionButton(string id, string label, float width) =>
@@ -115,9 +165,26 @@ public sealed partial class Plugin
         DrawSpawnActivity(history.Spawns, today);
         ImGui.Spacing();
         DrawHistorySection("SPAWN REPORTS", history.Spawns, false);
+        DrawClearHistoryButton(false, history.Spawns.Length);
         ImGui.Spacing();
         DrawHistorySection("TAGGED + CREDIT CONFIRMED", history.Credits, true);
+        DrawClearHistoryButton(true, history.Credits.Length);
         ImGui.TextWrapped("Totals cover saved history (up to 500 reports and 500 credits). No earlier hunts are backfilled.");
+    }
+
+    private void DrawClearHistoryButton(bool credited, int count)
+    {
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + MathF.Max(0f,
+            ImGui.GetContentRegionAvail().X - 180f * ImGuiHelpers.GlobalScale));
+        ImGui.BeginDisabled(count == 0);
+        try
+        {
+            if (SentinelModernActionDock.DangerButton(credited ? "History.ClearCredits" : "History.ClearSpawns",
+                    credited ? "Clear credited history" : "Clear spawn history", new Vector2(180f, 30f) * ImGuiHelpers.GlobalScale,
+                    ImGuiHelpers.GlobalScale))
+                ObserveHistory(() => History.Clear(credited));
+        }
+        finally { ImGui.EndDisabled(); }
     }
 
     private static void DrawHistoryMetric(string label, int count)
