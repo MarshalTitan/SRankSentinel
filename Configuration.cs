@@ -52,6 +52,8 @@ public sealed class Configuration : IPluginConfiguration
     public int AlertFreshnessMinutes { get; set; } = 45;
     public List<PersistedHuntAlert> PendingAlerts { get; set; } = [];
     public List<KilledHuntRecord> KilledAlerts { get; set; } = [];
+    public List<HuntHistoryEntry> SpawnHistory { get; set; } = [];
+    public List<HuntHistoryEntry> CreditedHistory { get; set; } = [];
 
     [NonSerialized] private IDalamudPluginInterface? pluginInterface;
 

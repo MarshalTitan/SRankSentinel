@@ -3,6 +3,7 @@ using System.Text.Json;
 using SRankSentinel;
 using Dalamud.Interface;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Plugin;
 
 // Capture the real persistence call without requiring a running game or plugin services.
 public class RecordingPluginInterface : DispatchProxy
@@ -12,9 +13,17 @@ public class RecordingPluginInterface : DispatchProxy
     public bool ReducedMotion { get; set; }
     public uint LastSaveItemId { get; private set; }
     public bool FocusNextAfterSave { get; set; }
+    public IExposedPlugin[] InstalledPlugins { get; set; } = [];
+    public string? InstallerSearch { get; private set; }
 
     protected override unsafe object? Invoke(MethodInfo? method, object?[]? args)
     {
+        if (method?.Name == "get_InstalledPlugins") return InstalledPlugins;
+        if (method?.Name == "OpenPluginInstallerTo")
+        {
+            InstallerSearch = (string?)args![1];
+            return true;
+        }
         if (method?.Name == "get_UiBuilder")
         {
             var builder = Create<IUiBuilder, RecordingUiBuilder>();

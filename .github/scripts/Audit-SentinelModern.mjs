@@ -61,9 +61,13 @@ for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistan
 }
 assert(!/AddRect|AddCircle|DrawRings|new Vector4/.test(ui),
   "The consumer must not draw canonical Modern primitives.");
-assert(ui.includes('CreateModernNavItem("Classic", "Switch to Classic", FontAwesomeIcon.Palette)') &&
-  ui.includes('ImGui.Combo("Window theme"') && ui.split("SetWindowTheme(").length >= 4,
-  "Modern must have one left-side Classic action; Classic must retain the shared theme setter.");
+assert(ui.includes('"SRankSentinel.SwitchToClassic", "Switch to Classic"') &&
+  ui.includes('drawActionDock: config.ModernWindowCollapsed ? null : drawModernActionDock') &&
+  !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("Window theme"'),
+  "Modern must have a separate bottom-left Core dock button; Classic must retain its theme selector.");
+assert(ui.includes('ImGui.GetIO().NavVisible && ImGui.IsItemFocused()') &&
+  ui.includes('ConfigurationPage.Plugins.ToString()') && ui.includes('ConfigurationPage.History.ToString()'),
+  "Navigation needs the new pages and must not retain mouse-click focus tooltips.");
 assert(!ui.includes("SentinelModernConfigurationShell") && !ui.includes("ConsumerToggleActivation") &&
   !ui.includes("SentinelModernUi.PageHeading"), "Legacy shell/bridge or redundant page-top information returned.");
 const config = read("Configuration.cs");
@@ -73,7 +77,21 @@ assert(config.includes("if (Version < 16)") && config.includes("WindowTheme = 0;
 
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
-  const actual = createHash("sha256").update(read(path).trim() + "\n").digest("hex");
+  let source = read(path);
+  if (path === "Plugin.cs") {
+    // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
+    for (const hook of [
+      "        chat.ChatMessage += OnHistoryReward;\n",
+      "        chat.ChatMessage -= OnHistoryReward;\n",
+      "        ObserveHistorySpawn(huntType, world, creature, territory, instance, source, occurredAtUtc);\n",
+      "                ObserveHistoryTag(current, now);\n",
+      "        ObserveHistoryKill(current, pullCycleTagged, now);\n",
+    ]) {
+      assert(source.split(hook).length === 2, `Missing or duplicated passive history hook: ${hook.trim()}`);
+      source = source.replace(hook, "");
+    }
+  }
+  const actual = createHash("sha256").update(source.trim() + "\n").digest("hex");
   assert(actual === expectedHash, `UI-only migration changed hunt source: ${path}`);
 }
 for (const workflow of ["build.yml", "release.yml"]) {
@@ -83,4 +101,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, unified shared application shell, icon rail, responsive rows, native switch input, Classic migration, saved window identity, shared handlers, unchanged hunt sources, and CI/release guards.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");

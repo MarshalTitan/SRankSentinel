@@ -353,6 +353,7 @@ public sealed partial class Plugin : IDalamudPlugin
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
         chat.ChatMessage += OnSonarChatMessage;
+        chat.ChatMessage += OnHistoryReward;
         framework.Update += OnFrameworkUpdate;
         pi.UiBuilder.Draw += DrawUi;
         pi.UiBuilder.OpenMainUi += OpenConfig;
@@ -393,6 +394,7 @@ public sealed partial class Plugin : IDalamudPlugin
         faloop.Dispose();
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
+        chat.ChatMessage -= OnHistoryReward;
         framework.Update -= OnFrameworkUpdate;
         pi.UiBuilder.Draw -= DrawUi;
         pi.UiBuilder.OpenMainUi -= OpenConfig;
@@ -1228,6 +1230,7 @@ public sealed partial class Plugin : IDalamudPlugin
         string source,
         DateTime? occurredAtUtc = null)
     {
+        ObserveHistorySpawn(huntType, world, creature, territory, instance, source, occurredAtUtc);
         var ssProfile = HuntCatalog.GetSsProfileForSsName(creature);
         var isSs = ssProfile is not null;
         if (!isSs && !string.Equals(huntType, "srank", StringComparison.OrdinalIgnoreCase))
@@ -5008,6 +5011,7 @@ public sealed partial class Plugin : IDalamudPlugin
             {
                 tagAttempted = true;
                 pullCycleTagged = true;
+                ObserveHistoryTag(current, now);
                 tagRequired = false;
                 pendingTagDispatch = null;
                 ResetTagRecoveryTracking(clearRequirement: false);
@@ -6901,6 +6905,7 @@ public sealed partial class Plugin : IDalamudPlugin
         var now = DateTime.UtcNow;
         BeginDeadPostKillRewardGrace(now);
         MarkKilled(current, now);
+        ObserveHistoryKill(current, pullCycleTagged, now);
         log.Information("Hunt cleared/completed with positive evidence: {Mark} on {World}; reason={Reason}",
             current.CreatureName, current.World, reason);
         if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName))

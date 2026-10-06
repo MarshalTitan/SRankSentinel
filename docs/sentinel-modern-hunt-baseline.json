@@ -1,6 +1,6 @@
 {
   "baselineCommit": "fd5cbb43a2ee92d27e28ebead66564e4959e2b38",
-  "note": "UI-only migration guard. Plugin.cs has only its UI block extracted and its declaration made partial; every hunt/service source remains at the v0.7.44 baseline. Update this evidence deliberately with future hunt changes.",
+  "note": "Plugin.cs has its UI block extracted and declaration made partial. Audit-SentinelModern removes exactly five passive history observer lines before comparing this unchanged v0.7.44 hunt/service baseline. The guard rejects any other automation change.",
   "sha256": {
     "Plugin.cs": "2064015ed5dbb7faacf792cef657acd056598fbb31b9847dd5d045876f584a1d",
     "CombatController.cs": "7b438054c3298b7ec726e7d9019dbdc029231345b4f1a1ee5be40124f7733439",

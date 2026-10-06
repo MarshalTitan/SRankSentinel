@@ -17,6 +17,7 @@ public sealed partial class Plugin
     private SentinelModernNavItem[]? modernNavigation;
     private Action<string>? selectModernPage;
     private Action? drawModernContent;
+    private Action? drawModernActionDock;
     private Vector2 modernFrameWindowSize;
     private Vector2? pendingModernSize;
     private bool modernUiFrame;
@@ -60,6 +61,7 @@ public sealed partial class Plugin
                     modernNavigation ??= CreateModernNavigation();
                     selectModernPage ??= SelectModernPage;
                     drawModernContent ??= DrawModernContent;
+                    drawModernActionDock ??= DrawModernActionDock;
                     SentinelModernAppShell.Draw(
                         new SentinelModernAppShellOptions("SRankSentinel", "S Rank Sentinel",
                             ((ConfigurationPage)config.WindowPage).ToString())
@@ -67,7 +69,7 @@ public sealed partial class Plugin
                             Scale = scale,
                             DeltaTime = ImGui.GetIO().DeltaTime,
                             ReducedMotion = pi?.UiBuilder.ShouldUseReducedMotion ?? false,
-                            ContextLabel = config.WindowPage == (int)ConfigurationPage.DistanceProfiles ? "Distance Profiles" : "Main",
+                            ContextLabel = ModernPageLabel((ConfigurationPage)config.WindowPage),
                             Status = new SentinelModernStatusPillOptions(config.Enabled ? "ENABLED" : "DISABLED",
                                 config.Enabled ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Neutral),
                             DrawPluginIcon = context => DrawModernIcon(FontAwesomeIcon.Crosshairs, context.DrawList,
@@ -78,7 +80,8 @@ public sealed partial class Plugin
                             RequestClose = () => configOpen = false,
                             RequestCollapse = ToggleModernCollapse,
                             CollapseTooltip = config.ModernWindowCollapsed ? "Expand" : "Minimize",
-                        }, modernShell, modernNavigation, selectModernPage, drawModernContent);
+                        }, modernShell, modernNavigation, selectModernPage, drawModernContent,
+                        drawActionDock: config.ModernWindowCollapsed ? null : drawModernActionDock);
                 }
                 else
                 {
@@ -117,7 +120,8 @@ public sealed partial class Plugin
     [
         CreateModernNavItem(ConfigurationPage.Main.ToString(), "Main", FontAwesomeIcon.Crosshairs),
         CreateModernNavItem(ConfigurationPage.DistanceProfiles.ToString(), "Distance Profiles", FontAwesomeIcon.RulerHorizontal),
-        CreateModernNavItem("Classic", "Switch to Classic", FontAwesomeIcon.Palette),
+        CreateModernNavItem(ConfigurationPage.Plugins.ToString(), "Plugins", FontAwesomeIcon.PuzzlePiece),
+        CreateModernNavItem(ConfigurationPage.History.ToString(), "History", FontAwesomeIcon.History),
     ];
 
     private SentinelModernNavItem CreateModernNavItem(string id, string label, FontAwesomeIcon icon) =>
@@ -127,7 +131,7 @@ public sealed partial class Plugin
             {
                 DrawModernIcon(icon, context.DrawList, context.Minimum, context.Maximum,
                     ImGui.ColorConvertFloat4ToU32(context.Colour));
-                if (ImGui.IsItemFocused() && !ImGui.IsItemHovered())
+                if (ImGui.GetIO().NavVisible && ImGui.IsItemFocused() && !ImGui.IsItemHovered())
                     ImGui.SetTooltip(label);
             },
         };
@@ -145,13 +149,21 @@ public sealed partial class Plugin
 
     private void SelectModernPage(string id)
     {
-        if (id == "Classic")
-            SetWindowTheme((int)SentinelThemeKind.Classic);
-        else if (Enum.TryParse<ConfigurationPage>(id, out var page) && Enum.IsDefined(page))
+        if (Enum.TryParse<ConfigurationPage>(id, out var page) && Enum.IsDefined(page))
         {
             config.WindowPage = (int)page;
             config.Save();
         }
+    }
+
+    private static string ModernPageLabel(ConfigurationPage page) => page == ConfigurationPage.DistanceProfiles
+        ? "Distance Profiles" : page.ToString();
+
+    private void DrawModernActionDock()
+    {
+        if (SentinelModernActionDock.PrimaryButton("SRankSentinel.SwitchToClassic", "Switch to Classic",
+                default, ImGuiHelpers.GlobalScale))
+            SetWindowTheme((int)SentinelThemeKind.Classic);
     }
 
     private void DrawModernContent()
@@ -162,6 +174,12 @@ public sealed partial class Plugin
 
         switch (page)
         {
+            case ConfigurationPage.Plugins:
+                DrawPluginsPage();
+                break;
+            case ConfigurationPage.History:
+                DrawHistoryPage();
+                break;
             case ConfigurationPage.DistanceProfiles:
                 DrawDistanceControls();
                 if (DrawActionButton("Save settings"))
@@ -415,4 +433,6 @@ internal enum ConfigurationPage
     // Keep the persisted Distance Profiles ID. Former Hunting (1), Recovery Controls (3),
     // and Appearance (4) selections normalize to Main through the existing config migration.
     DistanceProfiles = 2,
+    Plugins = 5,
+    History = 6,
 }

@@ -84,7 +84,7 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 2. Wait for the normal **Build** workflow to pass.
 3. The version bump automatically starts the **Publish Beta** workflow.
 4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
-5. If the `DALAMUD_CATALOG_TOKEN` repository secret is configured, the workflow also updates only the `SRankSentinel` object in `MarshalTitan/Sentinel/repo.json` and validates a fresh public install. Otherwise it emits a notice and the central repository's **Update Plugin Entry** workflow is the manual fallback.
+5. The workflow uses `DALAMUD_CATALOG_TOKEN` to notify Sentinel's central generator with `plugin-released`, then verifies the generated entry and public install path. The central generator owns `MarshalTitan/Sentinel/repo.json` and can also reconcile from the child manifest; SRankSentinel never writes the central manifest directly.
 
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
 
@@ -93,14 +93,21 @@ For automatic central-catalog updates, use a fine-grained GitHub token limited t
 
 Existing users remain on **Classic** through an explicit version-16 configuration migration.
 Select **Sentinel Modern** in the window's **Window theme** setting to opt in. Modern groups
-the same controls into Main and Distance Profiles. Both pages start directly with their
+the same controls into Main and Distance Profiles, with Plugins and History alongside them. Pages start directly with their
 settings without a separate page heading or introductory text. Main combines hunt status,
 expansion switches, and recovery actions. Modern uses one compact custom header, a slim
 Font Awesome icon rail, and responsive settings rows on a continuous shared surface.
-The left rail includes **Switch to Classic**; Classic retains its native title bar and
+The separate bottom-left button offers **Switch to Classic**; Classic retains its native title bar and
 the **Window theme** selector for switching back to Modern.
 The existing window identity, saved position, close/collapse controls, hunt configuration, and
 keyboard/controller activation are retained.
+
+**Plugins** shows vnavmesh, Lifestream, HuntAlerts, and Sonar, their live status and setup needs,
+and settings/installer actions. Installed, disabled plugins can be enabled explicitly when
+Dalamud's default collection allows it. Collection-managed or unavailable plugins use the
+installer. **History** keeps the latest 500 spawn reports and 500 tagged hunts with positive
+kill and game reward evidence. It starts with new alerts; previous suppression records do
+not imply personal credit. History never changes hunt decisions.
 
 The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.3.1 assemblies.
 No separately installed SentinelCore plugin is required. See
