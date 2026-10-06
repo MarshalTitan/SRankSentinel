@@ -184,7 +184,7 @@ jobs:
 
           for ($attempt = 1; $attempt -le 60; $attempt++) {
             try {
-              $catalog = @(Invoke-RestMethod -Uri "$catalogUrl`?release=${{ github.run_id }}-$attempt")
+              $catalog = Invoke-RestMethod -Uri "$catalogUrl`?release=${{ github.run_id }}-$attempt"
               $entry = @($catalog | Where-Object InternalName -eq 'SRankSentinel')
               if ($entry.Count -eq 1 `
                   -and $entry[0].AssemblyVersion -eq $expectedVersion `
