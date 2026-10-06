@@ -68,6 +68,15 @@ assert(ui.includes('"SRankSentinel.SwitchToClassic", "Switch to Classic"') &&
 assert(ui.includes('ImGui.GetIO().NavVisible && ImGui.IsItemFocused()') &&
   ui.includes('ConfigurationPage.Plugins.ToString()') && ui.includes('ConfigurationPage.History.ToString()'),
   "Navigation needs the new pages and must not retain mouse-click focus tooltips.");
+assert(ui.includes('"Plugins", FontAwesomeIcon.Plug') && ui.includes('"History", FontAwesomeIcon.History') &&
+  ui.includes('new Vector2(170f, 34f) * ImGuiHelpers.GlobalScale'),
+  "Keep the ecosystem Plug icon, existing History icon, and compact Classic button.");
+const companionPages = read("Plugin.CompanionPages.cs");
+assert(companionPages.includes('SentinelModernSettingsRow.Draw("Companion."') &&
+  companionPages.includes('SentinelModernGlassCard.Begin("History.Metric."') &&
+  companionPages.includes('SentinelModernGlassCard.Begin("History.Activity"') &&
+  !/AddRect|AddCircle|new Vector4/.test(companionPages),
+  "Plugin and history content must consume canonical Core cards and controls.");
 assert(!ui.includes("SentinelModernConfigurationShell") && !ui.includes("ConsumerToggleActivation") &&
   !ui.includes("SentinelModernUi.PageHeading"), "Legacy shell/bridge or redundant page-top information returned.");
 const config = read("Configuration.cs");

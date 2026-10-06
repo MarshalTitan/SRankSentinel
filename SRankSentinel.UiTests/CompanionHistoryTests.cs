@@ -241,17 +241,81 @@ internal static partial class Program
                 journal.Reward("Coeurl", 813, 1, alert, true, now.AddSeconds(6), "Sack of Nuts");
             }
             var plugin = CreateConsumer(config);
+            var scrollToBottom = false;
+            var content = (Action)typeof(Plugin).GetMethod("DrawModernContent", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .CreateDelegate(typeof(Action), plugin);
+            SetField(plugin, "drawModernContent", (Action)(() =>
+            {
+                if (scrollToBottom) ImGui.SetScrollY(ImGui.GetScrollMaxY());
+                content();
+            }));
             foreach (var size in new[] { new Vector2(620, 520), new Vector2(1040, 860) })
             {
+                scrollToBottom = false;
                 LoadWindowPlacement(size * scale);
                 for (var frame = 0; frame < 4; frame++) ConsumerFrame(plugin);
                 CheckShellGeometry(Plugin.ConfigurationWindowId, scale);
                 var spawns = FindWindow(Plugin.ConfigurationWindowId, "##SpawnHistory");
+                Check(spawns.ContentSize.Y > spawns.Size.Y && spawns.ContentSize.X <= spawns.Size.X + 1,
+                    "Spawn history cannot scroll independently or overflows horizontally.");
+                scrollToBottom = true;
+                for (var frame = 0; frame < 4; frame++) ConsumerFrame(plugin);
                 var credits = FindWindow(Plugin.ConfigurationWindowId, "##CreditedHistory");
-                Check(spawns.ContentSize.Y > spawns.Size.Y && credits.ContentSize.Y > credits.Size.Y &&
-                    spawns.ContentSize.X <= spawns.Size.X + 1 && credits.ContentSize.X <= credits.Size.X + 1,
-                    "Populated history cannot scroll independently or overflows horizontally.");
+                Check(credits.ContentSize.Y > credits.Size.Y && credits.ContentSize.X <= credits.Size.X + 1,
+                    "Credit history is unreachable, cannot scroll independently, or overflows horizontally.");
             }
+        });
+    }
+
+    private static void TestCompanionCardLayout()
+    {
+        foreach (var scale in new[] { 1f, 1.5f, 2f })
+        foreach (var state in new[] { "missing", "disabled", "loaded" }) InContext(() =>
+        {
+            ImGui.GetIO().FontGlobalScale = scale;
+            var pi = DispatchProxy.Create<IDalamudPluginInterface, RecordingPluginInterface>();
+            if (state != "missing") ((RecordingPluginInterface)pi).InstalledPlugins = CompanionPlugins.All.Select(companion =>
+            {
+                var exposed = DispatchProxy.Create<IExposedPlugin, ExposedPluginFixture>();
+                var fixture = (ExposedPluginFixture)exposed;
+                fixture.InternalName = companion.InternalNames[0];
+                fixture.IsLoaded = state == "loaded";
+                fixture.HasConfigUi = true;
+                return exposed;
+            }).ToArray();
+            var config = new Configuration { WindowTheme = 1, WindowPage = (int)ConfigurationPage.Plugins };
+            var plugin = CreateConsumer(config);
+            SetField(plugin, "pi", pi);
+            LoadWindowPlacement(new Vector2(620, 520) * scale);
+            for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
+            foreach (var companion in CompanionPlugins.All)
+            {
+                var card = FindWindow(Plugin.ConfigurationWindowId, "Companion." + companion.Name + "_");
+                Check(card.DC.CursorMaxPos.X <= card.Pos.X + card.Size.X + 1f &&
+                    card.DC.CursorMaxPos.Y <= card.Pos.Y + card.Size.Y + 1f && !card.ScrollbarX && !card.ScrollbarY,
+                    $"Plugin card actions overflow at {scale}/{state}/{companion.Name}.");
+            }
+        });
+    }
+
+    private static void TestEmptyHistoryLayout()
+    {
+        foreach (var scale in new[] { 1f, 1.5f, 2f }) InContext(() =>
+        {
+            ImGui.GetIO().FontGlobalScale = scale;
+            var config = new Configuration { WindowTheme = 1, WindowPage = (int)ConfigurationPage.History };
+            var before = JsonSerializer.Serialize(config);
+            var plugin = CreateConsumer(config);
+            LoadWindowPlacement(new Vector2(620, 520) * scale);
+            for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
+            foreach (var label in new[] { "Reports", "Today", "Tagged", "Credits" })
+            {
+                var metric = FindWindow(Plugin.ConfigurationWindowId, "History.Metric." + label);
+                Check(metric.ContentSize.X <= metric.Size.X + 1f && !metric.ScrollbarY,
+                    "Empty-history metric card is clipped.");
+            }
+            Check(config.SpawnHistory.Count == 0 && config.CreditedHistory.Count == 0 && JsonSerializer.Serialize(config) == before,
+                "Rendering empty History fabricated records or changed configuration.");
         });
     }
 }
@@ -261,13 +325,15 @@ public class ExposedPluginFixture : DispatchProxy
     public string InternalName { get; set; } = string.Empty;
     public bool IsLoaded { get; set; }
     public bool IsOutdated { get; set; }
+    public bool HasConfigUi { get; set; }
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => targetMethod?.Name switch
     {
         "get_InternalName" => InternalName,
         "get_Name" => InternalName,
         "get_IsLoaded" => IsLoaded,
         "get_IsOutdated" => IsOutdated,
-        "get_IsBanned" or "get_IsOrphaned" or "get_IsDecommissioned" or "get_HasConfigUi" => false,
+        "get_HasConfigUi" => HasConfigUi,
+        "get_IsBanned" or "get_IsOrphaned" or "get_IsDecommissioned" => false,
         _ => throw new NotSupportedException(targetMethod?.Name),
     };
 }

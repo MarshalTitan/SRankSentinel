@@ -120,7 +120,7 @@ public sealed partial class Plugin
     [
         CreateModernNavItem(ConfigurationPage.Main.ToString(), "Main", FontAwesomeIcon.Crosshairs),
         CreateModernNavItem(ConfigurationPage.DistanceProfiles.ToString(), "Distance Profiles", FontAwesomeIcon.RulerHorizontal),
-        CreateModernNavItem(ConfigurationPage.Plugins.ToString(), "Plugins", FontAwesomeIcon.PuzzlePiece),
+        CreateModernNavItem(ConfigurationPage.Plugins.ToString(), "Plugins", FontAwesomeIcon.Plug),
         CreateModernNavItem(ConfigurationPage.History.ToString(), "History", FontAwesomeIcon.History),
     ];
 
@@ -162,7 +162,7 @@ public sealed partial class Plugin
     private void DrawModernActionDock()
     {
         if (SentinelModernActionDock.PrimaryButton("SRankSentinel.SwitchToClassic", "Switch to Classic",
-                default, ImGuiHelpers.GlobalScale))
+                new Vector2(170f, 34f) * ImGuiHelpers.GlobalScale, ImGuiHelpers.GlobalScale))
             SetWindowTheme((int)SentinelThemeKind.Classic);
     }
 

@@ -1,6 +1,6 @@
 # Sentinel Modern integration
 
-SRankSentinel 0.7.51.0 consumes the published Core and Core.UI packages from SentinelCore
+SRankSentinel 0.7.52.0 consumes the published Core and Core.UI packages from SentinelCore
 v0.3.1.0, commit `300703b360a58fb4b73bf7675d31fe8cab4614cd`. Sentinel Core owns the visual
 language shared with Sentinel HUD.
 
@@ -25,7 +25,7 @@ dotnet build SRankSentinel.csproj -c Release --no-restore
 ./.github/scripts/Prepare-UiTestFont.ps1 -Destination "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 $env:DALAMUD_ICON_FONT = "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 dotnet run --project SRankSentinel.UiTests -c Release
-./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.51.0
+./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.52.0
 ```
 
 The font preparation script verifies the official Dalamud Font Awesome asset from a pinned
@@ -48,7 +48,7 @@ switches, status pill, motion, and procedural ambience at intensity 0.9.
 The rail stays on the left, without secondary navigation. Main combines
 hunt status, expansion switches, and recovery controls; Distance Profiles retains its
 existing values and invariants. Both start directly with settings, without redundant page-top
-information. A separate bottom-left Core action-dock button switches to Classic through the same persisted theme setter.
+information. A compact 170 x 34 logical pixel bottom-left Core action-dock button switches to Classic through the same persisted theme setter.
 Classic retains its theme selector. The shared native Core switch supports mouse, keyboard,
 and controller activation, so the previous consumer activation bridge is removed.
 
@@ -71,6 +71,9 @@ Plugins (persisted page ID 5) lists vnavmesh, Lifestream, HuntAlerts, and Sonar 
 installed/loaded status and settings/installer actions. vnavmesh supplies automatic movement;
 HuntAlerts and Sonar supply the existing production alerts. Lifestream is a travel companion,
 not a new travel dependency: native World Visit and teleport remain unchanged.
+The ecosystem Plug icon matches Sentinel HUD. Compact canonical Core settings cards group
+each plugin's requirement, setup guidance, status, and small actions. Readiness requires
+vnavmesh and at least one alert source; optional companions are not presented as blockers.
 
 An explicit Enable action uses an isolated API-15 compatibility bridge because Dalamud's
 public exposed-plugin interface has no enable method. It follows the native installer's
@@ -84,6 +87,12 @@ with confirmed credit. Both are local, newest-first, persistent lists capped at 
 They begin with new supported current-DC reports received while Sentinel is enabled, including
 reports excluded from automation by expansion settings. Report time is not claimed as exact
 server spawn time. Old kill-suppression records are not backfilled as personal credit.
+History retains its original clock icon and both separate lists. Four Core summary cards
+show saved reports, reports today, tagged reports, and confirmed credits. A seven-day chart
+uses report receipt dates, followed by compact newest-first Core activity rows. Empty
+states and zero totals remain until genuine observations arrive; the presentation never
+invents data or changes the recorder. Both lists scroll independently, and the page itself
+scrolls when the summary and lists exceed the available height.
 
 Credit requires a handled tag in the final pull, positive kill evidence through the unchanged
 live-entity veto, and an original game system hunt-currency acquisition message in the matching
@@ -95,14 +104,16 @@ control hunting, and failures are caught without interrupting the original handl
 
 ## Validation and distribution
 
-The 29 state-machine tests exercise existing hunt policies. The 25 UI/migration/companion/history test groups
+The 29 state-machine tests exercise existing hunt policies. The 27 UI/migration/companion/history test groups
 use real native ImGui and configuration serialization in isolated contexts, without connecting
 to FFXIV or submitting hunt actions. They cover canonical switch input and disabled state,
 the separate bottom-left Classic button with all three input methods, window identity and persistence,
 custom minimize/close, header dragging, native resizing, reduced motion, and scope balancing.
 The actual consumer is rendered at 620 x 520, 800 x 640, and 1040 x 860 logical pixels at
 100%, 150%, and 200% UI scale. Native child geometry checks verify the left rail, header without
-scrollbars, and control bounds inside responsive rows. The runner reports managed exceptions
+scrollbars, and control bounds inside responsive rows. Checks also cover compact plugin
+actions, empty-history preservation, and reachability of both populated History lists.
+The runner reports managed exceptions
 and exits with failure instead of an unhandled .NET crash popup. In-game visual acceptance
 remains a separate user observation.
 
