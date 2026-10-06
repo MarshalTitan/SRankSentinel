@@ -55,12 +55,15 @@ internal static partial class Program
             Test("personal credit requires a tagged final pull, kill, and contextual reward in either order", TestHistoryCredit);
             Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
             Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);
-            Test("both populated histories render and balance scopes at multiple sizes/scales", TestPopulatedHistory);
+            Test("unified populated history and stacked activity stay within bounds at multiple sizes/scales", TestPopulatedHistory);
             Test("compact companion cards contain their status/actions at all UI scales", TestCompanionCardLayout);
             Test("empty History renders summary cards without fabricating records", TestEmptyHistoryLayout);
             Test("clearing each history is independent and preserves active credit evidence", TestHistoryClearing);
-            Test("both clear-history buttons persist only their own list and reject empty activation", TestHistoryClearInput);
-            Console.WriteLine($"{passed}/29 UI, migration, companion, and history tests passed.");
+            Test("unified clear-history button saves once with mouse, keyboard, and controller and rejects empty activation", TestHistoryClearInput);
+            Test("history records and displays only enabled expansions without deleting saved reports", TestHistoryExpansionFilters);
+            Test("daily activity splits reports into tagged and untagged without double counting", TestHistoryActivity);
+            Test("unified clearing retains active credit evidence and clears legacy credit records", TestUnifiedHistoryClearing);
+            Console.WriteLine($"{passed}/32 UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)

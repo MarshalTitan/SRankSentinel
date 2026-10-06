@@ -54,6 +54,19 @@ internal sealed class HuntHistoryJournal(Configuration config)
                 (config.CreditedHistory ?? []).OrderByDescending(x => x.CreditedAtUtc).Select(x => x with { }).ToArray());
     }
 
+    internal HuntHistoryEntry[] VisibleReports() => Snapshot().Spawns
+        .Where(entry => config.IsExpansionEnabled(HuntCatalog.GetExpansion(entry.TerritoryId))).ToArray();
+
+    internal bool ClearAll()
+    {
+        lock (sync)
+        {
+            // Retain active credit evidence through Clear(false), and save both lists once.
+            var changed = Clear(false);
+            return Clear(true) || changed;
+        }
+    }
+
     internal bool Spawn(HuntAlertSnapshot alert, string source)
     {
         lock (sync)
@@ -61,6 +74,7 @@ internal sealed class HuntHistoryJournal(Configuration config)
             config.SpawnHistory ??= [];
             var existing = Find(alert);
             if (existing is not null) return false;
+            if (!config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId))) return false;
             config.SpawnHistory.Add(new()
             {
                 AlertKey = alert.Key, CreatureName = alert.CreatureName, World = alert.World,
@@ -78,7 +92,8 @@ internal sealed class HuntHistoryJournal(Configuration config)
         lock (sync)
         {
             Spawn(alert, "Local observation");
-            var entry = Find(alert)!;
+            var entry = Find(alert);
+            if (entry is null) return false;
             taggedThisSession.Add(entry.Id);
             pendingRewards.Remove(entry.Id);
             entry.TaggedAtUtc = now;
@@ -91,7 +106,8 @@ internal sealed class HuntHistoryJournal(Configuration config)
         lock (sync)
         {
             Spawn(alert, "Local observation");
-            var entry = Find(alert)!;
+            var entry = Find(alert);
+            if (entry is null) return false;
             entry.KilledAtUtc ??= now;
             if (taggedFinalPull && taggedThisSession.Contains(entry.Id))
                 completedTaggedPulls.Add(entry.Id);

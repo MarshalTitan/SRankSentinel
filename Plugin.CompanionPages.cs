@@ -148,41 +148,38 @@ public sealed partial class Plugin
 
     private void DrawHistoryPage()
     {
-        var history = History.Snapshot();
+        var reports = History.VisibleReports();
         var today = DateTime.Now.Date;
         if (ImGui.BeginTable("##HistoryMetrics", 4, ImGuiTableFlags.SizingStretchSame))
         {
             try
             {
-                DrawHistoryMetric("Reports", history.Spawns.Length);
-                DrawHistoryMetric("Today", history.Spawns.Count(entry => entry.ReportedAtUtc.ToLocalTime().Date == today));
-                DrawHistoryMetric("Tagged", history.Spawns.Count(entry => entry.TaggedAtUtc is not null));
-                DrawHistoryMetric("Credits", history.Credits.Length);
+                DrawHistoryMetric("Reports", reports.Length);
+                DrawHistoryMetric("Today", reports.Count(entry => entry.ReportedAtUtc.ToLocalTime().Date == today));
+                DrawHistoryMetric("Tagged", reports.Count(entry => entry.TaggedAtUtc is not null));
+                DrawHistoryMetric("Credits", reports.Count(entry => entry.CreditedAtUtc is not null));
             }
             finally { ImGui.EndTable(); }
         }
         ImGui.Spacing();
-        DrawSpawnActivity(history.Spawns, today);
+        DrawSpawnActivity(reports, today);
         ImGui.Spacing();
-        DrawHistorySection("SPAWN REPORTS", history.Spawns, false);
-        DrawClearHistoryButton(false, history.Spawns.Length);
-        ImGui.Spacing();
-        DrawHistorySection("TAGGED + CREDIT CONFIRMED", history.Credits, true);
-        DrawClearHistoryButton(true, history.Credits.Length);
-        ImGui.TextWrapped("Totals cover saved history (up to 500 reports and 500 credits). No earlier hunts are backfilled.");
+        DrawHistorySection(reports);
+        var history = History.Snapshot();
+        DrawClearHistoryButton(history.Spawns.Length + history.Credits.Length);
+        ImGui.TextWrapped("Only enabled hunt expansions are shown and new reports recorded. Totals cover up to 500 saved reports; no earlier hunts are backfilled.");
     }
 
-    private void DrawClearHistoryButton(bool credited, int count)
+    private void DrawClearHistoryButton(int count)
     {
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + MathF.Max(0f,
             ImGui.GetContentRegionAvail().X - 180f * ImGuiHelpers.GlobalScale));
         ImGui.BeginDisabled(count == 0);
         try
         {
-            if (SentinelModernActionDock.DangerButton(credited ? "History.ClearCredits" : "History.ClearSpawns",
-                    credited ? "Clear credited history" : "Clear spawn history", new Vector2(180f, 30f) * ImGuiHelpers.GlobalScale,
+            if (SentinelModernActionDock.DangerButton("History.Clear", "Clear history", new Vector2(180f, 30f) * ImGuiHelpers.GlobalScale,
                     ImGuiHelpers.GlobalScale))
-                ObserveHistory(() => History.Clear(credited));
+                ObserveHistory(History.ClearAll);
         }
         finally { ImGui.EndDisabled(); }
     }
@@ -199,59 +196,53 @@ public sealed partial class Plugin
 
     private static void DrawSpawnActivity(IReadOnlyList<HuntHistoryEntry> entries, DateTime today)
     {
-        var days = new float[7];
-        foreach (var entry in entries)
-        {
-            var day = (entry.ReportedAtUtc.ToLocalTime().Date - today.AddDays(-6)).Days;
-            if (day is >= 0 and < 7) days[day]++;
-        }
+        var days = HuntHistoryActivity.BuildWeek(entries, today);
         using var card = SentinelModernGlassCard.Begin("History.Activity",
-            new SentinelModernGlassCardOptions { Size = new Vector2(0f, 144f) }, ImGuiHelpers.GlobalScale);
+            new SentinelModernGlassCardOptions { Size = new Vector2(0f, 176f) }, ImGuiHelpers.GlobalScale);
         if (!card.IsVisible) return;
-        ImGui.TextUnformatted("Spawn reports · last 7 days");
-        if (days.Sum() == 0)
+        ImGui.TextUnformatted("Spawned / tagged · last 7 days");
+        if (days.Sum(day => day.Reported) == 0)
         {
-            ImGui.TextWrapped("No reports in this period. New S-rank alerts will appear here.");
+            ImGui.TextWrapped("No reports in this period for your enabled hunt expansions.");
             return;
         }
-        ImGui.PlotHistogram("##SpawnActivity", days, 0, "", 0f,
-            MathF.Max(1f, days.Max()), new Vector2(0f, 72f) * ImGuiHelpers.GlobalScale);
-        SentinelModernActionDock.Status($"{today.AddDays(-6):MMM d} – {today:MMM d} · {days.Sum():N0} reports received");
+        HuntHistoryActivity.Draw(days, ImGuiHelpers.GlobalScale);
+        SentinelModernActionDock.Status($"{days.Sum(day => day.Reported):N0} reports · {days.Sum(day => day.Tagged):N0} tagged");
     }
 
-    private void DrawHistorySection(string title, IReadOnlyList<HuntHistoryEntry> entries, bool credited)
+    private void DrawHistorySection(IReadOnlyList<HuntHistoryEntry> entries)
     {
-        SentinelModernUi.SectionHeader($"{title} ({entries.Count})");
+        SentinelModernUi.SectionHeader($"SPAWN REPORTS ({entries.Count})");
         if (entries.Count == 0)
         {
-            SentinelModernSettingsRow.Draw(credited ? "History.EmptyCredits" : "History.EmptySpawns", "Waiting for your first " + (credited ? "credit" : "report"),
-                credited ? "A confirmed tag, kill, and game hunt reward are required."
-                    : "History starts with new alerts received while Sentinel is enabled.",
+            SentinelModernSettingsRow.Draw("History.EmptySpawns", "Waiting for your first report",
+                "New alerts for enabled hunt expansions appear here while Sentinel is enabled.",
                 () => SentinelModernStatusPill.Draw(new("EMPTY"), modernShell.Motion, ImGuiHelpers.GlobalScale),
                 96f, ImGuiHelpers.GlobalScale);
             return;
         }
-        // Bounded, independently scrolling sections keep both histories reachable without hundreds of outer rows.
+        // Keep the bounded activity list scrollable without hundreds of outer rows.
         var height = 180f * ImGuiHelpers.GlobalScale;
-        var visible = ImGui.BeginChild(credited ? "##CreditedHistory" : "##SpawnHistory", new(0, height));
+        var visible = ImGui.BeginChild("##SpawnHistory", new(0, height));
         try
         {
             if (!visible) return;
             foreach (var entry in entries)
             {
-                var timestamp = credited ? entry.CreditedAtUtc!.Value : entry.ReportedAtUtc;
+                var timestamp = entry.ReportedAtUtc;
                 var zone = data?.GetExcelSheet<TerritoryType>()?.GetRowOrDefault(entry.TerritoryId)?.PlaceName.Value.Name.ExtractText();
                 var outcome = entry.CreditedAtUtc is not null ? "CREDIT" : entry.TaggedAtUtc is not null ? "TAGGED"
                     : entry.KilledAtUtc is not null ? "KILLED" : "REPORTED";
-                var detail = credited ? $"Reward: {entry.Reward}" :
+                var detail =
                     $"{entry.Source} · {(entry.CreditedAtUtc is not null ? "Credit confirmed" : entry.KilledAtUtc is not null
                         ? entry.TaggedAtUtc is null ? "Killed; no tag recorded" : "Tagged; credit unconfirmed"
                         : entry.TaggedAtUtc is not null ? "Tag confirmed" : "Spawn reported")}";
-                SentinelModernSettingsRow.Draw((credited ? "History.Credit." : "History.Spawn.") + entry.Id,
+                if (entry.CreditedAtUtc is not null) detail += $" · Reward: {entry.Reward}";
+                SentinelModernSettingsRow.Draw("History.Spawn." + entry.Id,
                     $"{entry.Rank} · {entry.CreatureName}",
                     $"{timestamp.ToLocalTime():MMM d, HH:mm} · {entry.World} · {zone ?? $"Territory {entry.TerritoryId}"} · instance {entry.Instance}\n{detail}",
-                    () => SentinelModernStatusPill.Draw(new(credited ? "CONFIRMED" : outcome,
-                        credited || entry.CreditedAtUtc is not null ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Neutral),
+                    () => SentinelModernStatusPill.Draw(new(outcome,
+                        entry.CreditedAtUtc is not null ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Neutral),
                         modernShell.Motion, ImGuiHelpers.GlobalScale), 128f, ImGuiHelpers.GlobalScale);
                 ImGui.Spacing();
             }

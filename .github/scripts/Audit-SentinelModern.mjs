@@ -76,11 +76,24 @@ assert(companionPages.includes('SentinelModernGlassCard.Begin("Companion."') &&
   companionPages.includes('loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error') &&
   companionPages.includes('Accent = colour, AccentStrength = 0.65f') &&
   ui.includes('"Theme", FontAwesomeIcon.Palette') &&
-  companionPages.includes('"History.ClearCredits" : "History.ClearSpawns"') &&
+  companionPages.includes('"History.Clear", "Clear history"') && companionPages.includes('ObserveHistory(History.ClearAll)') &&
+  companionPages.includes('History.VisibleReports()') && !companionPages.includes('TAGGED + CREDIT CONFIRMED') &&
   companionPages.includes('SentinelModernGlassCard.Begin("History.Metric."') &&
   companionPages.includes('SentinelModernGlassCard.Begin("History.Activity"') &&
   !/AddRect|AddCircle|new Vector4/.test(companionPages),
   "Plugin and history content must consume canonical Core cards and controls.");
+const historyActivity = read("HuntHistoryActivity.cs");
+assert(historyActivity.includes('HuntHistoryActivityDay[] BuildWeek') &&
+  historyActivity.includes('SentinelModernPalette.Accent') && historyActivity.includes('SentinelModernPalette.Teal') &&
+  historyActivity.includes('day.Untagged') && historyActivity.includes('day.Tagged') &&
+  !/new Vector4|AddCircle|GlassCard\(|PushStyle/.test(historyActivity),
+  "The consumer data chart may draw segments only, using shared Core colours and enclosing cards.");
+const journal = read("HuntHistoryJournal.cs");
+const historyObserver = read("Plugin.History.cs");
+assert(journal.includes('config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId))') &&
+  journal.includes('config.IsExpansionEnabled(HuntCatalog.GetExpansion(entry.TerritoryId))') &&
+  historyObserver.includes('!config.Enabled || !config.IsExpansionEnabled(HuntCatalog.GetExpansion(territory))'),
+  "History recording and display must follow the existing expansion filters.");
 assert(!ui.includes("SentinelModernConfigurationShell") && !ui.includes("ConsumerToggleActivation") &&
   !ui.includes("SentinelModernUi.PageHeading"), "Legacy shell/bridge or redundant page-top information returned.");
 const config = read("Configuration.cs");

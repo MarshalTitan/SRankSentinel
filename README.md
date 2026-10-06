@@ -97,7 +97,7 @@ the same controls into Main and Distance Profiles, with Plugins and History alon
 settings without a separate page heading or introductory text. Main combines hunt status,
 expansion switches, and recovery actions. Modern uses one compact custom header, a slim
 Font Awesome icon rail, and responsive settings rows on a continuous shared surface.
-The separate bottom-left button offers **Switch to Classic**; Classic retains its native title bar and
+The Theme page offers a compact bottom-left **Use Classic Theme** button; Classic retains its native title bar and
 the **Window theme** selector for switching back to Modern.
 The existing window identity, saved position, close/collapse controls, hunt configuration, and
 keyboard/controller activation are retained.
@@ -105,9 +105,13 @@ keyboard/controller activation are retained.
 **Plugins** shows vnavmesh, Lifestream, HuntAlerts, and Sonar, their live status and setup needs,
 and settings/installer actions. Installed, disabled plugins can be enabled explicitly when
 Dalamud's default collection allows it. Collection-managed or unavailable plugins use the
-installer. **History** keeps the latest 500 spawn reports and 500 tagged hunts with positive
-kill and game reward evidence. It starts with new alerts; previous suppression records do
-not imply personal credit. History never changes hunt decisions.
+installer. **History** keeps the latest 500 spawn reports for enabled hunt expansions, with
+tag and confirmed-credit status on each row and a daily stacked untagged/tagged chart.
+Credit requires a confirmed final-pull tag, positive kill evidence, and a matching in-game
+Seals or Nuts reward. Disabled expansion records are hidden without deleting earlier saved
+data. One Clear History button clears reports and the retained legacy credit backup.
+It starts with new alerts; previous suppression records do not imply personal credit.
+History never changes hunt decisions.
 
 The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.3.1 assemblies.
 No separately installed SentinelCore plugin is required. See

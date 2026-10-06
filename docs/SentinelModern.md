@@ -1,6 +1,6 @@
 # Sentinel Modern integration
 
-SRankSentinel 0.7.53.0 consumes the published Core and Core.UI packages from SentinelCore
+SRankSentinel 0.7.54.0 consumes the published Core and Core.UI packages from SentinelCore
 v0.3.1.0, commit `300703b360a58fb4b73bf7675d31fe8cab4614cd`. Sentinel Core owns the visual
 language shared with Sentinel HUD.
 
@@ -25,7 +25,7 @@ dotnet build SRankSentinel.csproj -c Release --no-restore
 ./.github/scripts/Prepare-UiTestFont.ps1 -Destination "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 $env:DALAMUD_ICON_FONT = "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 dotnet run --project SRankSentinel.UiTests -c Release
-./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.53.0
+./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.54.0
 ```
 
 The font preparation script verifies the official Dalamud Font Awesome asset from a pinned
@@ -87,22 +87,28 @@ collections, safe mode, outdated/unavailable plugins, and busy/error states fail
 offer the installer. It never installs, disables, or unloads plugins, changes collection rules,
 or enables a plugin automatically. CI verifies the bridge's real Dalamud method signatures.
 
-History (persisted page ID 6) contains independently scrolling spawn reports and tagged hunts
-with confirmed credit. Both are local, newest-first, persistent lists capped at 500 records.
-They begin with new supported current-DC reports received while Sentinel is enabled, including
-reports excluded from automation by expansion settings. Report time is not claimed as exact
-server spawn time. Old kill-suppression records are not backfilled as personal credit.
-History retains its original clock icon and both separate lists. Four Core summary cards
-show saved reports, reports today, tagged reports, and confirmed credits. A seven-day chart
-uses report receipt dates, followed by compact newest-first Core activity rows. Empty
-states and zero totals remain until genuine observations arrive; the presentation never
-invents data or changes the recorder. Both lists scroll independently, and the page itself
-scrolls when the summary and lists exceed the available height.
-Each section has its own Clear button. It clears and saves only that section; empty
-buttons are disabled. Clearing reports preserves bounded, session-local active tag/receipt
-evidence so a hunt awaiting its kill or reward can still earn credit without restoring
-the cleared reports. Clearing credit history does not duplicate an already confirmed reward.
-No hunt-state, queue, travel, or combat decision consumes either clear operation.
+History (persisted page ID 6) has one newest-first, independently scrolling spawn list capped
+at 500 reports. Each row includes its tag, kill, and confirmed credit status and reward when
+available; the duplicate credited-hunts section has been removed. New supported current-DC
+reports are recorded only while Sentinel is enabled and the territory's existing expansion
+filter is enabled, including SS reports. Turning a filter off hides earlier saved reports
+without deleting them; turning it back on reveals those records and permits new ones.
+Active tag/kill/reward evidence remains valid across a filter change. Report time is not
+claimed as exact server spawn time, and old suppression records are not backfilled as credit.
+
+Four Core summary cards count visible reports, reports today, tagged reports, and reports
+with confirmed credit. The seven-day data chart stacks untagged (Core accent blue) and tagged
+(Core teal) segments on each local report date, with daily hover tooltips. A tag
+is a subset of that day's reports, including a tag occurring later, so the total bar never
+double counts it. The consumer draws only chart data segments; Core owns the card and colours.
+Empty states remain truthful. The report list and outer page scroll where needed.
+
+One Clear History button clears the saved reports and legacy credited-history backup and
+saves once; it is disabled when both are empty. Existing credited-history configuration is
+retained until explicitly cleared. Clearing preserves bounded, session-local active tag/receipt
+evidence so a hunt awaiting its kill or reward can still earn credit without restoring cleared
+reports or duplicating an already confirmed reward. No hunt-state, queue, travel, or combat
+decision consumes history or its clear operation.
 
 Credit requires a handled tag in the final pull, positive kill evidence through the unchanged
 live-entity veto, and an original game system hunt-currency acquisition message in the matching
@@ -114,7 +120,7 @@ control hunting, and failures are caught without interrupting the original handl
 
 ## Validation and distribution
 
-The 29 state-machine tests exercise existing hunt policies. The 29 UI/migration/companion/history test groups
+The 29 state-machine tests exercise existing hunt policies. The 32 UI/migration/companion/history test groups
 use real native ImGui and configuration serialization in isolated contexts, without connecting
 to FFXIV or submitting hunt actions. They cover canonical switch input and disabled state,
 the Theme-only bottom-left Classic button with all three input methods, window identity and persistence,
@@ -122,8 +128,9 @@ custom minimize/close, header dragging, native resizing, reduced motion, and sco
 The actual consumer is rendered at 620 x 520, 800 x 640, and 1040 x 860 logical pixels at
 100%, 150%, and 200% UI scale. Native child geometry checks verify the left rail, header without
 scrollbars, and control bounds inside responsive rows. Checks also cover compact plugin
-actions, empty-history preservation, reachability of both populated History lists, and
-independent history clearing, persistence, disabled input, and active-credit preservation.
+actions, empty-history preservation, populated list/chart bounds, expansion-filter recording
+and non-destructive display, SS and active-credit filtering, local daily tagged/untagged
+aggregation, unified clearing, persistence, disabled input, and active-credit preservation.
 The runner reports managed exceptions
 and exits with failure instead of an unhandled .NET crash popup. In-game visual acceptance
 remains a separate user observation.
