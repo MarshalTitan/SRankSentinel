@@ -1,6 +1,6 @@
 # Sentinel Modern integration
 
-SRankSentinel 0.7.50.0 consumes the published Core and Core.UI packages from SentinelCore
+SRankSentinel 0.7.51.0 consumes the published Core and Core.UI packages from SentinelCore
 v0.3.1.0, commit `300703b360a58fb4b73bf7675d31fe8cab4614cd`. Sentinel Core owns the visual
 language shared with Sentinel HUD.
 
@@ -25,7 +25,7 @@ dotnet build SRankSentinel.csproj -c Release --no-restore
 ./.github/scripts/Prepare-UiTestFont.ps1 -Destination "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 $env:DALAMUD_ICON_FONT = "$env:TEMP/Sentinel-FontAwesomeFreeSolid.otf"
 dotnet run --project SRankSentinel.UiTests -c Release
-./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.50.0
+./.github/scripts/Validate-Package.ps1 -PackagePath bin/Release/SRankSentinel/latest.zip -ExpectedVersion 0.7.51.0
 ```
 
 The font preparation script verifies the official Dalamud Font Awesome asset from a pinned
@@ -45,10 +45,10 @@ keeps its compact one-page controls and native window title bar. Modern uses
 56 logical pixel header, Font Awesome icon placement, left rail, cards, settings rows,
 switches, status pill, motion, and procedural ambience at intensity 0.9.
 
-The rail stays on the left, without secondary navigation for these two pages. Main combines
+The rail stays on the left, without secondary navigation. Main combines
 hunt status, expansion switches, and recovery controls; Distance Profiles retains its
 existing values and invariants. Both start directly with settings, without redundant page-top
-information. One rail action switches to Classic through the same persisted theme setter.
+information. A separate bottom-left Core action-dock button switches to Classic through the same persisted theme setter.
 Classic retains its theme selector. The shared native Core switch supports mouse, keyboard,
 and controller activation, so the previous consumer activation bridge is removed.
 
@@ -62,15 +62,43 @@ motion setting. Every style, font, and Begin/End scope remains balanced across t
 Configuration schema 16 and its existing Classic migration remain unchanged. Main keeps ID 0
 and Distance Profiles ID 2; retired Hunting, Recovery Controls, and Appearance page selections
 normalize to Main. Theme selection, hunt configuration, credentials, and queues persist.
-The migration audit compares hunt/service source hashes against the existing reviewed baseline;
-this release changes presentation only.
+The migration audit compares hunt/service source hashes against the existing reviewed baseline,
+after removing exactly five allowlisted history-observer insertions. No hunt decisions change.
+
+## Companion plugins and history
+
+Plugins (persisted page ID 5) lists vnavmesh, Lifestream, HuntAlerts, and Sonar with their live
+installed/loaded status and settings/installer actions. vnavmesh supplies automatic movement;
+HuntAlerts and Sonar supply the existing production alerts. Lifestream is a travel companion,
+not a new travel dependency: native World Visit and teleport remain unchanged.
+
+An explicit Enable action uses an isolated API-15 compatibility bridge because Dalamud's
+public exposed-plugin interface has no enable method. It follows the native installer's
+default-profile persistence and single-plugin loading order. Unsupported builds, custom
+collections, safe mode, outdated/unavailable plugins, and busy/error states fail closed and
+offer the installer. It never installs, disables, or unloads plugins, changes collection rules,
+or enables a plugin automatically. CI verifies the bridge's real Dalamud method signatures.
+
+History (persisted page ID 6) contains independently scrolling spawn reports and tagged hunts
+with confirmed credit. Both are local, newest-first, persistent lists capped at 500 records.
+They begin with new supported current-DC reports received while Sentinel is enabled, including
+reports excluded from automation by expansion settings. Report time is not claimed as exact
+server spawn time. Old kill-suppression records are not backfilled as personal credit.
+
+Credit requires a handled tag in the final pull, positive kill evidence through the unchanged
+live-entity veto, and an original game system hunt-currency acquisition message in the matching
+world, territory, and instance within 20 seconds. Reward-before-kill ordering is supported;
+ambiguous, expired, reset-without-retag, and restored unconfirmed sessions do not earn credit.
+Names come from current client data with English fallbacks; unrecognized reward messages or
+capped rewards remain credit-unconfirmed rather than inventing success. These observers do not
+control hunting, and failures are caught without interrupting the original handler.
 
 ## Validation and distribution
 
-The 29 state-machine tests exercise existing hunt policies. The 17 UI/migration test groups
+The 29 state-machine tests exercise existing hunt policies. The 25 UI/migration/companion/history test groups
 use real native ImGui and configuration serialization in isolated contexts, without connecting
 to FFXIV or submitting hunt actions. They cover canonical switch input and disabled state,
-the sidebar Classic action with all three input methods, window identity and persistence,
+the separate bottom-left Classic button with all three input methods, window identity and persistence,
 custom minimize/close, header dragging, native resizing, reduced motion, and scope balancing.
 The actual consumer is rendered at 620 x 520, 800 x 640, and 1040 x 860 logical pixels at
 100%, 150%, and 200% UI scale. Native child geometry checks verify the left rail, header without

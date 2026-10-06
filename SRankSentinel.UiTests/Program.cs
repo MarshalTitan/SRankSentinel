@@ -13,7 +13,7 @@ using Dalamud.Interface.Utility;
 using SentinelCore.UI;
 using SRankSentinel;
 
-internal static class Program
+internal static partial class Program
 {
     private static int passed;
     private static SentinelModernMotion testMotion = null!;
@@ -41,14 +41,22 @@ internal static class Program
             Test("disabled canonical switch rejects pointer and keyboard activation", TestDisabledToggle);
             Test("shared shell/cards balance style and render at multiple UI scales", TestModernShell);
             Test("Classic and every Modern page render at the minimum size", TestConsumerPages);
-            Test("sidebar Classic action saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
+            Test("separate bottom-left Classic button saves on mouse, keyboard, and controller activation", TestSidebarThemeSwitch);
             Test("saved position and larger size survive Classic/Modern switching", TestWindowPlacement);
             Test("undersized saved Modern window expands without moving", TestMinimumWindow);
             Test("Classic native controls and Modern custom minimize/close work", TestWindowControls);
             Test("responsive settings remain within the right pane at multiple sizes/scales", TestResponsiveConsumer);
             Test("Modern header dragging and native resizing preserve placement", TestDragAndResize);
             Test("Dalamud reduced motion disables decorative animation", TestReducedMotion);
-            Console.WriteLine($"{passed}/17 UI and migration tests passed.");
+            Test("mouse-click navigation labels stop following the pointer; navigation focus retains labels", TestNavigationTooltips);
+            Test("Plugins list includes all companions and handles disabled, missing, and loaded states", TestCompanionPlugins);
+            Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
+            Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
+            Test("personal credit requires a tagged final pull, kill, and contextual reward in either order", TestHistoryCredit);
+            Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
+            Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);
+            Test("both populated histories render and balance scopes at multiple sizes/scales", TestPopulatedHistory);
+            Console.WriteLine($"{passed}/25 UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -413,23 +421,23 @@ internal static class Program
                 Vector2 minimum = default, maximum = default;
                 var focus = false;
                 var focused = false;
-                var items = (SentinelModernNavItem[])typeof(Plugin).GetMethod("CreateModernNavigation",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(plugin, null)!;
-                var classic = items.Single(item => item.Id == "Classic");
-                items[2] = classic with { DrawIcon = context =>
+                var classic = (Action)typeof(Plugin).GetMethod("DrawModernActionDock",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.CreateDelegate(typeof(Action), plugin);
+                SetField(plugin, "drawModernActionDock", (Action)(() =>
                 {
-                    minimum = context.Minimum;
-                    maximum = context.Maximum;
+                    if (focus) ImGui.SetKeyboardFocusHere();
+                    classic();
+                    minimum = ImGui.GetItemRectMin();
+                    maximum = ImGui.GetItemRectMax();
                     focused = ImGui.IsItemFocused();
-                    if (focus) ImGui.SetKeyboardFocusHere(-1);
-                    classic.DrawIcon!(context);
-                } };
-                SetField(plugin, "modernNavigation", items);
+                }));
                 for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
+                var dock = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Dock");
                 var navigation = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Rail");
-                Check(minimum.X >= navigation.Pos.X && maximum.X <= navigation.Pos.X + navigation.Size.X &&
-                    minimum.Y >= navigation.Pos.Y && maximum.Y <= navigation.Pos.Y + navigation.Size.Y,
-                    "The Classic button is clipped or outside the left sidebar at 620x520.");
+                Check(minimum.X >= dock.Pos.X && maximum.X <= dock.Pos.X + dock.Size.X &&
+                    minimum.Y >= navigation.Pos.Y + navigation.Size.Y && maximum.Y <= dock.Pos.Y + dock.Size.Y &&
+                    minimum.X < dock.Pos.X + dock.Size.X / 2,
+                    "The Classic button is clipped or is not separate at the bottom left at 620x520.");
                 var io = ImGui.GetIO();
                 if (key == ImGuiKey.None)
                 {
@@ -638,7 +646,8 @@ internal static class Program
                             "Core placed the control over its label.");
                         Check(!row.ScrollbarX && !row.ScrollbarY, "A settings row acquired an internal scrollbar.");
                     }
-                    Check(rows == (page == ConfigurationPage.Main ? 1 : 8), $"Missing responsive rows on {page}: {rows}.");
+                    Check(rows == (page == ConfigurationPage.Main ? 1 : page == ConfigurationPage.DistanceProfiles ? 8 : 0),
+                        $"Missing responsive rows on {page}: {rows}.");
                     Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Scale/size changes modified configuration.");
                 }
             });
