@@ -107,7 +107,7 @@ internal static partial class Program
                     "Clear history escaped the pane or stopped being bottom-anchored.");
                 Check(!page.ScrollbarY && !page.ScrollbarX, "The outer page can scroll the Clear button away.");
                 Check(list.Size.Y >= 120f * scale - 1f && list.ContentSize.X <= list.Size.X + 1f,
-                    "The report viewport lost its usable minimum or overflows horizontally.");
+                    $"Report viewport at {width}x{height}/{scale}: size {list.Size}, content {list.ContentSize}, body scroll {body.Scroll}/{body.ScrollMax}.");
                 if (height == 1080f)
                     Check(list.Size.Y > previousHeight + 200f * scale && list.Size.Y > 300f * scale,
                         "Taller windows still cap the report list at about two rows.");
