@@ -1,6 +1,6 @@
 # Controlled shared-navigation proving build
 
-This PR-only build is 0.7.55.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
+This PR-only build is 0.7.56.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
 The catalog and accepted comparison build remain SRankSentinel 0.7.54.0.
 Default behavior is the accepted legacy travel implementation. No configuration schema, UI layout,
 facing policy, S/SS policy, tagging, death/reset evidence or catalog entry is changed.
@@ -43,3 +43,11 @@ Reload always starts with proving off. Old handles/task completions cannot stop 
 
 Only after these pass should this PR be considered for catalog release or wider adoption.
 SS exceptional recovery and PvP acceptance remain separate gates.
+
+## Evidence correction in 0.7.56.0
+
+The user enabled proving at 00:57, disabled it at 01:03 and exported an empty Entries array, despite reporting successful gameplay. Off does not clear Core diagnostics. The original export did not capture activation or legacy hunt states, so it could not explain a run that never started a shared operation. An already-visible mark or SS staging can legitimately bypass ordinary shared approach; the supplied evidence does not establish which path occurred.
+
+This diagnostics-only revision adds bounded ProvingSession observations, instance/version identity, shared-operation count, activation/disable/halt and domain-state transitions. Core Entries remain genuine movement transitions; session events are never counted as movement proof. Off/halt automatically save an export, and zero operations produce an explicit warning. File-write errors do not change movement. No routing, parking, facing, tagging or configuration policy changed.
+
+On the next ordinary report, watch for **SHARED operation started** after enabling. If it never appears, send the export anyway; its hunt states will identify the path taken. Export before unloading, since observations remain instance-local. The candidate remains PR-only; no public release/catalog change.

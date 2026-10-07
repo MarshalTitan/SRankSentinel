@@ -20,6 +20,7 @@ public sealed partial class Plugin
     private ProvingNavigationAdapter? provingAdapter;
     private NavigationDiagnostics? provingDiagnostics;
     private long? provingMeshWaitStarted;
+    private NavigationProvingJournal? provingJournal;
 
     private void RegisterNavigationProving()
     {
@@ -55,6 +56,7 @@ public sealed partial class Plugin
                         chat.Print("[SRank navigation test] Enable only while idle with no active hunt or movement.");
                         break;
                     }
+                    provingJournal ??= new NavigationProvingJournal();
                     provingDiagnostics ??= new NavigationDiagnostics(
                         SentinelIdentity.FromAssembly("SRankSentinel", "S Rank Sentinel", "MTitan", typeof(Plugin).Assembly));
                     provingAdapter ??= new ProvingNavigationAdapter(this);
@@ -63,6 +65,7 @@ public sealed partial class Plugin
                         new NavigationOptions { ReadinessSettle = TimeSpan.Zero });
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = true;
+                    provingJournal.Record(ProvingEvent.Enabled, state);
                     chat.Print("[SRank navigation test] ON for this session. Ordinary long approach only; SS and hunt policy remain legacy.");
                     break;
                 case "off":
@@ -83,22 +86,41 @@ public sealed partial class Plugin
                         ResetLongApproachFlightStartup();
                         SetState(SentinelState.PrepareApproachDestination, "Shared navigation test disabled; legacy approach restored");
                     }
-                    chat.Print("[SRank navigation test] OFF. Legacy travel restored.");
+                    provingJournal?.Record(ProvingEvent.Disabled, state);
+                    chat.Print($"[SRank navigation test] OFF. Legacy travel restored. Shared operations this instance: {provingJournal?.OperationsStarted ?? 0}.");
+                    ExportNavigationProving();
                     break;
                 case "export":
                     if (provingDiagnostics is null) { chat.Print("[SRank navigation test] No diagnostics yet."); break; }
-                    var path = System.IO.Path.Combine(pi.ConfigDirectory.FullName, "navigation-proving.json");
-                    System.IO.Directory.CreateDirectory(pi.ConfigDirectory.FullName);
-                    System.IO.File.WriteAllText(path, provingDiagnostics.ExportJson());
-                    chat.Print("[SRank navigation test] Sanitized export: " + path);
+                    ExportNavigationProving();
                     break;
                 default:
-                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}. Commands: on, off, status, export.");
+                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}. Commands: on, off, status, export.");
                     break;
             }
         }
         if (!config.Enabled || (state != SentinelState.PrepareApproachDestination && state != SentinelState.ApproachAlertCoordinates))
             CancelNavigationProvingOperation();
+    }
+
+    private void ExportNavigationProving()
+    {
+        if (provingDiagnostics is null || provingJournal is null) return;
+        try
+        {
+            provingJournal.Record(ProvingEvent.Exported, state, provingOperation?.Id);
+            var path = System.IO.Path.Combine(pi.ConfigDirectory.FullName, "navigation-proving.json");
+            System.IO.Directory.CreateDirectory(pi.ConfigDirectory.FullName);
+            System.IO.File.WriteAllText(path, provingJournal.Export(provingDiagnostics, navigationProvingEnabled, state));
+            chat.Print("[SRank navigation test] Sanitized export: " + path);
+            if (provingJournal.OperationsStarted == 0)
+                chat.Print("[SRank navigation test] No shared operation started in this plugin instance. The export now includes activation and hunt states; this is not shared-path acceptance.");
+        }
+        catch
+        {
+            // An evidence-write failure must never alter movement or hunt recovery.
+            chat.Print("[SRank navigation test] Could not save diagnostic export. Movement state was not changed.");
+        }
     }
 
     private void CancelNavigationProvingOperation()
@@ -112,6 +134,8 @@ public sealed partial class Plugin
 
     private void NavigationProvingStateHandoff(SentinelState next)
     {
+        if (navigationProvingEnabled)
+            provingJournal?.Record(ProvingEvent.DomainState, next, provingOperation?.Id);
         if (next != SentinelState.PrepareApproachDestination && next != SentinelState.ApproachAlertCoordinates)
             CancelNavigationProvingOperation();
     }
@@ -163,6 +187,8 @@ public sealed partial class Plugin
             provingAdapter!.ResetMountRequests();
             provingOperation = provingNavigation.Begin(new NavigationRequest(approachPoint.Value,
                 TravelMode.PreferFlight, RequireMount: true, ArrivalRadius: scanRange, HorizontalArrival: true));
+            provingJournal?.Record(ProvingEvent.OperationStarted, state, provingOperation.Id);
+            chat.Print($"[SRank navigation test] SHARED operation started: {provingOperation.Id}");
         }
         provingNavigation.Tick();
         status = $"Shared navigation test: {provingOperation.State}, operation {provingOperation.Id}, retries {provingOperation.Retries}";
@@ -185,6 +211,7 @@ public sealed partial class Plugin
 
     private void HaltNavigationProving(string reason)
     {
+        provingJournal?.Record(ProvingEvent.Halted, state, provingOperation?.Id);
         CancelNavigationProvingOperation();
         // Do not auto-retry forever, fall through to legacy, or discard the hunt.
         config.Enabled = false;
@@ -193,6 +220,7 @@ public sealed partial class Plugin
         provingNavigation = null;
         status = reason;
         chat.Print("[SRank navigation test] " + reason + " Sentinel is disabled; re-enable explicitly after rollback.");
+        ExportNavigationProving();
     }
 
     private sealed class ProvingNavigationAdapter : INavigationAdapter

@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Text.Json;
 using Dalamud.Plugin.Services;
 using SentinelCore.Diagnostics;
 using SentinelCore.Identity;
@@ -37,7 +38,38 @@ internal static class NavigationProvingTests
         Check(!typeof(Configuration).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
             .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
             "proving opt-in must not persist in user config");
+        TestEvidenceJournal(diagnostics);
         Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, session-only configuration");
+    }
+    private enum TestState { Idle, PrepareApproachDestination, LocateMark }
+    private static void TestEvidenceJournal(NavigationDiagnostics diagnostics)
+    {
+        var journal = new NavigationProvingJournal();
+        journal.Record(ProvingEvent.Enabled, TestState.Idle);
+        journal.Record(ProvingEvent.DomainState, TestState.PrepareApproachDestination);
+        journal.Record(ProvingEvent.DomainState, TestState.LocateMark);
+        journal.Record(ProvingEvent.Disabled, TestState.LocateMark);
+        var empty = new NavigationDiagnostics(new("SRankSentinel", "private-display", "private-author", new(0, 7, 56, 0)));
+        using var bypass = JsonDocument.Parse(journal.Export(empty, false, TestState.LocateMark));
+        var session = bypass.RootElement.GetProperty("ProvingSession");
+        Check(!session.GetProperty("SharedOperationObserved").GetBoolean() &&
+            session.GetProperty("Observations").GetArrayLength() == 4 &&
+            bypass.RootElement.GetProperty("Entries").GetArrayLength() == 0,
+            "enabled legacy-only run must be explained without fabricated Core movement");
+        journal.Record(ProvingEvent.OperationStarted, TestState.PrepareApproachDestination, Guid.NewGuid());
+        journal.Record(ProvingEvent.Disabled, TestState.LocateMark);
+        using var observed = JsonDocument.Parse(journal.Export(diagnostics, false, TestState.LocateMark));
+        Check(observed.RootElement.GetProperty("ProvingSession").GetProperty("OperationsStarted").GetInt32() == 1 &&
+            observed.RootElement.GetProperty("Entries").GetArrayLength() > 0, "off lost real movement evidence");
+        var replacement = new NavigationProvingJournal();
+        Check(replacement.InstanceId != journal.InstanceId && replacement.OperationsStarted == 0,
+            "reload provenance must distinguish fresh instances");
+        for (var i = 0; i < 300; i++) journal.Record(ProvingEvent.DomainState, TestState.Idle);
+        using var bounded = JsonDocument.Parse(journal.Export(empty, false, TestState.Idle));
+        Check(bounded.RootElement.GetProperty("ProvingSession").GetProperty("Observations").GetArrayLength() == 256,
+            "journal unbounded");
+        Check(!journal.Export(empty, false, TestState.Idle).Contains("private-"), "private identity leaked");
+        Console.WriteLine("PASS proving evidence: legacy-only session, off retention, instance identity, bounded sanitized export");
     }
     private static void Handoff(Plugin plugin, string state)
     {
