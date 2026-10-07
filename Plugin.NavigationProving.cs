@@ -88,7 +88,6 @@ public sealed partial class Plugin
                     break;
                 case "off":
                     var parkingRollback = provingParkingActive || provingParkingRollbackPending;
-                    provingParkingRollbackPending = false;
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = false;
                     provingProbeActive = false;
@@ -103,6 +102,7 @@ public sealed partial class Plugin
                         chat.Print("[SRank navigation test] Rollback held: follower stop cannot be confirmed. Stop vnavmesh, then retry off.");
                         break;
                     }
+                    provingParkingRollbackPending = false;
                     provingNavigation?.Dispose();
                     provingNavigation = null;
                     if (state == SentinelState.ApproachAlertCoordinates)
@@ -575,13 +575,19 @@ public sealed partial class Plugin
     }
 
 
-    private void CancelNavigationProvingParkingForPolicy()
+    private bool CancelNavigationProvingParkingForPolicy()
     {
-        if (!provingParkingActive) return;
+        if (!provingParkingActive) return true;
         provingJournal?.Record(ProvingEvent.ParkingPolicyReplan, state, provingOperation?.Id);
-        provingParkingRollbackPending = false;
         // Must precede any legacy replacement query/follower, including unprotected fallback.
         CancelNavigationProvingOperation();
+        if (provingAdapter is null || !provingAdapter.FollowerStopped())
+        {
+            HaltNavigationProving("Parking policy handoff could not confirm follower stop. Stop vnavmesh, then retry off.");
+            return false;
+        }
+        provingParkingRollbackPending = false;
+        return true;
     }
 
     private void ResetNavigationProvingCoordinator(bool parking)

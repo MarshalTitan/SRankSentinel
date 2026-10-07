@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Text.Json;
 using Dalamud.Plugin.Services;
+using Dalamud.Plugin.Ipc;
 using SentinelCore.Diagnostics;
 using SentinelCore.Identity;
 using SentinelCore.Navigation;
@@ -180,6 +181,7 @@ internal static class NavigationProvingTests
             Handoff(plugin, next);
             Check(fresh.Result == NavigationResult.Cancelled, "domain priority did not revoke parking: " + next);
         }
+        Set(plugin, "provingAdapter", FakeParkingAdapter(backend));
         var replanned = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
         Set(plugin, "provingOperation", replanned); Set(plugin, "provingParkingActive", true);
         Set(plugin, "provingParkingRollbackPending", true);
@@ -197,7 +199,44 @@ internal static class NavigationProvingTests
         Check(exhausted.Result == NavigationResult.Failure &&
             diagnostics.Snapshot()[^1].Reason == NavigationReason.BudgetExhausted,
             "stopped approved follower retried outside approval");
+        var failedBackend = new Backend();
+        using var failedCore = new NavigationCoordinator(failedBackend, diagnostics,
+            options with { RetryDelay = TimeSpan.Zero });
+        var failedOperation = failedCore.Begin(new(new(100, 0, 0))); failedCore.Tick(); failedCore.Tick();
+        failedBackend.ThrowStop = true;
+        var halted = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Set(halted, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
+        Set(halted, "provingOperation", failedOperation); Set(halted, "provingParkingActive", true);
+        Set(halted, "provingParkingRollbackPending", true);
+        Set(halted, "provingAdapter", FakeParkingAdapter(failedBackend));
+        var configuration = new Configuration { Enabled = true };
+        Set(halted, "config", configuration); Set(halted, "chat", DispatchProxy.Create<IChatGui, ChatProxy>());
+        Check(!(bool)Invoke(halted, "CancelNavigationProvingParkingForPolicy")! &&
+            !configuration.Enabled && failedBackend.FollowerRunning &&
+            (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(halted)!, "unconfirmed stop permitted replacement or lost explicit rollback");
         Console.WriteLine("PASS approved parking: scope, immutable one-shot route, zone/cancel rejection, no requery, domain handoff, stale owner");
+    }
+
+
+    private static object FakeParkingAdapter(Backend backend)
+    {
+        var type = typeof(Plugin).GetNestedType("ProvingNavigationAdapter", BindingFlags.NonPublic)!;
+        var adapter = RuntimeHelpers.GetUninitializedObject(type);
+        var running = DispatchProxy.Create<ICallGateSubscriber<bool>, RunningProxy>();
+        ((RunningProxy)(object)running).Running = () => backend.FollowerRunning;
+        type.GetField("running", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(adapter, running);
+        return adapter;
+    }
+    public class RunningProxy : DispatchProxy
+    {
+        public Func<bool> Running = () => false;
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+            => method?.Name == "InvokeFunc" ? Running() : throw new NotSupportedException(method?.Name);
+    }
+    public class ChatProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args) => null;
     }
 
     private static void TestProbeProjectionQuery()
@@ -293,6 +332,8 @@ internal static class NavigationProvingTests
         public int Stops, Queries;
         public Func<IReadOnlyList<Vector3>>? PathLoader;
         public Vector3 Position;
+        public bool ThrowStop;
+        public bool FollowerRunning => following;
         public NavigationSnapshot Read() => new(new(1, 1), new ZoneStamp(1, 1), false, true, -1,
             Position, true, true, FlightAvailability.Available, following, following ? [new(100, 0, 0)] : []);
         public Task<IReadOnlyList<Vector3>> FindPath(Vector3 from, Vector3 to, bool fly, CancellationToken cancellation)
@@ -301,7 +342,7 @@ internal static class NavigationProvingTests
             return Task.FromResult(PathLoader?.Invoke() ?? (IReadOnlyList<Vector3>)[from, to]);
         }
         public void Follow(IReadOnlyList<Vector3> path, bool fly) => following = true;
-        public void Stop() { following = false; Stops++; }
+        public void Stop() { if (ThrowStop) throw new InvalidOperationException("Stop unconfirmed"); following = false; Stops++; }
         public void RequestMount() => throw new InvalidOperationException();
         public void RequestTakeoff() => throw new InvalidOperationException();
         public Vector3? ProjectLanding(Vector3 candidate, float searchRadius) => candidate;
