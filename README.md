@@ -84,11 +84,11 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 2. Wait for the normal **Build** workflow to pass.
 3. The version bump automatically starts the **Publish Beta** workflow.
 4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
-5. The workflow uses `DALAMUD_CATALOG_TOKEN` to notify Sentinel's central generator with `plugin-released`, then verifies the generated entry and public install path. The central generator owns `MarshalTitan/Sentinel/repo.json` and can also reconcile from the child manifest; SRankSentinel never writes the central manifest directly.
+5. After public ZIP validation, the pinned shared distribution action promotes the owning entry in this repository's root `repo.json`, optionally notifies the central generator, and always verifies the exact public child/central entry. This also applies to SentinelHunts without changing SRankSentinel's entry. No child writes the central manifest.
 
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
 
-For automatic central-catalog updates, use a fine-grained GitHub token limited to `MarshalTitan/Sentinel` with **Contents: Read and write** permission. Save it only as the `DALAMUD_CATALOG_TOKEN` Actions repository secret in `MarshalTitan/SRankSentinel`; never commit or log it.
+`DALAMUD_CATALOG_TOKEN` is optional for faster `plugin-released` notification. Without it, the hourly central reconciliation is used and verification waits up to 90 minutes. The normal child `GITHUB_TOKEN` handles only this repository's release and manifest. See [release infrastructure](docs/RELEASE_INFRASTRUCTURE.md).
 # Configuration appearance
 
 Existing users remain on **Classic** through an explicit version-16 configuration migration.

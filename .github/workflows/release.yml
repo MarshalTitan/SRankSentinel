@@ -17,13 +17,12 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
 
     steps:
-      - name: Check out main
+      - name: Check out release source
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Audit supported Faloop POI coverage
         run: node .github/scripts/Audit-FaloopCatalog.mjs FaloopCatalog.cs HuntCatalog.cs FaloopClient.cs
@@ -101,106 +100,52 @@ jobs:
         shell: pwsh
         run: Copy-Item -LiteralPath 'bin/Release/SRankSentinel/latest.zip' -Destination "$env:RUNNER_TEMP\SRankSentinel.zip" -Force
 
-      - name: Create or repair GitHub prerelease
+      - name: Publish immutable GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $asset = "$env:RUNNER_TEMP\SRankSentinel.zip"
-          gh release view $tag --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset --clobber --repo '${{ github.repository }}'
+          $releaseJson = gh release view $tag --repo '${{ github.repository }}' --json targetCommitish,isDraft,isPrerelease,assets 2>$null
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($exists) {
+            $release = $releaseJson | ConvertFrom-Json
+            if ($release.targetCommitish -ne '${{ github.sha }}' -or $release.isDraft -or !$release.isPrerelease) {
+              throw "Release $tag belongs to another source/state. Increment the version; assets are immutable."
+            }
+            if (@($release.assets | Where-Object name -eq 'SRankSentinel.zip').Count -ne 1) {
+              throw "Release $tag must contain exactly one SRankSentinel.zip; do not replace published assets."
+            }
+            Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset `
-              --repo '${{ github.repository }}' `
-              --target '${{ github.sha }}' `
-              --title "S Rank Sentinel ${{ steps.version.outputs.value }} beta" `
-              --notes "Installable Dalamud beta package for S Rank Sentinel ${{ steps.version.outputs.value }}." `
-              --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "Built and tested by GitHub Actions. See source changes and supervised acceptance evidence for gameplay status." --prerelease
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 
-      - name: Update custom-repository metadata
-        shell: pwsh
-        run: >-
-          ./.github/scripts/Update-RepoManifest.ps1
-          -ManifestPath 'repo.json'
-          -Version '${{ steps.version.outputs.value }}'
-
-      - name: Commit repository metadata
+      - name: Validate public release ZIP before child promotion
         shell: pwsh
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- repo.json
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Publish beta v${{ steps.version.outputs.value }} [skip ci]"
-            git push origin HEAD:main
-          }
-
-      - name: Simulate a fresh public install
-        shell: pwsh
-        run: >-
-          ./.github/scripts/Test-PublicDistribution.ps1
-          -RepositoryManifestUrl 'https://raw.githubusercontent.com/MarshalTitan/SRankSentinel/main/repo.json'
-          -ExpectedVersion '${{ steps.version.outputs.value }}'
-
-      - name: Trigger central Sentinel catalog reconciliation
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-            throw 'DALAMUD_CATALOG_TOKEN is required to publish S Rank Sentinel to the central Sentinel catalog.'
-          }
-
-          $payload = @{
-            event_type = 'plugin-released'
-            client_payload = @{
-              source_repository = '${{ github.repository }}'
-              source_commit = '${{ github.sha }}'
-              internal_name = 'SRankSentinel'
-              version = '${{ steps.version.outputs.value }}'
-              tag = '${{ steps.version.outputs.tag }}'
-            }
-          } | ConvertTo-Json -Depth 5
-
-          $payload | gh api `
-            --method POST `
-            'repos/MarshalTitan/Sentinel/dispatches' `
-            --input -
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to dispatch the central Sentinel catalog reconciliation.'
-          }
-
-      - name: Verify the public central catalog
-        shell: pwsh
-        run: |
-          $catalogUrl = 'https://raw.githubusercontent.com/MarshalTitan/Sentinel/main/repo.json'
-          $expectedVersion = '${{ steps.version.outputs.value }}'
-          $expectedAsset = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/SRankSentinel.zip"
-
-          for ($attempt = 1; $attempt -le 60; $attempt++) {
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/SRankSentinel.zip"
+          $download = Join-Path $env:RUNNER_TEMP 'public-SRankSentinel.zip'
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
             try {
-              $catalog = Invoke-RestMethod -Uri "$catalogUrl`?release=${{ github.run_id }}-$attempt"
-              $entry = @($catalog | Where-Object InternalName -eq 'SRankSentinel')
-              if ($entry.Count -eq 1 `
-                  -and $entry[0].AssemblyVersion -eq $expectedVersion `
-                  -and $entry[0].TestingAssemblyVersion -eq $expectedVersion `
-                  -and $entry[0].DownloadLinkInstall -eq $expectedAsset `
-                  -and $entry[0].DownloadLinkUpdate -eq $expectedAsset `
-                  -and $entry[0].DownloadLinkTesting -eq $expectedAsset) {
-                Write-Host "Verified S Rank Sentinel $expectedVersion in the public central catalog."
-                exit 0
-              }
+              Invoke-WebRequest -Uri "$url`?release=${{ github.run_id }}-$attempt" -OutFile $download -TimeoutSec 60
+              ./.github/scripts/Validate-Package.ps1 -PackagePath $download -ExpectedVersion '${{ steps.version.outputs.value }}'
+              break
             }
             catch {
-              Write-Host "Central catalog verification attempt $attempt failed: $($_.Exception.Message)"
+              if ($attempt -eq 12) { throw }
+              Start-Sleep -Seconds 5
             }
-
-            Start-Sleep -Seconds 5
           }
 
-          throw "The public central Sentinel catalog did not reach S Rank Sentinel $expectedVersion within five minutes."
+      - name: Publish authoritative child manifest and verify central catalog
+        uses: MarshalTitan/Sentinel/.github/actions/distribute@4bbc5ce50837b37c8cfaee5c39a075c4f68858ed
+        with:
+          internal-name: SRankSentinel
+          version: ${{ steps.version.outputs.value }}
+          tag: ${{ steps.version.outputs.tag }}
+          notification-token: ${{ secrets.DALAMUD_CATALOG_TOKEN }}
