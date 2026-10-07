@@ -58,7 +58,9 @@ internal static partial class Program
             // A hovered input can consume wheel events near the bottom. Explicitly request
             // the native end position to verify the final controls remain in the scroll range.
             ImGui.NewFrame();
-            ImGui.SetNextWindowScroll(new Vector2(-1f, window.ScrollMax.Y));
+            ImGui.Begin(Plugin.ConfigurationWindowId);
+            ImGui.SetScrollY(window.ScrollMax.Y);
+            ImGui.End();
             DrawConsumer(plugin);
             ImGui.Render();
             ConsumerFrame(plugin);
