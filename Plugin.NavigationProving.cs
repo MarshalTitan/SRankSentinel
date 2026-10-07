@@ -567,6 +567,14 @@ public sealed partial class Plugin
     }
 
 
+    private void CancelNavigationProvingParkingForPolicy()
+    {
+        if (!provingParkingActive) return;
+        provingJournal?.Record(ProvingEvent.ParkingPolicyReplan, state, provingOperation?.Id);
+        // Must precede any legacy replacement query/follower, including unprotected fallback.
+        CancelNavigationProvingOperation();
+    }
+
     private void ResetNavigationProvingCoordinator(bool parking)
     {
         CancelNavigationProvingOperation();

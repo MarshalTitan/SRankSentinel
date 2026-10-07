@@ -109,6 +109,7 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
     // Remove each with an exact occurrence count before the unchanged hunt hash comparison.
     for (const [hook, count] of [
       ["            if (TickNavigationProvingParking(now))\n                return;\n\n", 1],
+      ["        CancelNavigationProvingParkingForPolicy();\n", 1],
       ["        RegisterNavigationProving();\n", 1],
       ["        DisposeNavigationProving();\n", 1],
       ["            TickNavigationProvingControl();\n", 1],

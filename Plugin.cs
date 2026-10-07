@@ -6041,6 +6041,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private bool TryStartNextParkingRoute(bool fly, IBattleChara target)
     {
+        CancelNavigationProvingParkingForPolicy();
         while (parkingCandidates.Count > 0)
         {
             var candidate = parkingCandidates.Dequeue();

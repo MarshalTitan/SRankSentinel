@@ -177,6 +177,15 @@ internal static class NavigationProvingTests
             Handoff(plugin, next);
             Check(fresh.Result == NavigationResult.Cancelled, "domain priority did not revoke parking: " + next);
         }
+        var replanned = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        Set(plugin, "provingOperation", replanned); Set(plugin, "provingParkingActive", true);
+        Invoke(plugin, "CancelNavigationProvingParkingForPolicy");
+        Check(replanned.Result == NavigationResult.Cancelled, "policy replan did not revoke old lease first");
+        var policySuccessor = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        stops = backend.Stops;
+        replanned.Dispose(); Handoff(plugin, "MoveToSafePoint");
+        Check(policySuccessor.Result == NavigationResult.Pending && backend.Stops == stops,
+            "retired policy replan interrupted replacement route");
         var exhausted = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
         backend.Stop(); core.Tick();
         Check(exhausted.Result == NavigationResult.Failure &&
