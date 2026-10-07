@@ -4367,6 +4367,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             }
 
+            if (TickNavigationProvingParking(now))
+                return;
+
             if (Vector3.Distance(player, safePoint.Value) <= ParkingLandingVerticalTolerance)
             {
                 status = $"Aligning over the selected safe point before landing: {horizontalDistance:0.0}y horizontal, " +
@@ -6279,7 +6282,10 @@ public sealed partial class Plugin : IDalamudPlugin
         List<Vector3> path,
         DateTime now)
     {
-        if (!vnav.MovePathSafe(path, parkingPathUsesFlight))
+        var sharedParking = TryStartNavigationProvingParking(target, candidate, path);
+        if (sharedParking is false)
+            return;
+        if (sharedParking is null && !vnav.MovePathSafe(path, parkingPathUsesFlight))
         {
             RejectParkingCandidate(target, now,
                 "Parking candidate rejected: validated route became unavailable before movement");

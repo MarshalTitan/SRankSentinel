@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Threading;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Ipc;
 using SentinelCore.Diagnostics;
 using SentinelCore.Identity;
@@ -26,6 +27,7 @@ public sealed partial class Plugin
     private string provingProbeWorld = string.Empty;
     private int provingProbeInstance;
     private bool provingProbeActive;
+    private bool provingParkingActive;
     private bool provingProbeCancelOnLanding;
     private bool provingProbeLandingResumeAllowed;
     private bool provingProbeSetPending;
@@ -81,9 +83,10 @@ public sealed partial class Plugin
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = true;
                     provingJournal.Record(ProvingEvent.Enabled, state);
-                    chat.Print("[SRank navigation test] ON for this session. Hunt proving remains opt-in; deterministic probe commands are available while Sentinel is disabled and idle.");
+                    chat.Print("[SRank navigation test] ON for this session. Ordinary approach and approved pre-tag protected parking use Core; SS, retreat, landing and hunt policy remain legacy. Isolated probe commands require Sentinel disabled and idle.");
                     break;
                 case "off":
+                    var parkingRollback = provingParkingActive;
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = false;
                     provingProbeActive = false;
@@ -105,6 +108,13 @@ public sealed partial class Plugin
                         ResetApproachRouteTracking(clearProjectionCandidates: false);
                         ResetLongApproachFlightStartup();
                         SetState(SentinelState.PrepareApproachDestination, "Shared navigation test disabled; legacy approach restored");
+                    }
+                    if (parkingRollback && state == SentinelState.MoveToSafePoint)
+                    {
+                        safePoint = null;
+                        selectedParkingPath = null;
+                        nextActionUtc = DateTime.UtcNow;
+                        SetState(SentinelState.LocateMark, "Shared parking test disabled; legacy protected parking will resample");
                     }
                     provingJournal?.Record(ProvingEvent.Disabled, state);
                     chat.Print($"[SRank navigation test] OFF. Legacy travel restored. Shared operations this instance: {provingJournal?.OperationsStarted ?? 0}.");
@@ -147,7 +157,7 @@ public sealed partial class Plugin
                     ExportNavigationProving();
                     break;
                 default:
-                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeSetupPending={provingProbeSetPending}; probeActive={provingProbeActive}. Commands: on, off, status, export, probe set/run/resume/cancel/clear; probe run cancel-landing.");
+                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeSetupPending={provingProbeSetPending}; probeActive={provingProbeActive}; sharedParking={provingParkingActive}. Commands: on, off, status, export, probe set/run/resume/cancel/clear; probe run cancel-landing.");
                     break;
             }
         }
@@ -156,7 +166,7 @@ public sealed partial class Plugin
         if (provingProbeActive)
             TickNavigationProvingProbe();
         if (!provingProbeActive &&
-            (!config.Enabled || (state != SentinelState.PrepareApproachDestination && state != SentinelState.ApproachAlertCoordinates)))
+            (!config.Enabled || (!provingParkingActive && state != SentinelState.PrepareApproachDestination && state != SentinelState.ApproachAlertCoordinates)))
             CancelNavigationProvingOperation();
     }
 
@@ -326,8 +336,9 @@ public sealed partial class Plugin
             return;
         }
         provingProbeLandingResumeAllowed = false;
+        ResetNavigationProvingCoordinator(parking: false);
         provingAdapter.ResetMountRequests();
-        provingOperation = provingNavigation.Begin(CreateNavigationProvingProbeRequest(provingProbeDestination.Value));
+        provingOperation = provingNavigation!.Begin(CreateNavigationProvingProbeRequest(provingProbeDestination.Value));
         provingProbeActive = true;
         provingJournal?.Record(ProvingEvent.OperationStarted, state, provingOperation.Id);
         provingJournal?.Record(ProvingEvent.ProbeStarted, state, provingOperation.Id);
@@ -440,11 +451,21 @@ public sealed partial class Plugin
 
     private void CancelNavigationProvingOperation()
     {
-        if (provingOperation is null) return;
+        if (provingOperation is null)
+        {
+            provingParkingActive = false;
+            if (provingAdapter is not null) provingAdapter.ApprovedParkingRoute = null;
+            return;
+        }
         var operation = provingOperation;
         provingOperation = null;
-        // UI stop/skip actions can reach reset/state hooks; ownership changes still run on the framework thread.
-        framework.RunOnFrameworkThread(operation.Dispose).GetAwaiter().GetResult();
+        // Revoke the old lease before clearing route data or permitting a replacement.
+        framework.RunOnFrameworkThread(() =>
+        {
+            operation.Dispose();
+            provingParkingActive = false;
+            if (provingAdapter is not null) provingAdapter.ApprovedParkingRoute = null;
+        }).GetAwaiter().GetResult();
     }
 
     private void NavigationProvingStateHandoff(SentinelState next)
@@ -458,6 +479,17 @@ public sealed partial class Plugin
                 provingProbeActive = false;
                 CancelNavigationProvingOperation();
             }
+            return;
+        }
+        if (provingParkingActive)
+        {
+            if (next == SentinelState.Landing)
+            {
+                provingJournal?.Record(ProvingEvent.ParkingLandingHandoff, next, provingOperation?.Id);
+                chat?.Print($"[SRank navigation test] SHARED protected parking handoff: {provingOperation?.Id}; state={provingOperation?.State}. Existing safe landing/tag/kill/return resumes.");
+            }
+            if (next != SentinelState.MoveToSafePoint)
+                CancelNavigationProvingOperation();
             return;
         }
         if (next != SentinelState.PrepareApproachDestination && next != SentinelState.ApproachAlertCoordinates)
@@ -508,6 +540,7 @@ public sealed partial class Plugin
                         + ApproachScanTolerance;
         if (provingOperation is null)
         {
+            ResetNavigationProvingCoordinator(parking: false);
             provingAdapter!.ResetMountRequests();
             provingOperation = provingNavigation.Begin(new NavigationRequest(approachPoint.Value,
                 TravelMode.PreferFlight, RequireMount: true, ArrivalRadius: scanRange, HorizontalArrival: true));
@@ -531,6 +564,102 @@ public sealed partial class Plugin
             SetState(SentinelState.ApproachAlertCoordinates, status);
         }
         return true;
+    }
+
+
+    private void ResetNavigationProvingCoordinator(bool parking)
+    {
+        CancelNavigationProvingOperation();
+        provingNavigation?.Dispose();
+        provingNavigation = new NavigationCoordinator(provingAdapter!, provingDiagnostics!,
+            CreateNavigationProvingOptions(parking));
+    }
+
+    private static NavigationOptions CreateNavigationProvingOptions(bool parking)
+        => parking
+            ? new NavigationOptions { ReadinessSettle = TimeSpan.Zero, MaxRetries = 0,
+                StallTimeout = TimeSpan.FromSeconds(ParkingRouteStallSeconds),
+                OperationTimeout = TimeSpan.FromSeconds(ParkingRecoveryBudgetSeconds) }
+            : new NavigationOptions { ReadinessSettle = TimeSpan.Zero };
+
+    private static bool NavigationProvingParkingEligible(bool enabled, bool hasCurrent, bool isSs,
+        bool fly, bool protectedRoute, bool randomizedRetreat, bool postTagRetreat, bool tagged)
+        => enabled && hasCurrent && !isSs && fly && protectedRoute &&
+            !randomizedRetreat && !postTagRetreat && !tagged;
+
+    // null: existing route owner; true: Core owns the approved path; false: proving halted.
+    // The caller still applies its unchanged candidate/progress/preference bookkeeping.
+    private bool? TryStartNavigationProvingParking(IBattleChara target, ParkingCandidate candidate,
+        List<Vector3> path)
+    {
+        if (!NavigationProvingParkingEligible(navigationProvingEnabled, current is not null,
+                current is not null && HuntCatalog.IsAnySsName(current.CreatureName),
+                parkingPathUsesFlight, candidate.RequiresProtectedRoute, candidate.IsRandomizedRetreat,
+                postTagRetreatActive, pullCycleTagged))
+            return null;
+        try
+        {
+            ResetNavigationProvingCoordinator(parking: true);
+            var snapshot = provingAdapter!.Read();
+            provingAdapter.ApprovedParkingRoute = new NavigationProvingParkingRoute(path,
+                candidate.Position, snapshot.Zone, target.GameObjectId);
+            provingParkingActive = true;
+            provingAdapter.ResetMountRequests();
+            // Domain alignment/clearance checks hand off before this deliberately narrow radius.
+            // Core never chooses a parking point, queries an unprotected replacement or lands here.
+            provingOperation = provingNavigation!.Begin(new NavigationRequest(candidate.Position,
+                TravelMode.RequireFlight, RequireMount: true, ArrivalRadius: 0.1f));
+            provingJournal?.Record(ProvingEvent.OperationStarted, state, provingOperation.Id);
+            chat.Print($"[SRank navigation test] SHARED protected parking started: {provingOperation.Id}. Existing safe landing/tag/kill/return policy remains active.");
+            return true;
+        }
+        catch
+        {
+            HaltNavigationProving("Approved shared parking could not start. Export diagnostics and roll back.");
+            return false;
+        }
+    }
+
+    private bool TickNavigationProvingParking(DateTime now)
+    {
+        if (!provingParkingActive) return false;
+        if (provingOperation is null || provingNavigation is null ||
+            provingAdapter?.ApprovedParkingRoute is null || safePoint is null)
+        {
+            HaltNavigationProving("Shared parking lost its operation or approved destination.");
+            return true;
+        }
+        try
+        {
+            // The caller has already run tag/death/aggro priority, mark checks, recovery budget
+            // and its exact landing-alignment/revalidation handoff. Core alone ticks movement.
+            provingNavigation.Tick();
+            status = $"Shared protected parking: {provingOperation.State}, operation {provingOperation.Id}, retries {provingOperation.Retries}";
+            if (provingOperation.Result != NavigationResult.Pending)
+                HaltNavigationProving("Shared parking ended before the existing safe landing handoff. No automatic legacy fallback.");
+        }
+        catch { HaltNavigationProving("Shared protected parking adapter failed. Export diagnostics and roll back."); }
+        return true;
+    }
+
+    private bool NavigationProvingParkingPathStillSafe(NavigationProvingParkingRoute route,
+        IReadOnlyList<Vector3> path)
+    {
+        if (!provingParkingActive || !route.Matches(path) ||
+            selectedParkingCandidate is not { RequiresProtectedRoute: true } candidate ||
+            candidate.IsRandomizedRetreat || current is null || pullCycleTagged || postTagRetreatActive ||
+            HuntCatalog.IsAnySsName(current.CreatureName) || candidate.Position != route.Destination)
+            return false;
+        var target = FindMark();
+        if (target is null || target.GameObjectId != route.EntityId || target.IsDead || target.CurrentHp == 0)
+            return false;
+        var radius = ProtectedCenterRadius(target);
+        var start = PlayerPosition();
+        var escape = HorizontalDistance(start, target.Position) < radius;
+        return ProtectedSegmentIsSafe(start, candidate.Position, target.Position, radius, escape) &&
+            PathStaysOutsideProtectedRadius(start, path.ToList(), target.Position, radius, escape) &&
+            ClearanceAtPoint(candidate.Position, target) >= ActiveDistanceProfile.WaitingDistance - 0.5f &&
+            ClearanceAtPoint(candidate.Position, target) <= MaximumParkingClearance + 0.5f;
     }
 
     private void HaltNavigationProving(string reason)
@@ -567,6 +696,7 @@ public sealed partial class Plugin
         private bool wasLoading;
         private int mountRequests;
         public void ResetMountRequests() => mountRequests = 0;
+        public NavigationProvingParkingRoute? ApprovedParkingRoute { get; set; }
 
         public ProvingNavigationAdapter(Plugin plugin)
         {
@@ -651,13 +781,21 @@ public sealed partial class Plugin
 
         public Task<IReadOnlyList<Vector3>> FindPath(Vector3 from, Vector3 to, bool fly, CancellationToken cancellation)
         {
+            if (ApprovedParkingRoute is { } approved)
+                return Task.FromResult(approved.Claim(zone, fly, cancellation));
             // Invoke IPC synchronously on the framework thread. Async continuation returns data only.
             var task = pathfind.InvokeFunc(from, to, fly, cancellation);
             return CopyResult(task);
         }
         private static async Task<IReadOnlyList<Vector3>> CopyResult(Task<List<Vector3>> task)
             => (await task.ConfigureAwait(false)).ToArray();
-        public void Follow(IReadOnlyList<Vector3> path, bool fly) => follow.InvokeAction(path.ToList(), fly);
+        public void Follow(IReadOnlyList<Vector3> path, bool fly)
+        {
+            if (ApprovedParkingRoute is { } approved &&
+                (!fly || !plugin.NavigationProvingParkingPathStillSafe(approved, path)))
+                throw new InvalidOperationException("Approved protected parking route is no longer safe.");
+            follow.InvokeAction(path.ToList(), fly);
+        }
         public void Stop()
         {
             stop.InvokeAction();

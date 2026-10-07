@@ -108,6 +108,7 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
     // Phase 3 permits only these exact opt-in hooks over the accepted legacy algorithm.
     // Remove each with an exact occurrence count before the unchanged hunt hash comparison.
     for (const [hook, count] of [
+      ["            if (TickNavigationProvingParking(now))\n                return;\n\n", 1],
       ["        RegisterNavigationProving();\n", 1],
       ["        DisposeNavigationProving();\n", 1],
       ["            TickNavigationProvingControl();\n", 1],
@@ -119,6 +120,9 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
       assert(source.split(hook).length === count + 1, `Missing/duplicated proving hook: ${hook.trim()}`);
       source = source.split(hook).join("");
     }
+    const parkingMoveHook = "        var sharedParking = TryStartNavigationProvingParking(target, candidate, path);\n        if (sharedParking is false)\n            return;\n        if (sharedParking is null && !vnav.MovePathSafe(path, parkingPathUsesFlight))";
+    assert(source.split(parkingMoveHook).length === 2, "Missing/duplicated approved parking owner hook");
+    source = source.replace(parkingMoveHook, "        if (!vnav.MovePathSafe(path, parkingPathUsesFlight))");
     // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
     for (const hook of [
       "        chat.ChatMessage += OnHistoryReward;\n",
