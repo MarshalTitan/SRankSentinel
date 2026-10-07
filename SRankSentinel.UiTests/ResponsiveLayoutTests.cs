@@ -49,12 +49,15 @@ internal static partial class Program
             var io = ImGui.GetIO();
             io.AddMousePosEvent(window.Pos.X + window.Size.X / 2f, window.Pos.Y + 70f * scale);
             ConsumerFrame(plugin);
-            io.AddMouseWheelEvent(0f, -100f);
-            ConsumerFrame(plugin);
+            for (var frame = 0; frame < 12 && window.Scroll.Y < window.ScrollMax.Y - 1f; frame++)
+            {
+                io.AddMouseWheelEvent(0f, -10f);
+                ConsumerFrame(plugin);
+            }
             ConsumerFrame(plugin);
             Check(window.Scroll.Y > 0 && window.Scroll.Y >= window.ScrollMax.Y - 1f &&
                 (window.Flags & (ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoNav)) == 0,
-                "Classic's final controls or native title/navigation became unreachable.");
+                $"Classic final controls unreachable at {scale}: scroll {window.Scroll.Y}/{window.ScrollMax.Y}, flags {window.Flags}.");
             Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Classic layout changed hunt settings.");
         });
     }
