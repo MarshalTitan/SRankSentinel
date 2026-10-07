@@ -111,7 +111,7 @@ public sealed partial class Plugin
                         ResetLongApproachFlightStartup();
                         SetState(SentinelState.PrepareApproachDestination, "Shared navigation test disabled; legacy approach restored");
                     }
-                    if (parkingRollback && state == SentinelState.MoveToSafePoint)
+                    if (parkingRollback && (state == SentinelState.MoveToSafePoint || state == SentinelState.Landing))
                     {
                         safePoint = null;
                         selectedParkingPath = null;
@@ -167,6 +167,8 @@ public sealed partial class Plugin
         {
             provingJournal?.Record(ProvingEvent.ParkingDeathYield, state, provingOperation?.Id);
             CancelNavigationProvingOperation();
+            if (provingAdapter is null || !provingAdapter.FollowerStopped())
+                HaltNavigationProving("Parking death handoff could not confirm follower stop. Stop vnavmesh, then retry off.");
         }
         if (provingProbeSetPending)
             TickNavigationProvingProbeDestination();
@@ -490,14 +492,21 @@ public sealed partial class Plugin
         }
         if (provingParkingActive)
         {
+            if (next == SentinelState.MoveToSafePoint) return;
+            var operationId = provingOperation?.Id;
+            var operationState = provingOperation?.State;
+            CancelNavigationProvingOperation();
+            if (provingAdapter is null || !provingAdapter.FollowerStopped())
+            {
+                HaltNavigationProving("Parking domain handoff could not confirm follower stop. Stop vnavmesh, then retry off.");
+                return;
+            }
             if (next == SentinelState.Landing)
             {
                 provingParkingRollbackPending = false;
-                provingJournal?.Record(ProvingEvent.ParkingLandingHandoff, next, provingOperation?.Id);
-                chat?.Print($"[SRank navigation test] SHARED protected parking handoff: {provingOperation?.Id}; state={provingOperation?.State}. Existing safe landing/tag/kill/return resumes.");
+                provingJournal?.Record(ProvingEvent.ParkingLandingHandoff, next, operationId);
+                chat?.Print($"[SRank navigation test] SHARED protected parking handoff: {operationId}; state={operationState}. Existing safe landing/tag/kill/return resumes.");
             }
-            if (next != SentinelState.MoveToSafePoint)
-                CancelNavigationProvingOperation();
             return;
         }
         if (next != SentinelState.PrepareApproachDestination && next != SentinelState.ApproachAlertCoordinates)

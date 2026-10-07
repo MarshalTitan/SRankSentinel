@@ -157,6 +157,7 @@ internal static class NavigationProvingTests
         Set(plugin, "provingOperation", operation); Set(plugin, "provingParkingActive", true);
         Set(plugin, "provingParkingRollbackPending", true);
         var journal = new NavigationProvingJournal(); Set(plugin, "provingJournal", journal);
+        Set(plugin, "provingAdapter", FakeParkingAdapter(backend));
         Handoff(plugin, "MoveToSafePoint");
         Check(operation.Result == NavigationResult.Pending && backend.Stops == 0, "parking ownership was lost");
         Handoff(plugin, "Landing");
@@ -215,6 +216,21 @@ internal static class NavigationProvingTests
             !configuration.Enabled && failedBackend.FollowerRunning &&
             (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(halted)!, "unconfirmed stop permitted replacement or lost explicit rollback");
+        failedBackend.ThrowStop = false; failedBackend.Stop();
+        var blockedLanding = failedCore.Begin(new(new(100, 0, 0))); failedCore.Tick(); failedCore.Tick();
+        failedBackend.ThrowStop = true; configuration.Enabled = true;
+        var blockedJournal = new NavigationProvingJournal();
+        Set(halted, "provingJournal", blockedJournal);
+        Set(halted, "provingOperation", blockedLanding); Set(halted, "provingParkingActive", true);
+        Set(halted, "provingParkingRollbackPending", true);
+        Handoff(halted, "Landing");
+        Check(!configuration.Enabled && failedBackend.FollowerRunning &&
+            (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(halted)!, "unconfirmed landing handoff permitted native movement or lost rollback");
+        using var blockedEvidence = JsonDocument.Parse(blockedJournal.Export(diagnostics, false, TestState.Idle));
+        Check(!blockedEvidence.RootElement.GetProperty("ProvingSession").GetProperty("Observations")
+            .EnumerateArray().Any(x => x.GetProperty("Event").GetString() == "ParkingLandingHandoff"),
+            "unconfirmed stop emitted successful landing handoff evidence");
         Console.WriteLine("PASS approved parking: scope, immutable one-shot route, zone/cancel rejection, no requery, domain handoff, stale owner");
     }
 
