@@ -1,6 +1,6 @@
 # Controlled shared-navigation proving build
 
-This PR-only build is 0.7.56.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
+This PR-only build is 0.7.57.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
 The catalog and accepted comparison build remain SRankSentinel 0.7.54.0.
 Default behavior is the accepted legacy travel implementation. No configuration schema, UI layout,
 facing policy, S/SS policy, tagging, death/reset evidence or catalog entry is changed.
@@ -24,30 +24,47 @@ rollback remains held and Sentinel stays disabled. On failure the hunt is retain
 is disabled, and automatic fallback is forbidden. Export first, then off and explicitly re-enable.
 Reload always starts with proving off. Old handles/task completions cannot stop the successor.
 
-## Supervised test
+## Deterministic supervised probe
 
-1. Use the CI artifact from this PR as a separate Dalamud dev-plugin build; disable the installed
-   SRank copy first so only one SRank instance runs. Do not install it into the custom repository.
-   Keep 0.7.54.0 available for rollback. Keep other movement automations stopped.
-2. While idle, /sranknavtest on; use an ordinary S-rank report requiring a zone change and flight.
-   Record plugin/vnavmesh versions, world/zone/instance/mark, and the start time.
-3. Observe zone load -> stable mesh readiness -> mount -> confirmed takeoff -> continuous flight.
-   There must be no walking fallback after failed takeoff or recurring start/stop movement.
-4. Observe existing safe landing -> single tag at configured threshold -> kill/reward wait -> Ul'dah return.
-   Report facing separately; it remains a known plugin-specific defect.
-5. /sranknavtest export writes navigation-proving.json into the plugin config directory (exact path in chat).
-   Send that sanitized file, PASS/FAIL for each stage, and a short clip/timestamp for any failure.
-6. In a second approach, disable Sentinel/STOP while a route is calculating or following.
-   Confirm movement stops. Run /sranknavtest off, then explicitly re-enable for a legacy route;
-   confirm no late shared task interrupts it. Reload and confirm /sranknavtest status says OFF.
+This candidate adds a session-only anchor-and-return probe because two natural hunts detected the mark
+before the earlier shared approach branch and therefore exercised only legacy parking. Probe coordinates
+remain in memory and are never exported or saved in configuration. The probe can run only with SRank
+automation disabled, Idle, out of combat, in the exact saved territory/world/instance, with no external
+vnavmesh route. It requires a finite route of at least 80 yalms and requires flight; an incoming hunt,
+combat, enabling Sentinel or leaving Idle cancels it.
 
-Only after these pass should this PR be considered for catalog release or wider adoption.
-SS exceptional recovery and PvP acceptance remain separate gates.
+1. Load the PR artifact as a separate dev plugin and disable the public SRank copy. Keep all other
+   movement automation stopped. In SRank, turn the main Enabled toggle off and confirm Idle.
+2. In an outdoor zone with flight unlocked, manually choose clear ground 150-400 yalms from an aetheryte.
+   Avoid enemies, cliffs, water, structures and narrow passages. Land there and run
+   `/sranknavtest on`, then `/sranknavtest probe set`.
+3. Teleport to another zone, then teleport back to that same zone/world/instance. At the aetheryte run
+   `/sranknavtest probe run`. The command refuses a start closer than 80 yalms.
+4. Observe current-zone mesh wait -> mount -> takeoff -> one continuous flight -> arrival at the projected
+   point. Use `/sranknavtest status` if needed; it must show a nonempty operation and a Core state.
+   Arrival exports diagnostics automatically.
+5. Teleport back to the aetheryte and run a second probe. While status is Pathfinding or Following, run
+   `/sranknavtest probe cancel`. Movement must stop. Immediately run `/sranknavtest probe run` again;
+   the replacement must reach the anchor without a late stop or route replacement from the cancelled task.
+6. Run `/sranknavtest off`. It clears the session anchor, restores legacy behavior and exports again.
+   Send navigation-proving.json plus PASS/FAIL for readiness, mount, takeoff, continuous flight, arrival,
+   cancellation and replacement. Include a timestamp/short clip only for a failure.
 
-## Evidence correction in 0.7.56.0
+`probe clear` removes the saved point when no probe is active. Reload always clears it and starts with
+proving off. The deterministic probe validates Core movement mechanics, ownership and cancellation. It
+does not certify hunt parking, facing, tagging, kill evidence or return policy. The two supplied hunts
+remain evidence that those existing legacy branches functioned, not shared-path acceptance. PR #25
+remains unreleased until this probe passes and a later controlled hunt integration reaches shared movement.
 
-The user enabled proving at 00:57, disabled it at 01:03 and exported an empty Entries array, despite reporting successful gameplay. Off does not clear Core diagnostics. The original export did not capture activation or legacy hunt states, so it could not explain a run that never started a shared operation. An already-visible mark or SS staging can legitimately bypass ordinary shared approach; the supplied evidence does not establish which path occurred.
+## Evidence correction in 0.7.57.0
 
-This diagnostics-only revision adds bounded ProvingSession observations, instance/version identity, shared-operation count, activation/disable/halt and domain-state transitions. Core Entries remain genuine movement transitions; session events are never counted as movement proof. Off/halt automatically save an export, and zero operations produce an explicit warning. File-write errors do not change movement. No routing, parking, facing, tagging or configuration policy changed.
+The user supplied two complete 0.7.56.0 hunt traces from one plugin instance. Both reached
+PrepareApproachDestination and then LocateMark in about 0.3 seconds, followed by MoveToSafePoint,
+Landing, SafeWait and tag/return states. OperationsStarted remained zero and Core Entries stayed empty.
+Source review confirms FindMark can resolve the NPC from the object table before the shared coordinate
+approach, after which existing protected parking owns movement. The exporter retained both runs correctly.
 
-On the next ordinary report, watch for **SHARED operation started** after enabling. If it never appears, send the export anyway; its hunt states will identify the path taken. Export before unloading, since observations remain instance-local. The candidate remains PR-only; no public release/catalog change.
+0.7.57.0 keeps the bounded ProvingSession evidence and adds the isolated deterministic probe above.
+Probe observations contain event names, domain state and operation IDs only; the saved point is excluded.
+Core Entries remain genuine movement transitions. No routing, parking, facing, tagging, configuration or
+catalog policy changes. The candidate remains PR-only.

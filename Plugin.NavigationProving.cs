@@ -21,12 +21,17 @@ public sealed partial class Plugin
     private NavigationDiagnostics? provingDiagnostics;
     private long? provingMeshWaitStarted;
     private NavigationProvingJournal? provingJournal;
+    private Vector3? provingProbeDestination;
+    private uint provingProbeTerritory;
+    private string provingProbeWorld = string.Empty;
+    private int provingProbeInstance;
+    private bool provingProbeActive;
 
     private void RegisterNavigationProving()
     {
         commands.AddHandler(NavigationProvingCommand, new CommandInfo((_, args) =>
             navigationProvingCommands.Enqueue(args.Trim().ToLowerInvariant()))
-        { HelpMessage = "Controlled shared-navigation test: on (idle only), off (legacy rollback), status, export. Off after reload." });
+        { HelpMessage = "Shared-navigation test: on/off/status/export; probe set/run/cancel/clear while Sentinel is disabled and idle." });
     }
 
     private void DisposeNavigationProving()
@@ -37,6 +42,8 @@ public sealed partial class Plugin
         framework.RunOnFrameworkThread(() =>
         {
             navigationProvingEnabled = false;
+            provingProbeActive = false;
+            provingProbeDestination = null;
             provingNavigation?.Dispose();
             provingNavigation = null;
             provingOperation = null;
@@ -66,11 +73,13 @@ public sealed partial class Plugin
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = true;
                     provingJournal.Record(ProvingEvent.Enabled, state);
-                    chat.Print("[SRank navigation test] ON for this session. Ordinary long approach only; SS and hunt policy remain legacy.");
+                    chat.Print("[SRank navigation test] ON for this session. Hunt proving remains opt-in; deterministic probe commands are available while Sentinel is disabled and idle.");
                     break;
                 case "off":
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = false;
+                    provingProbeActive = false;
+                    provingProbeDestination = null;
                     CancelNavigationProvingOperation();
                     if (provingAdapter is not null && !provingAdapter.FollowerStopped())
                     {
@@ -90,17 +99,183 @@ public sealed partial class Plugin
                     chat.Print($"[SRank navigation test] OFF. Legacy travel restored. Shared operations this instance: {provingJournal?.OperationsStarted ?? 0}.");
                     ExportNavigationProving();
                     break;
+                case "probe set":
+                    SetNavigationProvingProbeDestination();
+                    break;
+                case "probe run":
+                    StartNavigationProvingProbe();
+                    break;
+                case "probe cancel":
+                    CancelNavigationProvingProbe();
+                    break;
+                case "probe clear":
+                    if (provingProbeActive)
+                        chat.Print("[SRank navigation test] Cancel the active probe before clearing its destination.");
+                    else
+                    {
+                        provingProbeDestination = null;
+                        provingJournal?.Record(ProvingEvent.ProbeCleared, state);
+                        chat.Print("[SRank navigation test] Probe destination cleared.");
+                    }
+                    break;
                 case "export":
                     if (provingDiagnostics is null) { chat.Print("[SRank navigation test] No diagnostics yet."); break; }
                     ExportNavigationProving();
                     break;
                 default:
-                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}. Commands: on, off, status, export.");
+                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeActive={provingProbeActive}. Commands: on, off, status, export, probe set/run/cancel/clear.");
                     break;
             }
         }
-        if (!config.Enabled || (state != SentinelState.PrepareApproachDestination && state != SentinelState.ApproachAlertCoordinates))
+        if (provingProbeActive)
+            TickNavigationProvingProbe();
+        if (!provingProbeActive &&
+            (!config.Enabled || (state != SentinelState.PrepareApproachDestination && state != SentinelState.ApproachAlertCoordinates)))
             CancelNavigationProvingOperation();
+    }
+
+    private void SetNavigationProvingProbeDestination()
+    {
+        if (!navigationProvingEnabled || provingNavigation is null || provingAdapter is null)
+        {
+            chat.Print("[SRank navigation test] Run /sranknavtest on before setting a probe destination.");
+            return;
+        }
+        if (config.Enabled || current is not null || state != SentinelState.Idle ||
+            condition[ConditionFlag.InCombat] || vnav.IsPathRunningSafe())
+        {
+            chat.Print("[SRank navigation test] Probe setup requires Sentinel disabled, Idle, out of combat, with no movement.");
+            return;
+        }
+        Vector3? projected;
+        try { projected = provingNavigation.ProjectLanding(PlayerPosition(), 8f); }
+        catch { projected = null; }
+        if (projected is null)
+        {
+            chat.Print("[SRank navigation test] Current-zone mesh is not ready or this point could not be projected. Move to clear ground and retry.");
+            return;
+        }
+        provingProbeDestination = projected.Value;
+        provingProbeTerritory = clientState.TerritoryType;
+        provingProbeWorld = travel.CurrentWorld;
+        provingProbeInstance = travel.CurrentInstance;
+        provingJournal?.Record(ProvingEvent.ProbeDestinationSet, state);
+        chat.Print("[SRank navigation test] Probe destination set for this zone/world/instance. Teleport away and back to its aetheryte, then run /sranknavtest probe run.");
+    }
+
+    private void StartNavigationProvingProbe()
+    {
+        if (!navigationProvingEnabled || provingNavigation is null || provingAdapter is null)
+        {
+            chat.Print("[SRank navigation test] Run /sranknavtest on before starting a probe.");
+            return;
+        }
+        if (provingProbeDestination is null)
+        {
+            chat.Print("[SRank navigation test] Set a safe probe destination first with /sranknavtest probe set.");
+            return;
+        }
+        if (provingProbeActive || provingOperation is not null)
+        {
+            chat.Print("[SRank navigation test] A shared operation is already active.");
+            return;
+        }
+        if (config.Enabled || current is not null || state != SentinelState.Idle ||
+            condition[ConditionFlag.InCombat] || vnav.IsPathRunningSafe())
+        {
+            chat.Print("[SRank navigation test] Probe run requires Sentinel disabled, Idle, out of combat, with no movement.");
+            return;
+        }
+        if (!NavigationProvingProbeContextMatches(clientState.TerritoryType, travel.CurrentWorld, travel.CurrentInstance,
+                provingProbeTerritory, provingProbeWorld, provingProbeInstance))
+        {
+            chat.Print("[SRank navigation test] Return to the saved zone, world and instance before running the probe.");
+            return;
+        }
+        if (!NavigationProvingProbeDistanceIsSufficient(PlayerPosition(), provingProbeDestination.Value))
+        {
+            chat.Print("[SRank navigation test] Start at least 80 yalms from the saved destination so mount, takeoff and flight are exercised.");
+            return;
+        }
+        provingAdapter.ResetMountRequests();
+        provingOperation = provingNavigation.Begin(new NavigationRequest(provingProbeDestination.Value,
+            TravelMode.RequireFlight, RequireMount: true, ArrivalRadius: 3f, HorizontalArrival: false));
+        provingProbeActive = true;
+        provingJournal?.Record(ProvingEvent.OperationStarted, state, provingOperation.Id);
+        provingJournal?.Record(ProvingEvent.ProbeStarted, state, provingOperation.Id);
+        chat.Print($"[SRank navigation test] SHARED probe started: {provingOperation.Id}. Use /sranknavtest probe cancel to test STOP.");
+    }
+
+    private static bool NavigationProvingProbeContextMatches(uint currentTerritory, string currentWorld, int currentInstance,
+        uint destinationTerritory, string destinationWorld, int destinationInstance)
+        => currentTerritory != 0 && currentTerritory == destinationTerritory &&
+           string.Equals(currentWorld, destinationWorld, StringComparison.Ordinal) &&
+           currentInstance == destinationInstance;
+
+    private static bool NavigationProvingProbeDistanceIsSufficient(Vector3 currentPosition, Vector3 destination)
+        => float.IsFinite(currentPosition.X) && float.IsFinite(currentPosition.Z) &&
+           float.IsFinite(destination.X) && float.IsFinite(destination.Z) &&
+           Vector2.Distance(new(currentPosition.X, currentPosition.Z), new(destination.X, destination.Z)) >= 80f;
+
+    private void TickNavigationProvingProbe()
+    {
+        if (provingOperation is null || provingNavigation is null)
+        {
+            provingProbeActive = false;
+            return;
+        }
+        if (config.Enabled || current is not null || state != SentinelState.Idle || condition[ConditionFlag.InCombat])
+        {
+            var interrupted = provingOperation.Id;
+            provingProbeActive = false;
+            CancelNavigationProvingOperation();
+            provingJournal?.Record(ProvingEvent.ProbeCancelled, state, interrupted);
+            chat.Print("[SRank navigation test] Probe cancelled because Sentinel/hunt/combat state changed.");
+            return;
+        }
+        try { provingNavigation.Tick(); }
+        catch
+        {
+            provingProbeActive = false;
+            HaltNavigationProving("Shared probe adapter failed. Export diagnostics and roll back.");
+            return;
+        }
+        status = $"Shared navigation probe: {provingOperation.State}, operation {provingOperation.Id}, retries {provingOperation.Retries}";
+        if (provingOperation.Result == NavigationResult.Success)
+        {
+            var arrived = provingOperation.Id;
+            provingProbeActive = false;
+            CancelNavigationProvingOperation();
+            provingJournal?.Record(ProvingEvent.ProbeArrived, state, arrived);
+            chat.Print("[SRank navigation test] SHARED probe arrived at the projected destination. Diagnostics exported.");
+            ExportNavigationProving();
+        }
+        else if (provingOperation.Result != NavigationResult.Pending)
+        {
+            provingProbeActive = false;
+            HaltNavigationProving("Shared probe stopped without arrival. Diagnostics exported; use off for rollback.");
+        }
+    }
+
+    private void CancelNavigationProvingProbe()
+    {
+        if (!provingProbeActive || provingOperation is null)
+        {
+            chat.Print("[SRank navigation test] No active probe to cancel.");
+            return;
+        }
+        var cancelled = provingOperation.Id;
+        provingProbeActive = false;
+        CancelNavigationProvingOperation();
+        provingJournal?.Record(ProvingEvent.ProbeCancelled, state, cancelled);
+        if (provingAdapter is null || !provingAdapter.FollowerStopped())
+        {
+            config.Enabled = false;
+            chat.Print("[SRank navigation test] Probe cancellation could not confirm follower stop. Stop vnavmesh and run /sranknavtest off.");
+            return;
+        }
+        chat.Print("[SRank navigation test] SHARED probe cancelled and follower stop confirmed. The saved destination remains available for a replacement probe.");
+        ExportNavigationProving();
     }
 
     private void ExportNavigationProving()
@@ -136,6 +311,15 @@ public sealed partial class Plugin
     {
         if (navigationProvingEnabled)
             provingJournal?.Record(ProvingEvent.DomainState, next, provingOperation?.Id);
+        if (provingProbeActive)
+        {
+            if (next != SentinelState.Idle)
+            {
+                provingProbeActive = false;
+                CancelNavigationProvingOperation();
+            }
+            return;
+        }
         if (next != SentinelState.PrepareApproachDestination && next != SentinelState.ApproachAlertCoordinates)
             CancelNavigationProvingOperation();
     }
@@ -212,6 +396,7 @@ public sealed partial class Plugin
     private void HaltNavigationProving(string reason)
     {
         provingJournal?.Record(ProvingEvent.Halted, state, provingOperation?.Id);
+        provingProbeActive = false;
         CancelNavigationProvingOperation();
         // Do not auto-retry forever, fall through to legacy, or discard the hunt.
         config.Enabled = false;

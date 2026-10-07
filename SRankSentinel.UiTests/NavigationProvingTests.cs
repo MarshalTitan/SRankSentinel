@@ -19,7 +19,7 @@ internal static class NavigationProvingTests
         var framework = DispatchProxy.Create<IFramework, FrameworkProxy>();
         Set(plugin, "framework", framework);
         var backend = new Backend();
-        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 55, 0)));
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 57, 0)));
         using var core = new NavigationCoordinator(backend, diagnostics,
             new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
         var operation = core.Begin(new(new(100, 0, 0)));
@@ -38,10 +38,34 @@ internal static class NavigationProvingTests
         Check(!typeof(Configuration).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
             .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
             "proving opt-in must not persist in user config");
+        TestProbeEligibility();
         TestEvidenceJournal(diagnostics);
-        Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, session-only configuration");
+        Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, isolated probe, session-only configuration");
     }
     private enum TestState { Idle, PrepareApproachDestination, LocateMark }
+    private static void TestProbeEligibility()
+    {
+        var context = typeof(Plugin).GetMethod("NavigationProvingProbeContextMatches",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        bool Matches(uint currentTerritory, string currentWorld, int currentInstance,
+            uint destinationTerritory, string destinationWorld, int destinationInstance) =>
+            (bool)context.Invoke(null, [currentTerritory, currentWorld, currentInstance,
+                destinationTerritory, destinationWorld, destinationInstance])!;
+        Check(Matches(123, "World", 2, 123, "World", 2), "same probe context rejected");
+        Check(!Matches(124, "World", 2, 123, "World", 2) &&
+            !Matches(123, "Other", 2, 123, "World", 2) &&
+            !Matches(123, "World", 1, 123, "World", 2),
+            "probe crossed territory/world/instance boundary");
+
+        var distance = typeof(Plugin).GetMethod("NavigationProvingProbeDistanceIsSufficient",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        bool Sufficient(Vector3 from, Vector3 to) => (bool)distance.Invoke(null, [from, to])!;
+        Check(!Sufficient(Vector3.Zero, new(79.9f, 500, 0)) &&
+            Sufficient(Vector3.Zero, new(80f, 500, 0)) &&
+            !Sufficient(new(float.NaN, 0, 0), new(100, 0, 0)),
+            "probe distance/finite guard failed");
+        Console.WriteLine("PASS proving probe eligibility: exact zone/world/instance and meaningful finite route");
+    }
     private static void TestEvidenceJournal(NavigationDiagnostics diagnostics)
     {
         var journal = new NavigationProvingJournal();
@@ -56,6 +80,10 @@ internal static class NavigationProvingTests
             session.GetProperty("Observations").GetArrayLength() == 4 &&
             bypass.RootElement.GetProperty("Entries").GetArrayLength() == 0,
             "enabled legacy-only run must be explained without fabricated Core movement");
+        journal.Record(ProvingEvent.ProbeDestinationSet, TestState.Idle);
+        journal.Record(ProvingEvent.ProbeStarted, TestState.Idle, Guid.NewGuid());
+        journal.Record(ProvingEvent.ProbeCancelled, TestState.Idle, Guid.NewGuid());
+        Check(journal.OperationsStarted == 0, "probe observations fabricated an operation count");
         journal.Record(ProvingEvent.OperationStarted, TestState.PrepareApproachDestination, Guid.NewGuid());
         journal.Record(ProvingEvent.Disabled, TestState.LocateMark);
         using var observed = JsonDocument.Parse(journal.Export(diagnostics, false, TestState.LocateMark));
