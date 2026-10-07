@@ -7,21 +7,21 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 const project = read("SRankSentinel.csproj");
 const pin = JSON.parse(read("sentinelcore-packages.json"));
 const locked = JSON.parse(read("packages.lock.json")).dependencies["net10.0-windows7.0"];
-assert(pin.version === "0.3.1" && pin.release === "v0.3.1.0" &&
-  pin.commit === "300703b360a58fb4b73bf7675d31fe8cab4614cd", "Wrong Core release pin.");
+assert(pin.version === "0.4.0" && pin.release === "v0.4.0.0" &&
+  pin.commit === "67e52f5d4afb080042f9e526a6afae7480b01ff0", "Wrong Core release pin.");
 const expected = {
-  "MarshalTitan.SentinelCore": "acdbde4e83c3fef325f9a134a5697c2ab87fed1e00cabd3ceff904ba407a4d59",
-  "MarshalTitan.SentinelCore.UI": "e1a9ce4e1ce36042c0fcd53f4c23874d918640be10eef16c21f1cd436c6ba747"
+  "MarshalTitan.SentinelCore": "54f1db25163447d5bcd9b2e5653df7ba9913a65391f196055983c4e5fefeb1a9",
+  "MarshalTitan.SentinelCore.UI": "a9b502c695632c6585bb08ed0bee9bbd075f0be99873ca4db1653b33cb52471c"
 };
 assert(pin.packages.length === 2, "Only Core and Core.UI are required.");
 for (const [id, hash] of Object.entries(expected)) {
   const packagePin = pin.packages.find(p => p.id === id);
   assert(packagePin?.sha256 === hash && packagePin.url ===
-    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.3.1.0/${id}.0.3.1.nupkg`,
+    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.4.0.0/${id}.0.4.0.nupkg`,
     `Wrong published package/hash: ${id}`);
-  assert(project.includes(`<PackageReference Include="${id}" Version="[0.3.1]" />`),
+  assert(project.includes(`<PackageReference Include="${id}" Version="[0.4.0]" />`),
     `Reference must pin exact published version: ${id}`);
-  assert(locked[id]?.resolved === "0.3.1" && locked[id]?.requested === "[0.3.1, 0.3.1]",
+  assert(locked[id]?.resolved === "0.4.0" && locked[id]?.requested === "[0.4.0, 0.4.0]",
     `Dependency lock must pin exact published version: ${id}`);
 }
 assert(!project.includes("SentinelCore.Dalamud") && !project.includes("<ProjectReference"),
@@ -54,7 +54,7 @@ assert(ui.includes("new Vector2(680, 720), ImGuiCond.FirstUseEver") &&
   !ui.includes("SetNextWindowPos") && !ui.includes("NoNav"), "Classic size/position or standard window controls regressed.");
 assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : 520f") && ui.includes("new Vector2(620f,") &&
   !/HeaderHeight\s*=|Layout\s*=|AllowStackedNavigation|CompactBreakpoint|IsCompact/.test(ui),
-  "Use Core 0.3.1's default non-stacking application layout, with a 620x520 expanded minimum.");
+  "Use Core 0.4.0's default non-stacking application layout, with a 620x520 expanded minimum.");
 for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistanceControls",
   "DrawRecoveryControls"]) {
   assert(ui.split(helper + "();").length >= 3, `Themes must share ${helper}`);
@@ -105,6 +105,20 @@ const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
   if (path === "Plugin.cs") {
+    // Phase 3 permits only these exact opt-in hooks over the accepted legacy algorithm.
+    // Remove each with an exact occurrence count before the unchanged hunt hash comparison.
+    for (const [hook, count] of [
+      ["        RegisterNavigationProving();\n", 1],
+      ["        DisposeNavigationProving();\n", 1],
+      ["            TickNavigationProvingControl();\n", 1],
+      ["        CancelNavigationProvingOperation();\n", 1],
+      ["        NavigationProvingStateHandoff(next);\n", 1],
+      ["        if (TickNavigationProvingApproach())\n            return;\n", 2],
+      ["        if (NavigationProvingWaitForMesh())\n            return;\n", 1],
+    ]) {
+      assert(source.split(hook).length === count + 1, `Missing/duplicated proving hook: ${hook.trim()}`);
+      source = source.split(hook).join("");
+    }
     // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
     for (const hook of [
       "        chat.ChatMessage += OnHistoryReward;\n",
@@ -118,7 +132,7 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
     }
   }
   const actual = createHash("sha256").update(source.trim() + "\n").digest("hex");
-  assert(actual === expectedHash, `UI-only migration changed hunt source: ${path}`);
+  assert(actual === expectedHash, `Legacy hunt source changed beyond explicit proving/history hooks: ${path}`);
 }
 for (const workflow of ["build.yml", "release.yml"]) {
   const content = read(join(".github/workflows", workflow));
@@ -127,4 +141,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.4.0 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");

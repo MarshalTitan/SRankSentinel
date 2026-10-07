@@ -380,6 +380,7 @@ public sealed partial class Plugin : IDalamudPlugin
             foreach (var issue in ssStagingAudit.Issues)
                 log.Error("Fixed SS staging coverage audit: {Issue}", issue);
 
+        RegisterNavigationProving();
         StartFaloopWithSavedAuthentication();
 
         log.Information(
@@ -388,6 +389,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        DisposeNavigationProving();
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
         faloop.SessionRejected -= OnFaloopSessionRejected;
@@ -1711,6 +1713,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
         try
         {
+            TickNavigationProvingControl();
             RestorePersistentQueueOnFrameworkThread();
             CompleteFaloopLoginIfReady();
             if (!config.Enabled)
@@ -3445,6 +3448,8 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         if (TrySwitchToVisibleMarkDuringApproach(now))
             return;
+        if (NavigationProvingWaitForMesh())
+            return;
         if (!vnav.IsReadySafe())
         {
             BeginMeshWait("vnavmesh mesh readiness was lost");
@@ -3555,6 +3560,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (now < nextActionUtc)
             return;
+        if (TickNavigationProvingApproach())
+            return;
         if (!EnsureLongApproachMovementReady(now, out var useFlight))
             return;
         if (TryStartApproachRoute(now, useFlight))
@@ -3587,6 +3594,8 @@ public sealed partial class Plugin : IDalamudPlugin
         if (current is null)
             return;
         if (TrySwitchToVisibleMarkDuringApproach(now))
+            return;
+        if (TickNavigationProvingApproach())
             return;
         if (!vnav.IsReadySafe())
         {
@@ -4106,6 +4115,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ResetApproachRouteTracking(bool clearProjectionCandidates)
     {
+        CancelNavigationProvingOperation();
         approachRouteCandidates.Clear();
         approachRouteTarget = null;
         approachPathTask = null;
@@ -8210,6 +8220,7 @@ public sealed partial class Plugin : IDalamudPlugin
             resetToUldahRequestReason = string.Empty;
         }
 
+        NavigationProvingStateHandoff(next);
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;
