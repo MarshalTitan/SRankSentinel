@@ -31,6 +31,7 @@ internal static partial class Program
         };
         try
         {
+            NavigationProvingTests.Run();
             Test("v15 migration preserves all hunt values, credentials, and queues", TestLegacyMigration);
             Test("Modern choice and selected page survive save/load", TestThemeRoundTrip);
             Test("merged pages migrate to Main without changing theme or hunt settings", TestMergedPageSelection);

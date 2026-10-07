@@ -380,6 +380,7 @@ public sealed partial class Plugin : IDalamudPlugin
             foreach (var issue in ssStagingAudit.Issues)
                 log.Error("Fixed SS staging coverage audit: {Issue}", issue);
 
+        RegisterNavigationProving();
         StartFaloopWithSavedAuthentication();
 
         log.Information(
@@ -388,6 +389,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        DisposeNavigationProving();
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
         faloop.SessionRejected -= OnFaloopSessionRejected;
@@ -1711,6 +1713,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
         try
         {
+            TickNavigationProvingControl();
             RestorePersistentQueueOnFrameworkThread();
             CompleteFaloopLoginIfReady();
             if (!config.Enabled)
@@ -3445,6 +3448,8 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         if (TrySwitchToVisibleMarkDuringApproach(now))
             return;
+        if (NavigationProvingWaitForMesh())
+            return;
         if (!vnav.IsReadySafe())
         {
             BeginMeshWait("vnavmesh mesh readiness was lost");
@@ -3555,6 +3560,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (now < nextActionUtc)
             return;
+        if (TickNavigationProvingApproach())
+            return;
         if (!EnsureLongApproachMovementReady(now, out var useFlight))
             return;
         if (TryStartApproachRoute(now, useFlight))
@@ -3587,6 +3594,8 @@ public sealed partial class Plugin : IDalamudPlugin
         if (current is null)
             return;
         if (TrySwitchToVisibleMarkDuringApproach(now))
+            return;
+        if (TickNavigationProvingApproach())
             return;
         if (!vnav.IsReadySafe())
         {
@@ -4106,6 +4115,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ResetApproachRouteTracking(bool clearProjectionCandidates)
     {
+        CancelNavigationProvingOperation();
         approachRouteCandidates.Clear();
         approachRouteTarget = null;
         approachPathTask = null;
@@ -4356,6 +4366,9 @@ public sealed partial class Plugin : IDalamudPlugin
                     $"Aligned over the safe point ({horizontalDistance:0.0}y horizontal); landing normally");
                 return;
             }
+
+            if (TickNavigationProvingParking(now))
+                return;
 
             if (Vector3.Distance(player, safePoint.Value) <= ParkingLandingVerticalTolerance)
             {
@@ -6028,6 +6041,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private bool TryStartNextParkingRoute(bool fly, IBattleChara target)
     {
+        if (!CancelNavigationProvingParkingForPolicy())
+            return true; // Proving halted; do not let callers launch another route.
         while (parkingCandidates.Count > 0)
         {
             var candidate = parkingCandidates.Dequeue();
@@ -6269,7 +6284,10 @@ public sealed partial class Plugin : IDalamudPlugin
         List<Vector3> path,
         DateTime now)
     {
-        if (!vnav.MovePathSafe(path, parkingPathUsesFlight))
+        var sharedParking = TryStartNavigationProvingParking(target, candidate, path);
+        if (sharedParking is false)
+            return;
+        if (sharedParking is null && !vnav.MovePathSafe(path, parkingPathUsesFlight))
         {
             RejectParkingCandidate(target, now,
                 "Parking candidate rejected: validated route became unavailable before movement");
@@ -8210,6 +8228,7 @@ public sealed partial class Plugin : IDalamudPlugin
             resetToUldahRequestReason = string.Empty;
         }
 
+        NavigationProvingStateHandoff(next);
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;

@@ -1,0 +1,372 @@
+using System.Numerics;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Text.Json;
+using Dalamud.Plugin.Services;
+using Dalamud.Plugin.Ipc;
+using SentinelCore.Diagnostics;
+using SentinelCore.Identity;
+using SentinelCore.Navigation;
+using SRankSentinel;
+
+internal static class NavigationProvingTests
+{
+    public static void Run()
+    {
+        var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Check((bool)Invoke(plugin, "TickNavigationProvingApproach")! == false, "default travel must stay legacy");
+        Check((bool)Invoke(plugin, "NavigationProvingWaitForMesh")! == false, "default readiness must stay legacy");
+        var framework = DispatchProxy.Create<IFramework, FrameworkProxy>();
+        Set(plugin, "framework", framework);
+        var backend = new Backend();
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 61, 0)));
+        using var core = new NavigationCoordinator(backend, diagnostics,
+            new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
+        var operation = core.Begin(new(new(100, 0, 0)));
+        core.Tick(); core.Tick();
+        Check(operation.State == NavigationState.Following, "test route must be following");
+        Set(plugin, "provingOperation", operation);
+        Handoff(plugin, "ApproachAlertCoordinates");
+        Check(operation.Result == NavigationResult.Pending && backend.Stops == 0, "approach retained ownership");
+        Handoff(plugin, "LocateMark");
+        Check(operation.Result == NavigationResult.Cancelled && backend.Stops == 1, "hunt-policy handoff did not cancel");
+        var successor = core.Begin(new(new(100, 0, 0)));
+        core.Tick(); core.Tick();
+        Invoke(plugin, "CancelNavigationProvingOperation");
+        operation.Dispose();
+        Check(successor.Result == NavigationResult.Pending && backend.Stops == 1, "retired handoff stopped successor");
+        Check(!typeof(Configuration).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
+            "proving opt-in must not persist in user config");
+        TestProbeEligibility();
+        TestLandingProbeConsumer();
+        TestApprovedParking();
+        TestProbeProjectionQuery();
+        TestProbeReadinessSummary();
+        TestEvidenceJournal(diagnostics);
+        Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, isolated probe, session-only configuration");
+    }
+    private enum TestState { Idle, PrepareApproachDestination, LocateMark }
+    private static void TestProbeEligibility()
+    {
+        var context = typeof(Plugin).GetMethod("NavigationProvingProbeContextMatches",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        bool Matches(uint currentTerritory, string currentWorld, int currentInstance,
+            uint destinationTerritory, string destinationWorld, int destinationInstance) =>
+            (bool)context.Invoke(null, [currentTerritory, currentWorld, currentInstance,
+                destinationTerritory, destinationWorld, destinationInstance])!;
+        Check(Matches(123, "World", 2, 123, "World", 2), "same probe context rejected");
+        Check(!Matches(124, "World", 2, 123, "World", 2) &&
+            !Matches(123, "Other", 2, 123, "World", 2) &&
+            !Matches(123, "World", 1, 123, "World", 2),
+            "probe crossed territory/world/instance boundary");
+
+        var distance = typeof(Plugin).GetMethod("NavigationProvingProbeDistanceIsSufficient",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        bool Sufficient(Vector3 from, Vector3 to) => (bool)distance.Invoke(null, [from, to])!;
+        Check(!Sufficient(Vector3.Zero, new(79.9f, 500, 0)) &&
+            Sufficient(Vector3.Zero, new(80f, 500, 0)) &&
+            !Sufficient(new(float.NaN, 0, 0), new(100, 0, 0)),
+            "probe distance/finite guard failed");
+        Console.WriteLine("PASS proving probe eligibility: exact zone/world/instance and meaningful finite route");
+    }
+    private static void TestLandingProbeConsumer()
+    {
+        var factory = typeof(Plugin).GetMethod("CreateNavigationProvingProbeRequest",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var request = (NavigationRequest)factory.Invoke(null, [new Vector3(100, 0, 0)])!;
+        var backend = new Backend();
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 61, 0)));
+        using var core = new NavigationCoordinator(backend, diagnostics,
+            new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
+        var operation = core.Begin(request); core.Tick(); core.Tick();
+        backend.Position = request.Destination; core.Tick();
+        Check(operation.State == NavigationState.Landing && operation.Result == NavigationResult.Pending,
+            "probe declared arrival while physically flying");
+        var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Set(plugin, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
+        Set(plugin, "provingOperation", operation);
+        Set(plugin, "provingProbeActive", true);
+        Handoff(plugin, "Idle");
+        Check(operation.Result == NavigationResult.Pending, "idle probe released landing ownership");
+        Handoff(plugin, "LocateMark");
+        Check(operation.Result == NavigationResult.Cancelled, "hunt handoff did not revoke landing");
+        var next = core.Begin(new(new Vector3(200, 0, 0)));
+        core.Tick(); core.Tick();
+        var stops = backend.Stops;
+        operation.Dispose();
+        Check(next.Result == NavigationResult.Pending && backend.Stops == stops,
+            "retired landing stopped replacement consumer route");
+        Console.WriteLine("PASS landing probe consumer: no airborne success, idle ownership, hunt cancellation, retired isolation");
+    }
+
+
+    private static void TestApprovedParking()
+    {
+        var eligible = typeof(Plugin).GetMethod("NavigationProvingParkingEligible",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var flags = new object[] { true, true, false, true, true, false, false, false };
+        Check((bool)eligible.Invoke(null, flags)!, "approved ordinary pre-tag flight rejected");
+        for (var i = 0; i < flags.Length; i++)
+        {
+            var changed = flags.ToArray(); changed[i] = !(bool)flags[i];
+            Check(!(bool)eligible.Invoke(null, changed)!, "ineligible parking scope admitted: " + i);
+        }
+        var source = new List<Vector3> { Vector3.Zero, new(50, 0, 10), new(100, 0, 0) };
+        var zone = new ZoneStamp(1, 1);
+        var route = new NavigationProvingParkingRoute(source, source[^1], zone, 42);
+        source[1] = new(99, 99, 99);
+        var claimed = route.Claim(zone, true, CancellationToken.None);
+        Check(claimed[1] == new Vector3(50, 0, 10), "approved path was mutated by caller");
+        ((Vector3[])claimed)[1] = new(5, 5, 5);
+        Check(!route.Matches(claimed), "modified approved path accepted");
+        void Reject(Action action)
+        {
+            try { action(); } catch (InvalidOperationException) { return; }
+            throw new InvalidOperationException("expired/unprotected route admitted");
+        }
+        Reject(() => route.Claim(zone, true, CancellationToken.None));
+        Reject(() => new NavigationProvingParkingRoute(source, source[^1], zone, 42)
+            .Claim(new(1, 2), true, CancellationToken.None));
+        Reject(() => new NavigationProvingParkingRoute(source, source[^1], zone, 42)
+            .Claim(zone, false, CancellationToken.None));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        try
+        {
+            new NavigationProvingParkingRoute(source, source[^1], zone, 42).Claim(zone, true, cancelled.Token);
+            throw new InvalidOperationException("cancelled approval was consumed");
+        }
+        catch (OperationCanceledException) { }
+
+        var optionsMethod = typeof(Plugin).GetMethod("CreateNavigationProvingOptions",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var options = (NavigationOptions)optionsMethod.Invoke(null, [true])!;
+        Check(options.MaxRetries == 0, "approved route may requery outside domain policy");
+        options = options with { RetryDelay = TimeSpan.Zero };
+        var backend = new Backend();
+        var approved = new NavigationProvingParkingRoute([Vector3.Zero, new(100, 0, 0)], new(100, 0, 0), zone, 42);
+        backend.PathLoader = () => approved.Claim(zone, true, CancellationToken.None);
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 61, 0)));
+        using var core = new NavigationCoordinator(backend, diagnostics, options);
+        var operation = core.Begin(new(new(100, 0, 0), ArrivalRadius: 0.1f)); core.Tick(); core.Tick();
+        Check(operation.State == NavigationState.Following && backend.Queries == 1,
+            "Core did not follow the approved route once");
+        var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Set(plugin, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
+        Set(plugin, "provingOperation", operation); Set(plugin, "provingParkingActive", true);
+        Set(plugin, "provingParkingRollbackPending", true);
+        var journal = new NavigationProvingJournal(); Set(plugin, "provingJournal", journal);
+        Set(plugin, "provingAdapter", FakeParkingAdapter(backend));
+        Handoff(plugin, "MoveToSafePoint");
+        Check(operation.Result == NavigationResult.Pending && backend.Stops == 0, "parking ownership was lost");
+        Handoff(plugin, "Landing");
+        Check(operation.Result == NavigationResult.Cancelled && backend.Stops == 1, "legacy landing handoff did not revoke Core");
+        Check(!(bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(plugin)!, "successful landing handoff retained stale parking rollback");
+        using var evidence = JsonDocument.Parse(journal.Export(diagnostics, true, TestState.Idle));
+        Check(evidence.RootElement.GetProperty("ProvingSession").GetProperty("Observations")
+            .EnumerateArray().Any(x => x.GetProperty("Event").GetString() == "ParkingLandingHandoff"),
+            "planned domain handoff was indistinguishable from failure");
+
+        backend.PathLoader = null;
+        var successor = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        var stops = backend.Stops;
+        operation.Dispose(); Handoff(plugin, "TagApproach");
+        Check(successor.Result == NavigationResult.Pending && backend.Stops == stops,
+            "retired parking handoff stopped successor");
+        foreach (var next in new[] { "TagApproach", "LocateMark", "AvoidIncidentalAggro", "ResetToUldah" })
+        {
+            var fresh = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+            Set(plugin, "provingOperation", fresh); Set(plugin, "provingParkingActive", true);
+            Handoff(plugin, next);
+            Check(fresh.Result == NavigationResult.Cancelled, "domain priority did not revoke parking: " + next);
+        }
+        Set(plugin, "provingAdapter", FakeParkingAdapter(backend));
+        var replanned = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        Set(plugin, "provingOperation", replanned); Set(plugin, "provingParkingActive", true);
+        Set(plugin, "provingParkingRollbackPending", true);
+        Invoke(plugin, "CancelNavigationProvingParkingForPolicy");
+        Check(replanned.Result == NavigationResult.Cancelled &&
+            !(bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(plugin)!, "policy replan did not revoke old lease and rollback first");
+        var policySuccessor = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        stops = backend.Stops;
+        replanned.Dispose(); Handoff(plugin, "MoveToSafePoint");
+        Check(policySuccessor.Result == NavigationResult.Pending && backend.Stops == stops,
+            "retired policy replan interrupted replacement route");
+        var exhausted = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
+        backend.Stop(); core.Tick();
+        Check(exhausted.Result == NavigationResult.Failure &&
+            diagnostics.Snapshot()[^1].Reason == NavigationReason.BudgetExhausted,
+            "stopped approved follower retried outside approval");
+        var failedBackend = new Backend();
+        using var failedCore = new NavigationCoordinator(failedBackend, diagnostics,
+            options with { RetryDelay = TimeSpan.Zero });
+        var failedOperation = failedCore.Begin(new(new(100, 0, 0))); failedCore.Tick(); failedCore.Tick();
+        failedBackend.ThrowStop = true;
+        var halted = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Set(halted, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
+        Set(halted, "provingOperation", failedOperation); Set(halted, "provingParkingActive", true);
+        Set(halted, "provingParkingRollbackPending", true);
+        Set(halted, "provingAdapter", FakeParkingAdapter(failedBackend));
+        var configuration = new Configuration { Enabled = true };
+        Set(halted, "config", configuration); Set(halted, "chat", DispatchProxy.Create<IChatGui, ChatProxy>());
+        Check(!(bool)Invoke(halted, "CancelNavigationProvingParkingForPolicy")! &&
+            !configuration.Enabled && failedBackend.FollowerRunning &&
+            (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(halted)!, "unconfirmed stop permitted replacement or lost explicit rollback");
+        // A coordinator that lost stop confirmation stays fail-closed; use an independent
+        // owner for the native-landing boundary case rather than reviving that coordinator.
+        Reject(() => failedCore.Begin(new(new(100, 0, 0))));
+        var landingBackend = new Backend();
+        using var landingCore = new NavigationCoordinator(landingBackend, diagnostics, options);
+        var blockedLanding = landingCore.Begin(new(new(100, 0, 0))); landingCore.Tick(); landingCore.Tick();
+        landingBackend.ThrowStop = true; configuration.Enabled = true;
+        Set(halted, "provingAdapter", FakeParkingAdapter(landingBackend));
+        var blockedJournal = new NavigationProvingJournal();
+        Set(halted, "provingJournal", blockedJournal);
+        Set(halted, "provingOperation", blockedLanding); Set(halted, "provingParkingActive", true);
+        Set(halted, "provingParkingRollbackPending", true);
+        Handoff(halted, "Landing");
+        Check(!configuration.Enabled && landingBackend.FollowerRunning &&
+            (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(halted)!, "unconfirmed landing handoff permitted native movement or lost rollback");
+        using var blockedEvidence = JsonDocument.Parse(blockedJournal.Export(diagnostics, false, TestState.Idle));
+        Check(!blockedEvidence.RootElement.GetProperty("ProvingSession").GetProperty("Observations")
+            .EnumerateArray().Any(x => x.GetProperty("Event").GetString() == "ParkingLandingHandoff"),
+            "unconfirmed stop emitted successful landing handoff evidence");
+        Console.WriteLine("PASS approved parking: scope, immutable one-shot route, zone/cancel rejection, no requery, domain handoff, stale owner");
+    }
+
+
+    private static object FakeParkingAdapter(Backend backend)
+    {
+        var type = typeof(Plugin).GetNestedType("ProvingNavigationAdapter", BindingFlags.NonPublic)!;
+        var adapter = RuntimeHelpers.GetUninitializedObject(type);
+        var running = DispatchProxy.Create<ICallGateSubscriber<bool>, RunningProxy>();
+        ((RunningProxy)(object)running).Running = () => backend.FollowerRunning;
+        type.GetField("running", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(adapter, running);
+        return adapter;
+    }
+    public class RunningProxy : DispatchProxy
+    {
+        public Func<bool> Running = () => false;
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+            => method?.Name == "InvokeFunc" ? Running() : throw new NotSupportedException(method?.Name);
+    }
+    public class ChatProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args) => null;
+    }
+
+    private static void TestProbeProjectionQuery()
+    {
+        var originMethod = typeof(Plugin).GetMethod("NavigationProvingFloorQueryOrigin",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var localMethod = typeof(Plugin).GetMethod("NavigationProvingProjectionIsLocal",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var player = new Vector3(10, 20, 30);
+        var origin = (Vector3)originMethod.Invoke(null, [player])!;
+        Check(origin == new Vector3(10, 22, 30), "floor query was not raised without horizontal drift");
+        bool Local(Vector3 projected) => (bool)localMethod.Invoke(null, [player, projected, 8f, 3f])!;
+        Check(Local(new(10, 20.2f, 30)) &&
+            !Local(new(18.1f, 20, 30)) &&
+            !Local(new(10, 23.1f, 30)) &&
+            !Local(new(float.NaN, 20, 30)),
+            "local projection bounds accepted unsafe or rejected valid ground");
+        Console.WriteLine("PASS proving floor query: raised origin with finite horizontal and vertical bounds");
+    }
+
+    private static void TestProbeReadinessSummary()
+    {
+        var summarize = typeof(Plugin).GetMethod("NavigationProvingReadinessSummary",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var snapshot = new NavigationSnapshot(new(123, 4), new ZoneStamp(123, 4), false, true, -1,
+            new(987, 654, 321), false, false, FlightAvailability.Available, false, []);
+        var summary = (string)summarize.Invoke(null, [snapshot])!;
+        Check(summary.Contains("loading=False") && summary.Contains("meshReady=True") &&
+            summary.Contains("buildProgress=-1") && summary.Contains("currentZoneReady=True") &&
+            summary.Contains("flight=Available"), "readiness summary omitted a required dependency state");
+        Check(!summary.Contains("987") && !summary.Contains("654") && !summary.Contains("321"),
+            "readiness summary leaked physical coordinates");
+        Console.WriteLine("PASS proving readiness summary: actionable dependency state without coordinates");
+    }
+
+    private static void TestEvidenceJournal(NavigationDiagnostics diagnostics)
+    {
+        var journal = new NavigationProvingJournal();
+        journal.Record(ProvingEvent.Enabled, TestState.Idle);
+        journal.Record(ProvingEvent.DomainState, TestState.PrepareApproachDestination);
+        journal.Record(ProvingEvent.DomainState, TestState.LocateMark);
+        journal.Record(ProvingEvent.Disabled, TestState.LocateMark);
+        var empty = new NavigationDiagnostics(new("SRankSentinel", "private-display", "private-author", new(0, 7, 56, 0)));
+        using var bypass = JsonDocument.Parse(journal.Export(empty, false, TestState.LocateMark));
+        var session = bypass.RootElement.GetProperty("ProvingSession");
+        Check(!session.GetProperty("SharedOperationObserved").GetBoolean() &&
+            session.GetProperty("Observations").GetArrayLength() == 4 &&
+            bypass.RootElement.GetProperty("Entries").GetArrayLength() == 0,
+            "enabled legacy-only run must be explained without fabricated Core movement");
+        journal.Record(ProvingEvent.ProbeDestinationPending, TestState.Idle);
+        journal.Record(ProvingEvent.ProbeDestinationRejected, TestState.Idle);
+        journal.Record(ProvingEvent.ProbeDestinationSet, TestState.Idle);
+        journal.Record(ProvingEvent.ProbeStarted, TestState.Idle, Guid.NewGuid());
+        journal.Record(ProvingEvent.ProbeCancelled, TestState.Idle, Guid.NewGuid());
+        Check(journal.OperationsStarted == 0, "probe observations fabricated an operation count");
+        journal.Record(ProvingEvent.OperationStarted, TestState.PrepareApproachDestination, Guid.NewGuid());
+        journal.Record(ProvingEvent.Disabled, TestState.LocateMark);
+        using var observed = JsonDocument.Parse(journal.Export(diagnostics, false, TestState.LocateMark));
+        Check(observed.RootElement.GetProperty("ProvingSession").GetProperty("OperationsStarted").GetInt32() == 1 &&
+            observed.RootElement.GetProperty("Entries").GetArrayLength() > 0, "off lost real movement evidence");
+        var replacement = new NavigationProvingJournal();
+        Check(replacement.InstanceId != journal.InstanceId && replacement.OperationsStarted == 0,
+            "reload provenance must distinguish fresh instances");
+        for (var i = 0; i < 300; i++) journal.Record(ProvingEvent.DomainState, TestState.Idle);
+        using var bounded = JsonDocument.Parse(journal.Export(empty, false, TestState.Idle));
+        Check(bounded.RootElement.GetProperty("ProvingSession").GetProperty("Observations").GetArrayLength() == 256,
+            "journal unbounded");
+        Check(!journal.Export(empty, false, TestState.Idle).Contains("private-"), "private identity leaked");
+        Console.WriteLine("PASS proving evidence: legacy-only session, off retention, instance identity, bounded sanitized export");
+    }
+    private static void Handoff(Plugin plugin, string state)
+    {
+        var method = typeof(Plugin).GetMethod("NavigationProvingStateHandoff", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        method.Invoke(plugin, [Enum.Parse(method.GetParameters()[0].ParameterType, state)]);
+    }
+    private static object? Invoke(Plugin plugin, string name) =>
+        typeof(Plugin).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(plugin, null);
+    private static void Set(Plugin plugin, string field, object value) =>
+        typeof(Plugin).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(plugin, value);
+    private static void Check(bool value, string reason) { if (!value) throw new InvalidOperationException(reason); }
+    public class FrameworkProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == "RunOnFrameworkThread" && args?[0] is Action action)
+            { action(); return Task.CompletedTask; }
+            throw new NotSupportedException(targetMethod?.Name);
+        }
+    }
+    private sealed class Backend : ILandingNavigationAdapter
+    {
+        private bool following;
+        public int Stops, Queries;
+        public Func<IReadOnlyList<Vector3>>? PathLoader;
+        public Vector3 Position;
+        public bool ThrowStop;
+        public bool FollowerRunning => following;
+        public NavigationSnapshot Read() => new(new(1, 1), new ZoneStamp(1, 1), false, true, -1,
+            Position, true, true, FlightAvailability.Available, following, following ? [new(100, 0, 0)] : []);
+        public Task<IReadOnlyList<Vector3>> FindPath(Vector3 from, Vector3 to, bool fly, CancellationToken cancellation)
+        {
+            Queries++;
+            return Task.FromResult(PathLoader?.Invoke() ?? (IReadOnlyList<Vector3>)[from, to]);
+        }
+        public void Follow(IReadOnlyList<Vector3> path, bool fly) => following = true;
+        public void Stop() { if (ThrowStop) throw new InvalidOperationException("Stop unconfirmed"); following = false; Stops++; }
+        public void RequestMount() => throw new InvalidOperationException();
+        public void RequestTakeoff() => throw new InvalidOperationException();
+        public Vector3? ProjectLanding(Vector3 candidate, float searchRadius) => candidate;
+        public bool RequestLanding(NavigationSnapshot snapshot, Vector3 destination) => false;
+    }
+}
