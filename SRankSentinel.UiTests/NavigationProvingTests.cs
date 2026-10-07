@@ -216,15 +216,20 @@ internal static class NavigationProvingTests
             !configuration.Enabled && failedBackend.FollowerRunning &&
             (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(halted)!, "unconfirmed stop permitted replacement or lost explicit rollback");
-        failedBackend.ThrowStop = false; failedBackend.Stop();
-        var blockedLanding = failedCore.Begin(new(new(100, 0, 0))); failedCore.Tick(); failedCore.Tick();
-        failedBackend.ThrowStop = true; configuration.Enabled = true;
+        // A coordinator that lost stop confirmation stays fail-closed; use an independent
+        // owner for the native-landing boundary case rather than reviving that coordinator.
+        Reject(() => failedCore.Begin(new(new(100, 0, 0))));
+        var landingBackend = new Backend();
+        using var landingCore = new NavigationCoordinator(landingBackend, diagnostics, options);
+        var blockedLanding = landingCore.Begin(new(new(100, 0, 0))); landingCore.Tick(); landingCore.Tick();
+        landingBackend.ThrowStop = true; configuration.Enabled = true;
+        Set(halted, "provingAdapter", FakeParkingAdapter(landingBackend));
         var blockedJournal = new NavigationProvingJournal();
         Set(halted, "provingJournal", blockedJournal);
         Set(halted, "provingOperation", blockedLanding); Set(halted, "provingParkingActive", true);
         Set(halted, "provingParkingRollbackPending", true);
         Handoff(halted, "Landing");
-        Check(!configuration.Enabled && failedBackend.FollowerRunning &&
+        Check(!configuration.Enabled && landingBackend.FollowerRunning &&
             (bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(halted)!, "unconfirmed landing handoff permitted native movement or lost rollback");
         using var blockedEvidence = JsonDocument.Parse(blockedJournal.Export(diagnostics, false, TestState.Idle));
