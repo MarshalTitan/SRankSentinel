@@ -154,11 +154,14 @@ internal static class NavigationProvingTests
         var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
         Set(plugin, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
         Set(plugin, "provingOperation", operation); Set(plugin, "provingParkingActive", true);
+        Set(plugin, "provingParkingRollbackPending", true);
         var journal = new NavigationProvingJournal(); Set(plugin, "provingJournal", journal);
         Handoff(plugin, "MoveToSafePoint");
         Check(operation.Result == NavigationResult.Pending && backend.Stops == 0, "parking ownership was lost");
         Handoff(plugin, "Landing");
         Check(operation.Result == NavigationResult.Cancelled && backend.Stops == 1, "legacy landing handoff did not revoke Core");
+        Check(!(bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(plugin)!, "successful landing handoff retained stale parking rollback");
         using var evidence = JsonDocument.Parse(journal.Export(diagnostics, true, TestState.Idle));
         Check(evidence.RootElement.GetProperty("ProvingSession").GetProperty("Observations")
             .EnumerateArray().Any(x => x.GetProperty("Event").GetString() == "ParkingLandingHandoff"),
@@ -179,8 +182,11 @@ internal static class NavigationProvingTests
         }
         var replanned = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
         Set(plugin, "provingOperation", replanned); Set(plugin, "provingParkingActive", true);
+        Set(plugin, "provingParkingRollbackPending", true);
         Invoke(plugin, "CancelNavigationProvingParkingForPolicy");
-        Check(replanned.Result == NavigationResult.Cancelled, "policy replan did not revoke old lease first");
+        Check(replanned.Result == NavigationResult.Cancelled &&
+            !(bool)typeof(Plugin).GetField("provingParkingRollbackPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(plugin)!, "policy replan did not revoke old lease and rollback first");
         var policySuccessor = core.Begin(new(new(200, 0, 0))); core.Tick(); core.Tick();
         stops = backend.Stops;
         replanned.Dispose(); Handoff(plugin, "MoveToSafePoint");

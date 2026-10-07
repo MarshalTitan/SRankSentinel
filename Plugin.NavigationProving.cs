@@ -28,6 +28,7 @@ public sealed partial class Plugin
     private int provingProbeInstance;
     private bool provingProbeActive;
     private bool provingParkingActive;
+    private bool provingParkingRollbackPending;
     private bool provingProbeCancelOnLanding;
     private bool provingProbeLandingResumeAllowed;
     private bool provingProbeSetPending;
@@ -86,7 +87,8 @@ public sealed partial class Plugin
                     chat.Print("[SRank navigation test] ON for this session. Ordinary approach and approved pre-tag protected parking use Core; SS, retreat, landing and hunt policy remain legacy. Isolated probe commands require Sentinel disabled and idle.");
                     break;
                 case "off":
-                    var parkingRollback = provingParkingActive;
+                    var parkingRollback = provingParkingActive || provingParkingRollbackPending;
+                    provingParkingRollbackPending = false;
                     provingMeshWaitStarted = null;
                     navigationProvingEnabled = false;
                     provingProbeActive = false;
@@ -160,6 +162,11 @@ public sealed partial class Plugin
                     chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeSetupPending={provingProbeSetPending}; probeActive={provingProbeActive}; sharedParking={provingParkingActive}. Commands: on, off, status, export, probe set/run/resume/cancel/clear; probe run cancel-landing.");
                     break;
             }
+        }
+        if (provingParkingActive && combat.IsPlayerDead)
+        {
+            provingJournal?.Record(ProvingEvent.ParkingDeathYield, state, provingOperation?.Id);
+            CancelNavigationProvingOperation();
         }
         if (provingProbeSetPending)
             TickNavigationProvingProbeDestination();
@@ -485,6 +492,7 @@ public sealed partial class Plugin
         {
             if (next == SentinelState.Landing)
             {
+                provingParkingRollbackPending = false;
                 provingJournal?.Record(ProvingEvent.ParkingLandingHandoff, next, provingOperation?.Id);
                 chat?.Print($"[SRank navigation test] SHARED protected parking handoff: {provingOperation?.Id}; state={provingOperation?.State}. Existing safe landing/tag/kill/return resumes.");
             }
@@ -571,6 +579,7 @@ public sealed partial class Plugin
     {
         if (!provingParkingActive) return;
         provingJournal?.Record(ProvingEvent.ParkingPolicyReplan, state, provingOperation?.Id);
+        provingParkingRollbackPending = false;
         // Must precede any legacy replacement query/follower, including unprotected fallback.
         CancelNavigationProvingOperation();
     }
@@ -612,6 +621,7 @@ public sealed partial class Plugin
             provingAdapter.ApprovedParkingRoute = new NavigationProvingParkingRoute(path,
                 candidate.Position, snapshot.Zone, target.GameObjectId);
             provingParkingActive = true;
+            provingParkingRollbackPending = true;
             provingAdapter.ResetMountRequests();
             // Domain alignment/clearance checks hand off before this deliberately narrow radius.
             // Core never chooses a parking point, queries an unprotected replacement or lands here.
