@@ -223,15 +223,16 @@ public sealed partial class Plugin
             return;
         }
 
+        var playerPosition = PlayerPosition();
         Vector3? projected;
-        try { projected = provingAdapter.ProjectLanding(PlayerPosition(), 8f); }
+        try { projected = provingAdapter.ProjectLanding(NavigationProvingFloorQueryOrigin(playerPosition), 8f); }
         catch { projected = null; }
         provingProbeSetPending = false;
         provingProbeSetStarted = null;
-        if (projected is null)
+        if (projected is null || !NavigationProvingProjectionIsLocal(playerPosition, projected.Value, 8f, 3f))
         {
             provingJournal?.Record(ProvingEvent.ProbeDestinationRejected, state);
-            chat.Print("[SRank navigation test] Current-zone mesh is ready, but no usable ground point was found within 8 yalms. Move to flatter open ground and retry. " + summary);
+            chat.Print("[SRank navigation test] Current-zone mesh is ready, but the raised floor query did not return a safe local ground point. Move to clear ground and retry. " + summary);
             return;
         }
         provingProbeDestination = projected.Value;
@@ -241,6 +242,16 @@ public sealed partial class Plugin
         provingJournal?.Record(ProvingEvent.ProbeDestinationSet, state);
         chat.Print("[SRank navigation test] Probe destination set for this zone/world/instance. Teleport away and back to its aetheryte, then run /sranknavtest probe run.");
     }
+
+    private static Vector3 NavigationProvingFloorQueryOrigin(Vector3 playerPosition)
+        => new(playerPosition.X, playerPosition.Y + 2f, playerPosition.Z);
+
+    private static bool NavigationProvingProjectionIsLocal(Vector3 playerPosition, Vector3 projected,
+        float horizontalRadius, float verticalRadius)
+        => float.IsFinite(playerPosition.X) && float.IsFinite(playerPosition.Y) && float.IsFinite(playerPosition.Z) &&
+           float.IsFinite(projected.X) && float.IsFinite(projected.Y) && float.IsFinite(projected.Z) &&
+           Vector2.Distance(new(playerPosition.X, playerPosition.Z), new(projected.X, projected.Z)) <= horizontalRadius &&
+           Math.Abs(projected.Y - playerPosition.Y) <= verticalRadius;
 
     private static string NavigationProvingReadinessSummary(NavigationSnapshot snapshot)
     {

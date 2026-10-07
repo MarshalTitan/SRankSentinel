@@ -19,7 +19,7 @@ internal static class NavigationProvingTests
         var framework = DispatchProxy.Create<IFramework, FrameworkProxy>();
         Set(plugin, "framework", framework);
         var backend = new Backend();
-        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 58, 0)));
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 59, 0)));
         using var core = new NavigationCoordinator(backend, diagnostics,
             new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
         var operation = core.Begin(new(new(100, 0, 0)));
@@ -39,6 +39,7 @@ internal static class NavigationProvingTests
             .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
             "proving opt-in must not persist in user config");
         TestProbeEligibility();
+        TestProbeProjectionQuery();
         TestProbeReadinessSummary();
         TestEvidenceJournal(diagnostics);
         Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, isolated probe, session-only configuration");
@@ -67,6 +68,24 @@ internal static class NavigationProvingTests
             "probe distance/finite guard failed");
         Console.WriteLine("PASS proving probe eligibility: exact zone/world/instance and meaningful finite route");
     }
+    private static void TestProbeProjectionQuery()
+    {
+        var originMethod = typeof(Plugin).GetMethod("NavigationProvingFloorQueryOrigin",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var localMethod = typeof(Plugin).GetMethod("NavigationProvingProjectionIsLocal",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var player = new Vector3(10, 20, 30);
+        var origin = (Vector3)originMethod.Invoke(null, [player])!;
+        Check(origin == new Vector3(10, 22, 30), "floor query was not raised without horizontal drift");
+        bool Local(Vector3 projected) => (bool)localMethod.Invoke(null, [player, projected, 8f, 3f])!;
+        Check(Local(new(10, 20.2f, 30)) &&
+            !Local(new(18.1f, 20, 30)) &&
+            !Local(new(10, 23.1f, 30)) &&
+            !Local(new(float.NaN, 20, 30)),
+            "local projection bounds accepted unsafe or rejected valid ground");
+        Console.WriteLine("PASS proving floor query: raised origin with finite horizontal and vertical bounds");
+    }
+
     private static void TestProbeReadinessSummary()
     {
         var summarize = typeof(Plugin).GetMethod("NavigationProvingReadinessSummary",

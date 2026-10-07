@@ -1,6 +1,6 @@
 # Controlled shared-navigation proving build
 
-This PR-only build is 0.7.58.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
+This PR-only build is 0.7.59.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
 The catalog and accepted comparison build remain SRankSentinel 0.7.54.0.
 Default behavior is the accepted legacy travel implementation. No configuration schema, UI layout,
 facing policy, S/SS policy, tagging, death/reset evidence or catalog entry is changed.
@@ -39,7 +39,9 @@ combat, enabling Sentinel or leaving Idle cancels it.
    Avoid enemies, cliffs, water, structures and narrow passages. Land there and run
    `/sranknavtest on`, then `/sranknavtest probe set`. Stay still while setup polls readiness for up to
    30 seconds. Continue only after the destination-set confirmation; a failure reports loading, mesh,
-   build progress, current-zone readiness and flight state without coordinates.
+   build progress, current-zone readiness and flight state without coordinates. Floor projection is queried
+   two yalms above the grounded player because vnavmesh accepts only mesh surfaces at or below the query Y;
+   the result must remain within 8 yalms horizontally and 3 yalms vertically.
 3. Teleport to another zone, then teleport back to that same zone/world/instance. At the aetheryte run
    `/sranknavtest probe run`. The command refuses a start closer than 80 yalms.
 4. Observe current-zone mesh wait -> mount -> takeoff -> one continuous flight -> arrival at the projected
@@ -58,7 +60,7 @@ does not certify hunt parking, facing, tagging, kill evidence or return policy. 
 remain evidence that those existing legacy branches functioned, not shared-path acceptance. PR #25
 remains unreleased until this probe passes and a later controlled hunt integration reaches shared movement.
 
-## Evidence correction in 0.7.58.0
+## Evidence correction in 0.7.59.0
 
 The user supplied two complete 0.7.56.0 hunt traces from one plugin instance. Both reached
 PrepareApproachDestination and then LocateMark in about 0.3 seconds, followed by MoveToSafePoint,
@@ -66,7 +68,7 @@ Landing, SafeWait and tag/return states. OperationsStarted remained zero and Cor
 Source review confirms FindMark can resolve the NPC from the object table before the shared coordinate
 approach, after which existing protected parking owns movement. The exporter retained both runs correctly.
 
-0.7.58.0 keeps the bounded ProvingSession evidence and adds the isolated deterministic probe above.
+0.7.59.0 keeps the bounded ProvingSession evidence and adds the isolated deterministic probe above.
 Probe observations contain event names, domain state and operation IDs only; the saved point is excluded.
 Core Entries remain genuine movement transitions. No routing, parking, facing, tagging, configuration or
 catalog policy changes. The candidate remains PR-only.
