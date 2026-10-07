@@ -54,8 +54,15 @@ internal static partial class Program
                 io.AddMouseWheelEvent(0f, -10f);
                 ConsumerFrame(plugin);
             }
+            Check(window.Scroll.Y > 0, "Classic did not respond to native wheel scrolling.");
+            // A hovered input can consume wheel events near the bottom. Explicitly request
+            // the native end position to verify the final controls remain in the scroll range.
+            ImGui.NewFrame();
+            ImGui.SetNextWindowScroll(new Vector2(-1f, window.ScrollMax.Y));
+            DrawConsumer(plugin);
+            ImGui.Render();
             ConsumerFrame(plugin);
-            Check(window.Scroll.Y > 0 && window.Scroll.Y >= window.ScrollMax.Y - 1f &&
+            Check(window.Scroll.Y >= window.ScrollMax.Y - 1f &&
                 (window.Flags & (ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoNav)) == 0,
                 $"Classic final controls unreachable at {scale}: scroll {window.Scroll.Y}/{window.ScrollMax.Y}, flags {window.Flags}.");
             Check(JsonNode.DeepEquals(snapshot, HuntSnapshot(config)), "Classic layout changed hunt settings.");
