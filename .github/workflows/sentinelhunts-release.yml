@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
 
     steps:
@@ -71,22 +72,52 @@ jobs:
         shell: pwsh
         run: Copy-Item -LiteralPath 'SentinelHunts/bin/Release/SentinelHunts/latest.zip' -Destination "$env:RUNNER_TEMP\SentinelHunts.zip" -Force
 
-      - name: Create or repair GitHub prerelease
+      - name: Publish immutable GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $asset = "$env:RUNNER_TEMP\SentinelHunts.zip"
-          gh release view $tag --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset --clobber --repo '${{ github.repository }}'
+          $releaseJson = gh release view $tag --repo '${{ github.repository }}' --json targetCommitish,isDraft,isPrerelease,assets 2>$null
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($exists) {
+            $release = $releaseJson | ConvertFrom-Json
+            if ($release.targetCommitish -ne '${{ github.sha }}' -or $release.isDraft -or !$release.isPrerelease) {
+              throw "Release $tag belongs to another source/state. Increment the version; assets are immutable."
+            }
+            if (@($release.assets | Where-Object name -eq 'SentinelHunts.zip').Count -ne 1) {
+              throw "Release $tag must contain exactly one SentinelHunts.zip; do not replace published assets."
+            }
+            Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset `
-              --repo '${{ github.repository }}' `
-              --target '${{ github.sha }}' `
-              --title "Sentinel Hunts ${{ steps.version.outputs.value }} beta" `
-              --notes "Sentinel Hunts beta ${{ steps.version.outputs.value }}. This field update tightens report-coordinate approach, strengthens mark detection, and requires confirmed ground landing plus dismount before the 95% Tomahawk gate. Requires Lifestream and vnavmesh for live travel; direct Faloop input remains planned." `
-              --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "Sentinel Hunts ${{ steps.version.outputs.value }}" --notes "Built and tested by GitHub Actions. See source changes and supervised acceptance evidence for gameplay status." --prerelease
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
+
+      - name: Validate public release ZIP before child promotion
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/SentinelHunts.zip"
+          $download = Join-Path $env:RUNNER_TEMP 'public-SentinelHunts.zip'
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri "$url`?release=${{ github.run_id }}-$attempt" -OutFile $download -TimeoutSec 60
+              ./.github/scripts/Validate-SentinelHuntsPackage.ps1 -PackagePath $download -ExpectedVersion '${{ steps.version.outputs.value }}'
+              break
+            }
+            catch {
+              if ($attempt -eq 12) { throw }
+              Start-Sleep -Seconds 5
+            }
+          }
+
+      - name: Publish authoritative child manifest and verify central catalog
+        uses: MarshalTitan/Sentinel/.github/actions/distribute@4bbc5ce50837b37c8cfaee5c39a075c4f68858ed
+        with:
+          internal-name: SentinelHunts
+          version: ${{ steps.version.outputs.value }}
+          tag: ${{ steps.version.outputs.tag }}
+          notification-token: ${{ secrets.DALAMUD_CATALOG_TOKEN }}

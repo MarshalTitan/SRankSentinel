@@ -136,6 +136,6 @@ and exits with failure instead of an unhandled .NET crash popup. In-game visual 
 remains a separate user observation.
 
 Publish Beta updates this repository's authoritative `repo.json`, verifies the public ZIP,
-then sends `plugin-released` to the Sentinel catalog generator using `DALAMUD_CATALOG_TOKEN`.
+then optionally sends `plugin-released` using `DALAMUD_CATALOG_TOKEN`; public verification is mandatory even without that token (see [release infrastructure](RELEASE_INFRASTRUCTURE.md)).
 The generator owns `MarshalTitan/Sentinel/repo.json`; this repository does not write it directly.
 The workflow waits for the generated version and validates the central public install path.
