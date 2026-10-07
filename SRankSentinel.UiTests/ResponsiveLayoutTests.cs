@@ -106,8 +106,13 @@ internal static partial class Program
                     MathF.Abs(clearMaximum.Y - (page.Pos.Y + page.Size.Y - page.WindowPadding.Y)) <= 2f,
                     "Clear history escaped the pane or stopped being bottom-anchored.");
                 Check(!page.ScrollbarY && !page.ScrollbarX, "The outer page can scroll the Clear button away.");
-                Check(list.Size.Y >= 120f * scale - 1f && list.ContentSize.X <= list.Size.X + 1f,
-                    $"Report viewport at {width}x{height}/{scale}: size {list.Size}, content {list.ContentSize}, body scroll {body.Scroll}/{body.ScrollMax}.");
+                Check(list.Size.Y >= 120f * scale - 1f,
+                    $"Report viewport minimum at {width}x{height}/{scale}: {list.Size}.");
+                // Hidden native children retain content measurements from an earlier width.
+                // Check actual content after the short body's list has been scrolled into view.
+                if (!list.SkipItems)
+                    Check(list.ContentSize.X <= list.Size.X + 1f,
+                        $"Visible reports overflow at {width}x{height}/{scale}: size {list.Size}, content {list.ContentSize}.");
                 if (height == 1080f)
                     Check(list.Size.Y > previousHeight + 200f * scale && list.Size.Y > 300f * scale,
                         "Taller windows still cap the report list at about two rows.");
@@ -120,9 +125,10 @@ internal static partial class Program
                     ConsumerFrame(plugin);
                     io.AddMouseWheelEvent(0f, -100f);
                     ConsumerFrame(plugin);
-                    ConsumerFrame(plugin);
-                    Check(body.Scroll.Y > 0 && list.Active && list.ContentSize.Y > list.Size.Y,
-                        "Reports cannot be reached in a short History body.");
+                    for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
+                    Check(body.Scroll.Y > 0 && list.Active && !list.SkipItems && list.ContentSize.Y > list.Size.Y &&
+                        list.ContentSize.X <= list.Size.X + 1f,
+                        $"Short-body reports unreachable/overflow at {width}x{height}/{scale}: size {list.Size}, content {list.ContentSize}, skip {list.SkipItems}, body {body.Scroll}/{body.ScrollMax}.");
                 }
                 Check(JsonSerializer.Serialize(config) == saved, "Resizing History changed filters, records, tags, or credit.");
             }
