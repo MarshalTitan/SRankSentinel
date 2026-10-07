@@ -4,7 +4,7 @@ using SentinelCore.Diagnostics;
 
 namespace SRankSentinel;
 
-internal enum ProvingEvent { Enabled, Disabled, DomainState, OperationStarted, ProbeDestinationSet, ProbeStarted, ProbeCancelled, ProbeArrived, ProbeCleared, Halted, Exported }
+internal enum ProvingEvent { Enabled, Disabled, DomainState, OperationStarted, ProbeDestinationPending, ProbeDestinationSet, ProbeDestinationRejected, ProbeStarted, ProbeCancelled, ProbeArrived, ProbeCleared, Halted, Exported }
 internal sealed record ProvingObservation(DateTimeOffset Timestamp, ProvingEvent Event, string DomainState, Guid? OperationId);
 
 /// <summary>Consumer-only evidence; deliberately accepts enum states rather than log/chat/config text.</summary>

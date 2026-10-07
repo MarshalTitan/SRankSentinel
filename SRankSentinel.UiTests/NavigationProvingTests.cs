@@ -19,7 +19,7 @@ internal static class NavigationProvingTests
         var framework = DispatchProxy.Create<IFramework, FrameworkProxy>();
         Set(plugin, "framework", framework);
         var backend = new Backend();
-        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 57, 0)));
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 58, 0)));
         using var core = new NavigationCoordinator(backend, diagnostics,
             new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
         var operation = core.Begin(new(new(100, 0, 0)));
@@ -39,6 +39,7 @@ internal static class NavigationProvingTests
             .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
             "proving opt-in must not persist in user config");
         TestProbeEligibility();
+        TestProbeReadinessSummary();
         TestEvidenceJournal(diagnostics);
         Console.WriteLine("PASS shared-navigation consumer hooks: legacy default, exclusive handoff, stale handle, isolated probe, session-only configuration");
     }
@@ -66,6 +67,21 @@ internal static class NavigationProvingTests
             "probe distance/finite guard failed");
         Console.WriteLine("PASS proving probe eligibility: exact zone/world/instance and meaningful finite route");
     }
+    private static void TestProbeReadinessSummary()
+    {
+        var summarize = typeof(Plugin).GetMethod("NavigationProvingReadinessSummary",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var snapshot = new NavigationSnapshot(new(123, 4), new ZoneStamp(123, 4), false, true, -1,
+            new(987, 654, 321), false, false, FlightAvailability.Available, false, []);
+        var summary = (string)summarize.Invoke(null, [snapshot])!;
+        Check(summary.Contains("loading=False") && summary.Contains("meshReady=True") &&
+            summary.Contains("buildProgress=-1") && summary.Contains("currentZoneReady=True") &&
+            summary.Contains("flight=Available"), "readiness summary omitted a required dependency state");
+        Check(!summary.Contains("987") && !summary.Contains("654") && !summary.Contains("321"),
+            "readiness summary leaked physical coordinates");
+        Console.WriteLine("PASS proving readiness summary: actionable dependency state without coordinates");
+    }
+
     private static void TestEvidenceJournal(NavigationDiagnostics diagnostics)
     {
         var journal = new NavigationProvingJournal();
@@ -80,6 +96,8 @@ internal static class NavigationProvingTests
             session.GetProperty("Observations").GetArrayLength() == 4 &&
             bypass.RootElement.GetProperty("Entries").GetArrayLength() == 0,
             "enabled legacy-only run must be explained without fabricated Core movement");
+        journal.Record(ProvingEvent.ProbeDestinationPending, TestState.Idle);
+        journal.Record(ProvingEvent.ProbeDestinationRejected, TestState.Idle);
         journal.Record(ProvingEvent.ProbeDestinationSet, TestState.Idle);
         journal.Record(ProvingEvent.ProbeStarted, TestState.Idle, Guid.NewGuid());
         journal.Record(ProvingEvent.ProbeCancelled, TestState.Idle, Guid.NewGuid());
