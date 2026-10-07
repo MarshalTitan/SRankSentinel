@@ -64,7 +64,7 @@ assert(!/AddRect|AddCircle|DrawRings|new Vector4/.test(ui),
   "The consumer must not draw canonical Modern primitives.");
 assert(ui.includes('"SRankSentinel.SwitchToClassic", "Use Classic Theme"') &&
   ui.includes('drawActionDock: !config.ModernWindowCollapsed && config.WindowPage == (int)ConfigurationPage.Theme') &&
-  !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("Window theme"'),
+  !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("##WindowTheme"'),
   "Modern must have a separate bottom-left Core dock button; Classic must retain its theme selector.");
 assert(ui.includes('ImGui.GetIO().NavVisible && ImGui.IsItemFocused()') &&
   ui.includes('ConfigurationPage.Plugins.ToString()') && ui.includes('ConfigurationPage.History.ToString()'),

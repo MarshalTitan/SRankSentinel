@@ -247,7 +247,8 @@ public sealed partial class Plugin
         }
         // Fill the viewport after the summary and chart, retaining a scrollable minimum
         // when the short body itself needs scrolling. There is no upper height cap.
-        var height = MathF.Max(120f * ImGuiHelpers.GlobalScale, ImGui.GetContentRegionAvail().Y);
+        var height = MathF.Max(120f * ImGuiHelpers.GlobalScale,
+            ImGui.GetContentRegionAvail().Y - ImGui.GetScrollY());
         var visible = ImGui.BeginChild("##SpawnHistory", new(0, height));
         try
         {
