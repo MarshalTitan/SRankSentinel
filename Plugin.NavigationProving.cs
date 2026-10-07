@@ -61,10 +61,12 @@ public sealed partial class Plugin
                     provingAdapter.ObserveZone();
                     provingNavigation ??= new NavigationCoordinator(provingAdapter, provingDiagnostics,
                         new NavigationOptions { ReadinessSettle = TimeSpan.Zero });
+                    provingMeshWaitStarted = null;
                     navigationProvingEnabled = true;
                     chat.Print("[SRank navigation test] ON for this session. Ordinary long approach only; SS and hunt policy remain legacy.");
                     break;
                 case "off":
+                    provingMeshWaitStarted = null;
                     navigationProvingEnabled = false;
                     CancelNavigationProvingOperation();
                     if (provingAdapter is not null && !provingAdapter.FollowerStopped())
@@ -156,8 +158,12 @@ public sealed partial class Plugin
         }
         var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance, ActiveDistanceProfile.WaitingDistance)
                         + ApproachScanTolerance;
-        provingOperation ??= provingNavigation.Begin(new NavigationRequest(approachPoint.Value,
-            TravelMode.PreferFlight, RequireMount: true, ArrivalRadius: scanRange, HorizontalArrival: true));
+        if (provingOperation is null)
+        {
+            provingAdapter!.ResetMountRequests();
+            provingOperation = provingNavigation.Begin(new NavigationRequest(approachPoint.Value,
+                TravelMode.PreferFlight, RequireMount: true, ArrivalRadius: scanRange, HorizontalArrival: true));
+        }
         provingNavigation.Tick();
         status = $"Shared navigation test: {provingOperation.State}, operation {provingOperation.Id}, retries {provingOperation.Retries}";
         if (provingOperation.Result == NavigationResult.Success)
@@ -204,6 +210,8 @@ public sealed partial class Plugin
         private string world = string.Empty;
         private int instance;
         private bool wasLoading;
+        private int mountRequests;
+        public void ResetMountRequests() => mountRequests = 0;
 
         public ProvingNavigationAdapter(Plugin plugin)
         {
@@ -270,7 +278,11 @@ public sealed partial class Plugin
             stop.InvokeAction();
             if (running.InvokeFunc()) throw new InvalidOperationException("Follower stop unconfirmed.");
         }
-        public void RequestMount() => plugin.TryRequestSentinelMount(out _, out _, allowPreferredMount: true);
+        public void RequestMount()
+        {
+            if (plugin.condition[ConditionFlag.Mounting]) return;
+            plugin.TryRequestSentinelMount(out _, out _, allowPreferredMount: mountRequests++ == 0);
+        }
         public void RequestTakeoff() => plugin.UseGeneralAction(2);
         public Vector3? ProjectLanding(Vector3 candidate, float searchRadius)
             => plugin.vnav.PointOnFloorSafe(candidate, searchRadius);
