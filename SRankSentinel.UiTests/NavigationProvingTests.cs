@@ -19,7 +19,7 @@ internal static class NavigationProvingTests
         var framework = DispatchProxy.Create<IFramework, FrameworkProxy>();
         Set(plugin, "framework", framework);
         var backend = new Backend();
-        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 59, 0)));
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 60, 0)));
         using var core = new NavigationCoordinator(backend, diagnostics,
             new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
         var operation = core.Begin(new(new(100, 0, 0)));
@@ -39,6 +39,7 @@ internal static class NavigationProvingTests
             .Any(f => f.Name.Contains("navigationProving", StringComparison.OrdinalIgnoreCase)),
             "proving opt-in must not persist in user config");
         TestProbeEligibility();
+        TestLandingProbeConsumer();
         TestProbeProjectionQuery();
         TestProbeReadinessSummary();
         TestEvidenceJournal(diagnostics);
@@ -68,6 +69,36 @@ internal static class NavigationProvingTests
             "probe distance/finite guard failed");
         Console.WriteLine("PASS proving probe eligibility: exact zone/world/instance and meaningful finite route");
     }
+    private static void TestLandingProbeConsumer()
+    {
+        var factory = typeof(Plugin).GetMethod("CreateNavigationProvingProbeRequest",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var request = (NavigationRequest)factory.Invoke(null, [new Vector3(100, 0, 0)])!;
+        var backend = new Backend();
+        var diagnostics = new NavigationDiagnostics(new("SRankSentinel", "S Rank Sentinel", "MTitan", new(0, 7, 60, 0)));
+        using var core = new NavigationCoordinator(backend, diagnostics,
+            new NavigationOptions { ReadinessSettle = TimeSpan.Zero, RetryDelay = TimeSpan.Zero });
+        var operation = core.Begin(request); core.Tick(); core.Tick();
+        backend.Position = request.Destination; core.Tick();
+        Check(operation.State == NavigationState.Landing && operation.Result == NavigationResult.Pending,
+            "probe declared arrival while physically flying");
+        var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+        Set(plugin, "framework", DispatchProxy.Create<IFramework, FrameworkProxy>());
+        Set(plugin, "provingOperation", operation);
+        Set(plugin, "provingProbeActive", true);
+        Handoff(plugin, "Idle");
+        Check(operation.Result == NavigationResult.Pending, "idle probe released landing ownership");
+        Handoff(plugin, "LocateMark");
+        Check(operation.Result == NavigationResult.Cancelled, "hunt handoff did not revoke landing");
+        var next = core.Begin(new(new Vector3(200, 0, 0)));
+        core.Tick(); core.Tick();
+        var stops = backend.Stops;
+        operation.Dispose();
+        Check(next.Result == NavigationResult.Pending && backend.Stops == stops,
+            "retired landing stopped replacement consumer route");
+        Console.WriteLine("PASS landing probe consumer: no airborne success, idle ownership, hunt cancellation, retired isolation");
+    }
+
     private static void TestProbeProjectionQuery()
     {
         var originMethod = typeof(Plugin).GetMethod("NavigationProvingFloorQueryOrigin",
@@ -155,12 +186,13 @@ internal static class NavigationProvingTests
             throw new NotSupportedException(targetMethod?.Name);
         }
     }
-    private sealed class Backend : INavigationAdapter
+    private sealed class Backend : ILandingNavigationAdapter
     {
         private bool following;
         public int Stops;
+        public Vector3 Position;
         public NavigationSnapshot Read() => new(new(1, 1), new ZoneStamp(1, 1), false, true, -1,
-            Vector3.Zero, true, true, FlightAvailability.Available, following, following ? [new(100, 0, 0)] : []);
+            Position, true, true, FlightAvailability.Available, following, following ? [new(100, 0, 0)] : []);
         public Task<IReadOnlyList<Vector3>> FindPath(Vector3 from, Vector3 to, bool fly, CancellationToken cancellation)
             => Task.FromResult<IReadOnlyList<Vector3>>([from, to]);
         public void Follow(IReadOnlyList<Vector3> path, bool fly) => following = true;
@@ -168,5 +200,6 @@ internal static class NavigationProvingTests
         public void RequestMount() => throw new InvalidOperationException();
         public void RequestTakeoff() => throw new InvalidOperationException();
         public Vector3? ProjectLanding(Vector3 candidate, float searchRadius) => candidate;
+        public bool RequestLanding(NavigationSnapshot snapshot, Vector3 destination) => false;
     }
 }

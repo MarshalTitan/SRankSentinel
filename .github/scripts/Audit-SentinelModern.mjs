@@ -7,21 +7,21 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 const project = read("SRankSentinel.csproj");
 const pin = JSON.parse(read("sentinelcore-packages.json"));
 const locked = JSON.parse(read("packages.lock.json")).dependencies["net10.0-windows7.0"];
-assert(pin.version === "0.4.0" && pin.release === "v0.4.0.0" &&
-  pin.commit === "67e52f5d4afb080042f9e526a6afae7480b01ff0", "Wrong Core release pin.");
+assert(pin.version === "0.4.1" && pin.release === "v0.4.1.0" &&
+  pin.commit === "e6527400680cddc39803321792b7c3b02fb0501d", "Wrong Core release pin.");
 const expected = {
-  "MarshalTitan.SentinelCore": "54f1db25163447d5bcd9b2e5653df7ba9913a65391f196055983c4e5fefeb1a9",
-  "MarshalTitan.SentinelCore.UI": "a9b502c695632c6585bb08ed0bee9bbd075f0be99873ca4db1653b33cb52471c"
+  "MarshalTitan.SentinelCore": "10b14a37577bd78b528d9bad03848b5cb5c3f6c3f4fa7dff4de966f8e5b34771",
+  "MarshalTitan.SentinelCore.UI": "1ec7841311316994d4f71350b499c3f718d36179e1565f0d7316270063c6baea"
 };
 assert(pin.packages.length === 2, "Only Core and Core.UI are required.");
 for (const [id, hash] of Object.entries(expected)) {
   const packagePin = pin.packages.find(p => p.id === id);
   assert(packagePin?.sha256 === hash && packagePin.url ===
-    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.4.0.0/${id}.0.4.0.nupkg`,
+    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.4.1.0/${id}.0.4.1.nupkg`,
     `Wrong published package/hash: ${id}`);
-  assert(project.includes(`<PackageReference Include="${id}" Version="[0.4.0]" />`),
+  assert(project.includes(`<PackageReference Include="${id}" Version="[0.4.1]" />`),
     `Reference must pin exact published version: ${id}`);
-  assert(locked[id]?.resolved === "0.4.0" && locked[id]?.requested === "[0.4.0, 0.4.0]",
+  assert(locked[id]?.resolved === "0.4.1" && locked[id]?.requested === "[0.4.1, 0.4.1]",
     `Dependency lock must pin exact published version: ${id}`);
 }
 assert(!project.includes("SentinelCore.Dalamud") && !project.includes("<ProjectReference"),
@@ -54,7 +54,7 @@ assert(ui.includes("new Vector2(680, 720), ImGuiCond.FirstUseEver") &&
   !ui.includes("SetNextWindowPos") && !ui.includes("NoNav"), "Classic size/position or standard window controls regressed.");
 assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : 520f") && ui.includes("new Vector2(620f,") &&
   !/HeaderHeight\s*=|Layout\s*=|AllowStackedNavigation|CompactBreakpoint|IsCompact/.test(ui),
-  "Use Core 0.4.0's default non-stacking application layout, with a 620x520 expanded minimum.");
+  "Use Core 0.4.1's default non-stacking application layout, with a 620x520 expanded minimum.");
 for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistanceControls",
   "DrawRecoveryControls"]) {
   assert(ui.split(helper + "();").length >= 3, `Themes must share ${helper}`);
@@ -141,4 +141,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.4.0 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.4.1 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");

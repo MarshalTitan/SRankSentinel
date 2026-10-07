@@ -26,6 +26,8 @@ public sealed partial class Plugin
     private string provingProbeWorld = string.Empty;
     private int provingProbeInstance;
     private bool provingProbeActive;
+    private bool provingProbeCancelOnLanding;
+    private bool provingProbeLandingResumeAllowed;
     private bool provingProbeSetPending;
     private long? provingProbeSetStarted;
     private Vector3 provingProbeSetOrigin;
@@ -34,7 +36,7 @@ public sealed partial class Plugin
     {
         commands.AddHandler(NavigationProvingCommand, new CommandInfo((_, args) =>
             navigationProvingCommands.Enqueue(args.Trim().ToLowerInvariant()))
-        { HelpMessage = "Shared-navigation test: on/off/status/export; probe set/run/cancel/clear while Sentinel is disabled and idle." });
+        { HelpMessage = "Shared-navigation test: on/off/status/export; probe set/run/resume/cancel/clear; probe run cancel-landing while Sentinel is disabled and idle." });
     }
 
     private void DisposeNavigationProving()
@@ -48,6 +50,8 @@ public sealed partial class Plugin
             provingProbeActive = false;
             provingProbeSetPending = false;
             provingProbeDestination = null;
+            provingProbeCancelOnLanding = false;
+            provingProbeLandingResumeAllowed = false;
             provingNavigation?.Dispose();
             provingNavigation = null;
             provingOperation = null;
@@ -85,6 +89,8 @@ public sealed partial class Plugin
                     provingProbeActive = false;
                     provingProbeSetPending = false;
                     provingProbeDestination = null;
+                    provingProbeCancelOnLanding = false;
+                    provingProbeLandingResumeAllowed = false;
                     CancelNavigationProvingOperation();
                     if (provingAdapter is not null && !provingAdapter.FollowerStopped())
                     {
@@ -107,7 +113,17 @@ public sealed partial class Plugin
                 case "probe set":
                     SetNavigationProvingProbeDestination();
                     break;
+                case "probe run cancel-landing":
+                    provingProbeCancelOnLanding = true;
+                    StartNavigationProvingProbe();
+                    if (!provingProbeActive) provingProbeCancelOnLanding = false;
+                    break;
+                case "probe resume":
+                    provingProbeCancelOnLanding = false;
+                    StartNavigationProvingProbe(resumeLanding: true);
+                    break;
                 case "probe run":
+                    provingProbeCancelOnLanding = false;
                     StartNavigationProvingProbe();
                     break;
                 case "probe cancel":
@@ -121,6 +137,7 @@ public sealed partial class Plugin
                         provingProbeSetPending = false;
                         provingProbeSetStarted = null;
                         provingProbeDestination = null;
+                        provingProbeLandingResumeAllowed = false;
                         provingJournal?.Record(ProvingEvent.ProbeCleared, state);
                         chat.Print("[SRank navigation test] Probe destination cleared.");
                     }
@@ -130,7 +147,7 @@ public sealed partial class Plugin
                     ExportNavigationProving();
                     break;
                 default:
-                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeSetupPending={provingProbeSetPending}; probeActive={provingProbeActive}. Commands: on, off, status, export, probe set/run/cancel/clear.");
+                    chat.Print($"[SRank navigation test] {(navigationProvingEnabled ? "ON" : "OFF")}; operation={provingOperation?.Id}; state={provingOperation?.State}; huntState={state}; sharedOperations={provingJournal?.OperationsStarted ?? 0}; probeDestination={(provingProbeDestination is null ? "unset" : "set")}; probeSetupPending={provingProbeSetPending}; probeActive={provingProbeActive}. Commands: on, off, status, export, probe set/run/resume/cancel/clear; probe run cancel-landing.");
                     break;
             }
         }
@@ -162,6 +179,7 @@ public sealed partial class Plugin
             return;
         }
         provingProbeDestination = null;
+        provingProbeLandingResumeAllowed = false;
         provingProbeSetOrigin = PlayerPosition();
         provingProbeSetStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         provingProbeSetPending = true;
@@ -259,7 +277,7 @@ public sealed partial class Plugin
         return $"loading={snapshot.Loading}; meshReady={snapshot.MeshReady}; buildProgress={progress}; currentZoneReady={snapshot.MeshZone == snapshot.Zone}; flight={snapshot.Flight}";
     }
 
-    private void StartNavigationProvingProbe()
+    private void StartNavigationProvingProbe(bool resumeLanding = false)
     {
         if (!navigationProvingEnabled || provingNavigation is null || provingAdapter is null)
         {
@@ -293,19 +311,32 @@ public sealed partial class Plugin
             chat.Print("[SRank navigation test] Return to the saved zone, world and instance before running the probe.");
             return;
         }
-        if (!NavigationProvingProbeDistanceIsSufficient(PlayerPosition(), provingProbeDestination.Value))
+        if (resumeLanding)
+        {
+            if (!provingProbeLandingResumeAllowed ||
+                !NavigationProvingProjectionIsLocal(PlayerPosition(), provingProbeDestination.Value, 3f, 3f))
+            {
+                chat.Print("[SRank navigation test] Resume requires a cancelled landing while still within the saved point's local bounds.");
+                return;
+            }
+        }
+        else if (!NavigationProvingProbeDistanceIsSufficient(PlayerPosition(), provingProbeDestination.Value))
         {
             chat.Print("[SRank navigation test] Start at least 80 yalms from the saved destination so mount, takeoff and flight are exercised.");
             return;
         }
+        provingProbeLandingResumeAllowed = false;
         provingAdapter.ResetMountRequests();
-        provingOperation = provingNavigation.Begin(new NavigationRequest(provingProbeDestination.Value,
-            TravelMode.RequireFlight, RequireMount: true, ArrivalRadius: 3f, HorizontalArrival: false));
+        provingOperation = provingNavigation.Begin(CreateNavigationProvingProbeRequest(provingProbeDestination.Value));
         provingProbeActive = true;
         provingJournal?.Record(ProvingEvent.OperationStarted, state, provingOperation.Id);
         provingJournal?.Record(ProvingEvent.ProbeStarted, state, provingOperation.Id);
         chat.Print($"[SRank navigation test] SHARED probe started: {provingOperation.Id}. Use /sranknavtest probe cancel to test STOP.");
     }
+
+    private static NavigationRequest CreateNavigationProvingProbeRequest(Vector3 destination)
+        => new(destination, TravelMode.RequireFlight, RequireMount: true, ArrivalRadius: 3f,
+            HorizontalArrival: false) { RequireLanding = true };
 
     private static bool NavigationProvingProbeContextMatches(uint currentTerritory, string currentWorld, int currentInstance,
         uint destinationTerritory, string destinationWorld, int destinationInstance)
@@ -342,13 +373,20 @@ public sealed partial class Plugin
             return;
         }
         status = $"Shared navigation probe: {provingOperation.State}, operation {provingOperation.Id}, retries {provingOperation.Retries}";
+        if (provingProbeCancelOnLanding && provingOperation.State == NavigationState.Landing)
+        {
+            provingProbeCancelOnLanding = false;
+            CancelNavigationProvingProbe();
+            chat.Print("[SRank navigation test] Armed cancellation exercised Landing before its first native landing action. No further action belongs to the cancelled operation.");
+            return;
+        }
         if (provingOperation.Result == NavigationResult.Success)
         {
             var arrived = provingOperation.Id;
             provingProbeActive = false;
             CancelNavigationProvingOperation();
             provingJournal?.Record(ProvingEvent.ProbeArrived, state, arrived);
-            chat.Print("[SRank navigation test] SHARED probe arrived at the projected destination. Diagnostics exported.");
+            chat.Print("[SRank navigation test] SHARED probe landed: physical ground confirmed at the projected destination. Diagnostics exported.");
             ExportNavigationProving();
         }
         else if (provingOperation.Result != NavigationResult.Pending)
@@ -366,6 +404,7 @@ public sealed partial class Plugin
             return;
         }
         var cancelled = provingOperation.Id;
+        provingProbeLandingResumeAllowed = provingOperation.State == NavigationState.Landing;
         provingProbeActive = false;
         CancelNavigationProvingOperation();
         provingJournal?.Record(ProvingEvent.ProbeCancelled, state, cancelled);
@@ -375,7 +414,7 @@ public sealed partial class Plugin
             chat.Print("[SRank navigation test] Probe cancellation could not confirm follower stop. Stop vnavmesh and run /sranknavtest off.");
             return;
         }
-        chat.Print("[SRank navigation test] SHARED probe cancelled and follower stop confirmed. The saved destination remains available for a replacement probe.");
+        chat.Print("[SRank navigation test] SHARED probe cancelled and follower stop confirmed. The saved destination remains available; use probe resume after landing cancellation or probe run for a new flight.");
         ExportNavigationProving();
     }
 
@@ -511,7 +550,7 @@ public sealed partial class Plugin
         ExportNavigationProving();
     }
 
-    private sealed class ProvingNavigationAdapter : INavigationAdapter
+    private sealed class ProvingNavigationAdapter : ILandingNavigationAdapter
     {
         private readonly Plugin plugin;
         private readonly ZoneReadinessGate readiness = new();
@@ -577,7 +616,37 @@ public sealed partial class Plugin
             return new(zone, meshZone, Loading, meshReady, buildProgress, plugin.PlayerPosition(),
                 plugin.condition[ConditionFlag.Mounted], plugin.condition[ConditionFlag.InFlight],
                 !flightKnown ? FlightAvailability.Unknown : flightAvailable ? FlightAvailability.Available : FlightAvailability.Unavailable,
-                running.InvokeFunc(), waypoints.InvokeFunc());
+                running.InvokeFunc(), waypoints.InvokeFunc()) { Grounded = ReadGroundEvidence() };
+        }
+
+        private bool? ReadGroundEvidence()
+        {
+            if (Loading || plugin.condition[ConditionFlag.InFlight] ||
+                plugin.condition[ConditionFlag.Jumping] || plugin.condition[ConditionFlag.Jumping61] ||
+                plugin.condition[ConditionFlag.Swimming] || plugin.condition[ConditionFlag.Diving] ||
+                plugin.condition[ConditionFlag.MountOrOrnamentTransition]) return false;
+            var position = plugin.PlayerPosition();
+            var floor = ProjectLanding(NavigationProvingFloorQueryOrigin(position), 1.5f);
+            return floor is { } point
+                ? NavigationProvingProjectionIsLocal(position, point, 1.5f, 0.75f)
+                : null;
+        }
+
+        public bool RequestLanding(NavigationSnapshot snapshot, Vector3 destination)
+        {
+            // Core has already stopped its follower. Never issue an unconditional dismount or
+            // queue delayed movement: the current operation alone may request this native action.
+            if (Loading || !snapshot.InFlight || !plugin.condition[ConditionFlag.InFlight] ||
+                !plugin.condition[ConditionFlag.Mounted] || running.InvokeFunc() ||
+                plugin.condition[ConditionFlag.InCombat]) return false;
+            var position = plugin.PlayerPosition();
+            if (!NavigationProvingProjectionIsLocal(position, destination, 3f, 3f)) return false;
+            var floor = ProjectLanding(NavigationProvingFloorQueryOrigin(position), 3f);
+            if (floor is null || !NavigationProvingProjectionIsLocal(destination, floor.Value, 3f, 1.5f))
+                return false;
+            // General action 23 is the existing consumer's normal native landing request. Its
+            // return value records submission only; fresh physical ground evidence proves completion.
+            return plugin.UseGeneralAction(23);
         }
 
         public Task<IReadOnlyList<Vector3>> FindPath(Vector3 from, Vector3 to, bool fly, CancellationToken cancellation)

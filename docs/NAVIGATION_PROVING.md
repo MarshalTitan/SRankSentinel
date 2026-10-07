@@ -1,74 +1,76 @@
 # Controlled shared-navigation proving build
 
-This PR-only build is 0.7.59.0 with published Core 0.4.0 (release source 67e52f5d4afb080042f9e526a6afae7480b01ff0).
-The catalog and accepted comparison build remain SRankSentinel 0.7.54.0.
-Default behavior is the accepted legacy travel implementation. No configuration schema, UI layout,
-facing policy, S/SS policy, tagging, death/reset evidence or catalog entry is changed.
+Current candidate: **SRankSentinel 0.7.60.0**, bundled published **Core 0.4.1**.
+PR #25 remains unmerged/unreleased; public catalog and rollback baseline remain **0.7.54.0**.
+Default travel, configuration, UI, S/SS semantics, crowd-aware parking, facing, tagging,
+kill/reset evidence and return policy are unchanged. No PvP migration.
 
-## Scope
+## Accepted evidence and current gate
 
-Run /sranknavtest on while idle before choosing an ordinary S-rank report. This session-only switch
-uses Core for observed mesh/build readiness, mounting, takeoff, async pathfinding, following,
-waypoint progress and bounded recovery toward the existing projected report destination.
-It returns control at the existing scan radius or visible-entity handoff. Existing parking/landing,
-tagging, kill/reward grace and Ul'dah return remain authoritative. SS and approximate-coordinate
-recovery are not proving targets. No PvPSentinel migration.
+The inspected 0.7.59.0 probe passed current-zone readiness, mount, takeoff, query and continuous
+following with zero retries. The user subsequently confirmed active-flight cancellation and
+immediate replacement without a reported late interruption. Final InFlight=true leaves landing
+open. Do not repeat that old flight/cancellation test.
 
-The adapter uses Nav.PathfindCancelable; missing IPC fails visibly. Current-zone readiness is
-inferred from loading/territory/world/instance epochs and stable ready + negative build progress.
-Upstream has no mesh-zone identity IPC, so supervised zoning evidence is required.
+Only the isolated probe now requests explicit landing. Ordinary hunt approach still hands off
+to existing SRank parking/landing policy. Core retains the same operation through Landing, stops
+its owned follower first, invalidates pending queries and permits only synchronous, bounded native
+landing requests. The adapter submits the existing native general action 23 only while in flight,
+mounted, near the saved floor and out of combat, with no follower. Submission never proves success.
 
-STOP/disabling cancels the shared operation; changing to a non-approach state cancels before
-handoff. /sranknavtest off cancels and restores legacy approach; if stop cannot be confirmed,
-rollback remains held and Sentinel stays disabled. On failure the hunt is retained, Sentinel
-is disabled, and automatic fallback is forbidden. Export first, then off and explicitly re-enable.
-Reload always starts with proving off. Old handles/task completions cannot stop the successor.
+Success requires InFlight=false, positive local ground evidence and destination/floor bounds,
+stable for 0.75 seconds. The adapter excludes loading, jumping, swimming/diving and mount transitions
+and compares a raised local floor query with player height. Missing ground evidence is unknown,
+not success. Landing has a fixed 20-second deadline independent of repeated action attempts;
+drift, dependency loss, zoning, combat and hunt activation stop or fail visibly with diagnostics.
+There is no unconditional dismount, delayed landing task or automatic legacy fallback.
 
-## Deterministic supervised probe
+Ownership is consumer-local, not a lock against other plugins. vnavmesh has no mesh-zone identity
+IPC; readiness is inferred from observed zone epochs and stable ready/negative build progress.
+The real landing action and physical-ground inference require the focused live proof below.
 
-This candidate adds a session-only anchor-and-return probe because two natural hunts detected the mark
-before the earlier shared approach branch and therefore exercised only legacy parking. Probe coordinates
-remain in memory and are never exported or saved in configuration. The probe can run only with SRank
-automation disabled, Idle, out of combat, in the exact saved territory/world/instance, with no external
-vnavmesh route. It requires a finite route of at least 80 yalms and requires flight; an incoming hunt,
-combat, enabling Sentinel or leaving Idle cancels it.
+## Obtain and load
 
-1. Load the PR artifact as a separate dev plugin and disable the public SRank copy. Keep all other
-   movement automation stopped. In SRank, turn the main Enabled toggle off and confirm Idle.
-2. In an outdoor zone with flight unlocked, manually choose clear ground 150-400 yalms from an aetheryte.
-   Avoid enemies, cliffs, water, structures and narrow passages. Land there and run
-   `/sranknavtest on`, then `/sranknavtest probe set`. Stay still while setup polls readiness for up to
-   30 seconds. Continue only after the destination-set confirmation; a failure reports loading, mesh,
-   build progress, current-zone readiness and flight state without coordinates. Floor projection is queried
-   two yalms above the grounded player because vnavmesh accepts only mesh surfaces at or below the query Y;
-   the result must remain within 8 yalms horizontally and 3 yalms vertically.
-3. Teleport to another zone, then teleport back to that same zone/world/instance. At the aetheryte run
-   `/sranknavtest probe run`. The command refuses a start closer than 80 yalms.
-4. Observe current-zone mesh wait -> mount -> takeoff -> one continuous flight -> arrival at the projected
-   point. Use `/sranknavtest status` if needed; it must show a nonempty operation and a Core state.
-   Arrival exports diagnostics automatically.
-5. Teleport back to the aetheryte and run a second probe. While status is Pathfinding or Following, run
-   `/sranknavtest probe cancel`. Movement must stop. Immediately run `/sranknavtest probe run` again;
-   the replacement must reach the anchor without a late stop or route replacement from the cancelled task.
-6. Run `/sranknavtest off`. It clears the session anchor, restores legacy behavior and exports again.
-   Send navigation-proving.json plus PASS/FAIL for readiness, mount, takeoff, continuous flight, arrival,
-   cancellation and replacement. Include a timestamp/short clip only for a failure.
+Download the **0.7.60.0** artifact from PR #25's latest successful Build workflow.
+The outer artifact ZIP contains latest.zip. Extract latest.zip into the separate dev-plugin
+directory used for previous candidates, replacing that candidate while it is unloaded, and reload
+SRankSentinel.dll. Keep the installed public SRank copy disabled and all other movement automation
+stopped. Confirm version 0.7.60.0. No configuration migration or public release is involved.
 
-`probe clear` removes the saved point when no probe is active. Reload always clears it and starts with
-proving off. The deterministic probe validates Core movement mechanics, ownership and cancellation. It
-does not certify hunt parking, facing, tagging, kill evidence or return policy. The two supplied hunts
-remain evidence that those existing legacy branches functioned, not shared-path acceptance. PR #25
-remains unreleased until this probe passes and a later controlled hunt integration reaches shared movement.
+## Short supervised landing test
 
-## Evidence correction in 0.7.59.0
+1. Turn the main SRank Enabled toggle **off** and confirm **Idle**, out of combat. On clear flat
+   outdoor ground with flight unlocked, 150–400 yalms from an aetheryte, land manually.
+   Run `/sranknavtest on`, then `/sranknavtest probe set`; remain still until destination-set confirmation.
+2. Teleport to another zone and back to the saved zone/world/instance's aetheryte. Run
+   `/sranknavtest probe run cancel-landing`. Observe the flight. At Landing the armed test cancels
+   before the first native landing action and confirms follower stop. This makes the cancellation
+   point repeatable without racing a short transition.
+3. Immediately run `/sranknavtest probe resume`. This creates a **new operation** near the saved point.
+   Expect actual physical landing, no late action from the cancelled operation, and
+   **SHARED probe landed: physical ground confirmed**. Merely hovering at ground level is FAIL.
+4. Run `/sranknavtest off`. It restores legacy travel and exports. Return PASS/FAIL plus the final
+   JSON Entries (paste if attachment access fails). Required evidence: cancelled first operation,
+   distinct replacement ID, Landing → Arrived with Reason=GroundConfirmed, Grounded=true and
+   InFlight=false. Only on failure include timestamp and a short clip or description.
 
-The user supplied two complete 0.7.56.0 hunt traces from one plugin instance. Both reached
-PrepareApproachDestination and then LocateMark in about 0.3 seconds, followed by MoveToSafePoint,
-Landing, SafeWait and tag/return states. OperationsStarted remained zero and Core Entries stayed empty.
-Source review confirms FindMark can resolve the NPC from the object table before the shared coordinate
-approach, after which existing protected parking owns movement. The exporter retained both runs correctly.
+No S-rank spawn is needed. Do not deliberately induce an unsafe landing to test timeout;
+automated tests cover rejection, deadline, dependency loss, cancellation and stale work.
+The armed live cancellation proves revocation before the first landing action; cancellation after
+submission is covered in isolation and is not claimed live-proven by this procedure.
 
-0.7.59.0 keeps the bounded ProvingSession evidence and adds the isolated deterministic probe above.
-Probe observations contain event names, domain state and operation IDs only; the saved point is excluded.
-Core Entries remain genuine movement transitions. No routing, parking, facing, tagging, configuration or
-catalog policy changes. The candidate remains PR-only.
+## Rollback and failure
+
+A probe failure disables proving and leaves main Sentinel disabled; export first. Use
+`/sranknavtest off`. If follower stop cannot be confirmed, keep automation disabled, stop vnavmesh,
+then retry off. Unload the dev candidate and re-enable the accepted public **0.7.54.0** copy.
+Do not run both copies. Reload clears proving and the in-memory destination. Coordinates are never
+saved in configuration or sanitized export.
+
+## Subsequent gate
+
+This mechanics test does not certify hunt safe parking, facing, tagging, kill evidence or return.
+After landing passes, prepare the next controlled ordinary-hunt integration, preserving crowd-aware
+policy and rollback. Require actual shared movement plus zone load → navmesh ready → mount →
+takeoff → continuous flight → existing safe landing → tag → kill/return before broader adoption.
+PR #25 stays unpublished and PvP migration stays blocked until the applicable gates pass.
