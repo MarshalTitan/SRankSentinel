@@ -52,9 +52,10 @@ assert(ui.includes('ConfigurationWindowId = "S Rank Sentinel###SRankSentinel"'),
   "Saved window identity changed.");
 assert(ui.includes("new Vector2(680, 720), ImGuiCond.FirstUseEver") &&
   !ui.includes("SetNextWindowPos") && !ui.includes("NoNav"), "Classic size/position or standard window controls regressed.");
-assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : 520f") && ui.includes("new Vector2(620f,") &&
+assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : ModernMinimumWindowSize.Y") &&
+  ui.includes("Vector2.Max(new Vector2(480f, 520f), SentinelModernAppLayout.MinimumWindowSize(hasActionDock: true))") &&
   !/HeaderHeight\s*=|Layout\s*=|AllowStackedNavigation|CompactBreakpoint|IsCompact/.test(ui),
-  "Use Core 0.3.1's default non-stacking application layout, with a 620x520 expanded minimum.");
+  "Use Core 0.3.1's default non-stacking application layout, with a Core-audited 480x520 expanded minimum.");
 for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistanceControls",
   "DrawRecoveryControls"]) {
   assert(ui.split(helper + "();").length >= 3, `Themes must share ${helper}`);
@@ -63,7 +64,7 @@ assert(!/AddRect|AddCircle|DrawRings|new Vector4/.test(ui),
   "The consumer must not draw canonical Modern primitives.");
 assert(ui.includes('"SRankSentinel.SwitchToClassic", "Use Classic Theme"') &&
   ui.includes('drawActionDock: !config.ModernWindowCollapsed && config.WindowPage == (int)ConfigurationPage.Theme') &&
-  !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("Window theme"'),
+  !ui.includes('CreateModernNavItem("Classic"') && ui.includes('ImGui.Combo("##WindowTheme"'),
   "Modern must have a separate bottom-left Core dock button; Classic must retain its theme selector.");
 assert(ui.includes('ImGui.GetIO().NavVisible && ImGui.IsItemFocused()') &&
   ui.includes('ConfigurationPage.Plugins.ToString()') && ui.includes('ConfigurationPage.History.ToString()'),
