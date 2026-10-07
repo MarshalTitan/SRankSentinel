@@ -272,6 +272,7 @@ internal static partial class Program
     private static void TestCompanionCardLayout()
     {
         foreach (var scale in new[] { 1f, 1.5f, 2f })
+        foreach (var size in new[] { new Vector2(480, 520), new Vector2(620, 520) })
         foreach (var state in new[] { "missing", "disabled", "loaded" }) InContext(() =>
         {
             ImGui.GetIO().FontGlobalScale = scale;
@@ -288,7 +289,7 @@ internal static partial class Program
             var config = new Configuration { WindowTheme = 1, WindowPage = (int)ConfigurationPage.Plugins };
             var plugin = CreateConsumer(config);
             SetField(plugin, "pi", pi);
-            LoadWindowPlacement(new Vector2(620, 520) * scale);
+            LoadWindowPlacement(size * scale);
             for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
             foreach (var companion in CompanionPlugins.All)
             {

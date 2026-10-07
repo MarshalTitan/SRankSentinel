@@ -10,6 +10,10 @@ public sealed partial class Plugin
 {
     // Keep the exact original top-level identity so ImGui retains saved position/collapse state.
     internal const string ConfigurationWindowId = "S Rank Sentinel###SRankSentinel";
+    // Core's default rail/content/dock minimum is 384 x 408. Keep its layout intact,
+    // with enough consumer width for the header and 520 logical pixels for usable pages.
+    internal static Vector2 ModernMinimumWindowSize =>
+        Vector2.Max(new Vector2(480f, 520f), SentinelModernAppLayout.MinimumWindowSize(hasActionDock: true));
     private static readonly string[] WindowThemes = ["Classic", "Sentinel Modern"];
     private readonly SentinelModernStyleScope modernStyle = new();
     private readonly SentinelModernAppShellState modernShell = new();
@@ -36,8 +40,8 @@ public sealed partial class Plugin
             if (modernUiFrame)
             {
                 var headerHeight = SentinelModernAppLayoutOptions.Default.HeaderHeight;
-                ImGui.SetNextWindowSizeConstraints(new Vector2(620f,
-                        config.ModernWindowCollapsed ? headerHeight : 520f) * scale,
+                ImGui.SetNextWindowSizeConstraints(new Vector2(ModernMinimumWindowSize.X,
+                        config.ModernWindowCollapsed ? headerHeight : ModernMinimumWindowSize.Y) * scale,
                     new Vector2(float.MaxValue, config.ModernWindowCollapsed ? headerHeight * scale : float.MaxValue));
             }
             if (pendingModernSize is { } requestedSize)
@@ -287,10 +291,7 @@ public sealed partial class Plugin
         if (modernUiFrame)
             ImGui.TextWrapped("Future placeholder — hunt data not available");
         else
-        {
-            ImGui.SameLine();
-            ImGui.TextUnformatted("Future placeholder — hunt data not available");
-        }
+            ImGui.TextWrapped("Future placeholder — hunt data not available");
         if (expansionChanged)
         {
             RemoveDisabledQueuedAlerts();
@@ -325,24 +326,24 @@ public sealed partial class Plugin
         var freshnessChanged = false;
         if (modernUiFrame)
         {
-            SentinelModernSettingsRow.Draw("Freshness", freshnessLabel, null,
+            DrawSettingsRow("Freshness", freshnessLabel, null,
                 () => freshnessChanged = ImGui.InputInt("##Value", ref freshnessMinutes), scale: ImGuiHelpers.GlobalScale);
         }
         else
-            freshnessChanged = ImGui.InputInt(freshnessLabel, ref freshnessMinutes);
+        {
+            ImGui.TextWrapped(freshnessLabel);
+            ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X);
+            freshnessChanged = ImGui.InputInt("##QueuedAlertFreshness", ref freshnessMinutes);
+        }
         if (freshnessChanged)
             config.AlertFreshnessMinutes = Math.Clamp(freshnessMinutes, 10, 180);
 
         if (DrawActionButton("Save settings"))
             config.Save();
-        if (!modernUiFrame)
-            ImGui.SameLine();
         ImGui.BeginDisabled(current is null);
         if (DrawActionButton("SKIP CURRENT + KEEP QUEUE", danger: true))
             FailCurrent("Current hunt skipped manually", HuntExitRequestSource.ManualSkip);
         ImGui.EndDisabled();
-        if (!modernUiFrame)
-            ImGui.SameLine();
         if (DrawActionButton("STOP + RESET THROUGH UL'DAH", danger: true))
         {
             pendingAlerts.Clear();
@@ -359,7 +360,9 @@ public sealed partial class Plugin
     private void DrawAppearanceControls()
     {
         var selected = config.WindowTheme;
-        if (ImGui.Combo("Window theme", ref selected, WindowThemes, WindowThemes.Length))
+        ImGui.TextWrapped("Window theme");
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X);
+        if (ImGui.Combo("##WindowTheme", ref selected, WindowThemes, WindowThemes.Length))
             SetWindowTheme(selected);
         ImGui.TextWrapped("Classic uses the compact one-page layout. Sentinel Modern groups the same settings into pages.");
     }
@@ -372,19 +375,61 @@ public sealed partial class Plugin
         config.Save();
     }
 
+    // Core 0.3.1 measures multiline labels but does not insert line breaks itself.
+    // Supply wrapped consumer text while leaving all row geometry and controls to Core.
+    private static string WrapSettingsLabel(string label, float width)
+    {
+        var lines = new List<string>();
+        foreach (var paragraph in label.Split('\n'))
+        {
+            var line = "";
+            foreach (var word in paragraph.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var candidate = line.Length == 0 ? word : line + " " + word;
+                if (line.Length > 0 && ImGui.CalcTextSize(candidate).X > width)
+                {
+                    lines.Add(line);
+                    line = word;
+                }
+                else line = candidate;
+            }
+            lines.Add(line);
+        }
+        return string.Join("\n", lines);
+    }
+
+    private static void DrawSettingsRow(string id, string label, string? description,
+        Action drawControl, float controlWidth = 180f, float scale = 1f)
+    {
+        var options = SentinelModernSettingsRowLayoutOptions.Default with
+        {
+            PreferredControlWidth = controlWidth,
+            MinimumControlWidth = MathF.Min(controlWidth, SentinelModernSettingsRowLayoutOptions.Default.MinimumControlWidth),
+        };
+        var columns = SentinelModernSettingsRowLayout.ResolveColumns(ImGui.GetContentRegionAvail().X, scale, options);
+        SentinelModernSettingsRow.Draw(id, WrapSettingsLabel(label, columns.TextWidth),
+            description, drawControl, options, scale);
+    }
+
     private float DrawFloat(string label, float value, float min, float max, string format = "%.0f y")
     {
         if (modernUiFrame)
         {
             var changed = false;
-            SentinelModernSettingsRow.Draw(label, label.Split("##", 2)[0], null,
+            DrawSettingsRow(label, label.Split("##", 2)[0], null,
                 () => changed = ImGui.SliderFloat("##Value", ref value, min, max, format),
                 scale: ImGuiHelpers.GlobalScale);
             return changed ? MathF.Round(value) : value;
         }
-        return ImGui.SliderFloat(label, ref value, min, max, format)
-            ? MathF.Round(value)
-            : value;
+        ImGui.TextWrapped(label.Split("##", 2)[0]);
+        ImGui.PushID(label);
+        try
+        {
+            ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X);
+            return ImGui.SliderFloat("##Value", ref value, min, max, format)
+                ? MathF.Round(value) : value;
+        }
+        finally { ImGui.PopID(); }
     }
 
     private void DrawDistanceProfile(
@@ -399,10 +444,14 @@ public sealed partial class Plugin
         {
             var scale = ImGuiHelpers.GlobalScale;
             var width = ImGui.GetContentRegionAvail().X - (28f * scale);
-            var row = SentinelModernSettingsRowLayout.Resolve(width, ImGui.GetTextLineHeight(), 0f,
-                ImGui.GetFrameHeight(), false, scale);
+            var columns = SentinelModernSettingsRowLayout.ResolveColumns(width, scale);
             var headingSize = ImGui.CalcTextSize(heading, false, width);
-            var height = headingSize.Y + (4f * row.Size.Y) + (5f * ImGui.GetStyle().ItemSpacing.Y) + (24f * scale);
+            string[] labels = ["Initial coordinate stop", "Safe parking clearance",
+                "Emergency clearance", "Engage only at/below HP %"];
+            var rowsHeight = labels.Sum(label => SentinelModernSettingsRowLayout.Resolve(width,
+                ImGui.CalcTextSize(WrapSettingsLabel(label, columns.TextWidth)).Y, 0f,
+                ImGui.GetFrameHeight(), false, scale).Size.Y);
+            var height = headingSize.Y + rowsHeight + (5f * ImGui.GetStyle().ItemSpacing.Y) + (28f * scale);
             using var card = SentinelModernGlassCard.Begin(id + "-profile",
                 new SentinelModernGlassCardOptions { Size = new Vector2(0f, height / scale) }, scale);
             if (card.IsVisible)
@@ -413,7 +462,7 @@ public sealed partial class Plugin
             return;
         }
         ImGui.Spacing();
-        ImGui.TextUnformatted(heading);
+        ImGui.TextWrapped(heading);
         DrawDistanceProfileValues(id, profile, flagMinimum, safeMinimum, emergencyMinimum);
     }
 

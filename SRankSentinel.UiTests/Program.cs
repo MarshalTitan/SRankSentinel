@@ -63,7 +63,10 @@ internal static partial class Program
             Test("history records and displays only enabled expansions without deleting saved reports", TestHistoryExpansionFilters);
             Test("daily activity splits reports into tagged and untagged without double counting", TestHistoryActivity);
             Test("unified clearing retains active credit evidence and clears legacy credit records", TestUnifiedHistoryClearing);
-            Console.WriteLine($"{passed}/32 UI, migration, companion, and history tests passed.");
+            Test("Core minimum audit and narrower saved sizes preserve window identity", TestNarrowWindowPlacement);
+            Test("Classic controls reflow and remain scrollable at narrower widths/scales", TestNarrowClassic);
+            Test("History reports grow with the viewport and Clear remains bottom-anchored", TestHistoryViewport);
+            Console.WriteLine($"{passed}/35 UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)
@@ -523,7 +526,7 @@ internal static partial class Program
         LoadWindowPlacement(new Vector2(480, 320));
         for (var frame = 0; frame < 3; frame++) ConsumerFrame(plugin);
         var window = FindWindow(Plugin.ConfigurationWindowId);
-        Check(window.Size == new Vector2(620, 520) && window.Pos == new Vector2(145, 95),
+        Check(window.Size == Plugin.ModernMinimumWindowSize && window.Pos == new Vector2(145, 95),
             "Modern minimum did not preserve position while expanding an undersized window.");
         CheckShellGeometry(Plugin.ConfigurationWindowId, 1f);
     });
@@ -628,7 +631,7 @@ internal static partial class Program
     private static unsafe void TestResponsiveConsumer()
     {
         foreach (var scale in new[] { 1f, 1.5f, 2f })
-        foreach (var size in new[] { new Vector2(620, 520), new Vector2(800, 640), new Vector2(1040, 860) })
+        foreach (var size in new[] { new Vector2(480, 520), new Vector2(520, 620), new Vector2(620, 520), new Vector2(800, 640), new Vector2(1040, 860) })
             InContext(() =>
             {
                 ImGui.GetIO().FontGlobalScale = scale;
