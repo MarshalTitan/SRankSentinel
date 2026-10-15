@@ -3838,8 +3838,9 @@ public sealed partial class Plugin : IDalamudPlugin
         // must not bypass the long-approach mount/takeoff gate and start parking on foot.
         var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
             ActiveDistanceProfile.WaitingDistance);
-        if (!HuntProgressPolicy.IsWithinVisibleMarkApproachRange(
-                HorizontalDistance(PlayerPosition(), visible.Position), scanRange, ApproachScanTolerance))
+        if (HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(
+                current.TerritoryId, HorizontalDistance(PlayerPosition(), visible.Position),
+                scanRange, ApproachScanTolerance))
             return false;
 
         mark = visible;
