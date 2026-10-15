@@ -24,6 +24,11 @@ var tests = new (string Name, Action Run)[]
     ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
     ("Company Chocobo is preferred when available", CompanyChocoboIsPreferred),
     ("unavailable Company Chocobo falls back to Mount Roulette", CompanyChocoboFallsBack),
+    ("Heritage Found southwest flag chooses attuned western crystal", HeritageFoundSouthwestCrystal),
+    ("Heritage Found eastern and northern flags choose their nearest crystals", HeritageFoundOtherCrystals),
+    ("Heritage Found missing attunement chooses only available crystal", HeritageFoundRespectsAttunement),
+    ("distant visible mark remains on the confirmed flight approach", DistantMarkKeepsFlightApproach),
+    ("nearby visible mark enters protected parking", NearbyMarkEntersParking),
     ("long approach requests a mount before takeoff", LongApproachMountsFirst),
     ("mounted long approach waits for confirmed flight", LongApproachRequiresConfirmedFlight),
     ("confirmed flight permits the flying route", ConfirmedFlightPermitsRoute),
@@ -205,6 +210,37 @@ static void CompanyChocoboFallsBack()
         HuntProgressPolicy.SelectMount(true, true, false));
     Equal(SentinelMountChoice.MountRoulette,
         HuntProgressPolicy.SelectMount(false, true, true));
+}
+
+static void HeritageFoundSouthwestCrystal() =>
+    Equal(212u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        8.2f, 33.4f, [210u, 211u, 212u]));
+
+static void HeritageFoundOtherCrystals()
+{
+    Equal(210u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        32f, 25f, [210u, 211u, 212u]));
+    Equal(211u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        17f, 10f, [210u, 211u, 212u]));
+}
+
+static void HeritageFoundRespectsAttunement()
+{
+    Equal(210u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        8.2f, 33.4f, [210u, 211u]));
+    Equal(211u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        8.2f, 33.4f, [211u]));
+    Equal(0u, HuntProgressPolicy.SelectHeritageFoundAetheryte(
+        8.2f, 33.4f, []));
+}
+
+static void DistantMarkKeepsFlightApproach() =>
+    False(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(1200f, 80f, 3f));
+
+static void NearbyMarkEntersParking()
+{
+    True(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(83f, 80f, 3f));
+    False(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(83.1f, 80f, 3f));
 }
 
 static void LongApproachMountsFirst() =>
