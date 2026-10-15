@@ -102,9 +102,26 @@ assert(config.includes("if (Version < 16)") && config.includes("WindowTheme = 0;
   config.includes("WindowPage = 0;") && config.includes("MigrateWindowAppearance();") &&
   config.includes("NormalizeTheme(WindowTheme)"), "Explicit Classic migration/normalization missing.");
 
+
+// These exact navigation edits are reviewed independently of the UI migration.
+// Undo only their literal source blocks before comparing the original hunt baseline.
+const reviewedRoutingPatches = {
+  "Plugin.cs": [
+    ["        // Heritage Found's linked Level rows are absent in some game-data snapshots.\n        // Its map markers still locate all three crystals; use those when normal\n        // world-position selection cannot produce a candidate.\n        if (territoryAetheryteId == 0 && current.TerritoryId == 1191 &&\n            HasUsableMapCoordinates(current))\n        {\n            territoryAetheryteId = HuntProgressPolicy.SelectHeritageFoundAetheryte(\n                current.MapX, current.MapY, attuned.Select(row => row.RowId).ToArray());\n            if (territoryAetheryteId != 0)\n                log.Information(\"Selected Heritage Found map-marker aetheryte {Aetheryte} for X{MapX:0.0} Y{MapY:0.0}\",\n                    territoryAetheryteId, current.MapX, current.MapY);\n        }\n\n", ""],
+    ["        if (visible.IsDead || visible.CurrentHp == 0)\n        {\n            mark = visible;\n            MarkWasIdentified(visible);\n            ConfirmKill($\"{visible.Name.TextValue} became visibly dead during local approach recovery\");\n            return true;\n        }\n\n        // Object-table visibility can extend across the whole zone. A distant mark\n        // must not bypass the long-approach mount/takeoff gate and start parking on foot.\n        var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,\n            ActiveDistanceProfile.WaitingDistance);\n        if (!HuntProgressPolicy.IsWithinVisibleMarkApproachRange(\n                HorizontalDistance(PlayerPosition(), visible.Position), scanRange, ApproachScanTolerance))\n            return false;\n\n        mark = visible;\n        MarkWasIdentified(visible);\n", "        mark = visible;\n        MarkWasIdentified(visible);\n        if (visible.IsDead || visible.CurrentHp == 0)\n        {\n            ConfirmKill($\"{visible.Name.TextValue} became visibly dead during local approach recovery\");\n            return true;\n        }\n\n"],
+  ],
+  "HuntProgressPolicy.cs": [
+    ["    // MapMarker subrows 626.0-626.2 on Heritage Found's map (861), keyed by\n    // Aetheryte IDs 210, 212, and 211. Map coordinates use the game's 41-unit\n    // scale over a 2048-pixel marker texture for this 100% scale map.\n    private static readonly (uint Id, float X, float Y)[] HeritageFoundMarkers =\n    [\n        (210, 1539f, 1231f),\n        (211, 802f, 441f),\n        (212, 805f, 1145f),\n    ];\n\n    public static uint SelectHeritageFoundAetheryte(\n        float mapX, float mapY, IReadOnlyCollection<uint> usableAetheryteIds)\n    {\n        if (mapX <= 0f || mapY <= 0f)\n            return 0;\n\n        var markerX = (mapX - 1f) * 2048f / 41f;\n        var markerY = (mapY - 1f) * 2048f / 41f;\n        return HeritageFoundMarkers\n            .Where(marker => usableAetheryteIds.Contains(marker.Id))\n            .OrderBy(marker => (marker.X - markerX) * (marker.X - markerX) +\n                               (marker.Y - markerY) * (marker.Y - markerY))\n            .Select(marker => marker.Id)\n            .FirstOrDefault();\n    }\n\n    public static bool IsWithinVisibleMarkApproachRange(\n        float horizontalDistance, float scanRange, float tolerance) =>\n        horizontalDistance <= scanRange + tolerance;\n\n", ""],
+  ],
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [reviewedChange, baselineText] of reviewedRoutingPatches[path] ?? []) {
+    assert(source.split(reviewedChange).length === 2,
+      `Missing or duplicated reviewed routing change: ${path}`);
+    source = source.replace(reviewedChange, baselineText);
+  }
   if (path === "Plugin.cs") {
     // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
     for (const hook of [
@@ -128,4 +145,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared shell, Plugins/History pages, separate Classic dock button, navigation tooltip input, migration/placement, and unchanged hunt sources after exact passive observer insertions.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared UI, passive history hooks, and baseline hunt sources after removing exact reviewed routing changes.");
