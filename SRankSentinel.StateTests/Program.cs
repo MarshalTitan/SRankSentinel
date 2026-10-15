@@ -24,6 +24,12 @@ var tests = new (string Name, Action Run)[]
     ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
     ("Company Chocobo is preferred when available", CompanyChocoboIsPreferred),
     ("unavailable Company Chocobo falls back to Mount Roulette", CompanyChocoboFallsBack),
+    ("Heritage Found southwest flag chooses attuned western crystal", HeritageFoundSouthwestCrystal),
+    ("Heritage Found eastern and northern flags choose their nearest crystals", HeritageFoundOtherCrystals),
+    ("marker fallback chooses nearer crystals in other hunt zones", OtherZonesChooseNearestCrystal),
+    ("marker fallback respects attunement and missing map coverage", MapMarkerRespectsAttunement),
+    ("distant visible mark retains the flight approach", DistantMarkKeepsFlightApproach),
+    ("nearby mark enters parking at the scan boundary", NearbyMarkEntersParking),
     ("long approach requests a mount before takeoff", LongApproachMountsFirst),
     ("mounted long approach waits for confirmed flight", LongApproachRequiresConfirmedFlight),
     ("confirmed flight permits the flying route", ConfirmedFlightPermitsRoute),
@@ -205,6 +211,49 @@ static void CompanyChocoboFallsBack()
         HuntProgressPolicy.SelectMount(true, true, false));
     Equal(SentinelMountChoice.MountRoulette,
         HuntProgressPolicy.SelectMount(false, true, true));
+}
+
+static void HeritageFoundSouthwestCrystal() =>
+    Equal(212u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 8.2f, 33.4f, [210u, 211u, 212u]));
+
+static void HeritageFoundOtherCrystals()
+{
+    Equal(210u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 32f, 25f, [210u, 211u, 212u]));
+    Equal(211u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 17f, 10f, [210u, 211u, 212u]));
+}
+
+static void OtherZonesChooseNearestCrystal()
+{
+    Equal(208u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1190u, 14f, 19f, [207u, 208u, 209u]));
+    Equal(166u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        956u, 30f, 12f, [166u, 167u, 168u]));
+    Equal(77u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        398u, 16f, 22f, [76u, 77u]));
+}
+
+static void MapMarkerRespectsAttunement()
+{
+    Equal(210u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 8.2f, 33.4f, [210u, 211u]));
+    Equal(211u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 8.2f, 33.4f, [211u]));
+    Equal(0u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        1191u, 8.2f, 33.4f, []));
+    Equal(0u, HuntProgressPolicy.SelectMapMarkerAetheryte(
+        399u, 8.2f, 33.4f, [210u]));
+}
+
+static void DistantMarkKeepsFlightApproach() =>
+    True(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(1200f, 80f, 3f));
+
+static void NearbyMarkEntersParking()
+{
+    False(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(83f, 80f, 3f));
+    True(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(83.1f, 80f, 3f));
 }
 
 static void LongApproachMountsFirst() =>
