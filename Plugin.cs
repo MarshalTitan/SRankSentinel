@@ -1659,6 +1659,19 @@ public sealed partial class Plugin : IDalamudPlugin
             territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
         }
 
+        // Heritage Found's linked Level rows are absent in some game-data snapshots.
+        // Its map markers still locate all three crystals; use those when normal
+        // world-position selection cannot produce a candidate.
+        if (territoryAetheryteId == 0 && current.TerritoryId == 1191 &&
+            HasUsableMapCoordinates(current))
+        {
+            territoryAetheryteId = HuntProgressPolicy.SelectHeritageFoundAetheryte(
+                current.MapX, current.MapY, attuned.Select(row => row.RowId).ToArray());
+            if (territoryAetheryteId != 0)
+                log.Information("Selected Heritage Found map-marker aetheryte {Aetheryte} for X{MapX:0.0} Y{MapY:0.0}",
+                    territoryAetheryteId, current.MapX, current.MapY);
+        }
+
         if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
             territoryAetheryteId = attuned.FirstOrDefault(row => row.RowId == current.PreferredAetheryteId).RowId;
         if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
@@ -3813,14 +3826,24 @@ public sealed partial class Plugin : IDalamudPlugin
         if (visible is null)
             return false;
 
-        mark = visible;
-        MarkWasIdentified(visible);
         if (visible.IsDead || visible.CurrentHp == 0)
         {
+            mark = visible;
+            MarkWasIdentified(visible);
             ConfirmKill($"{visible.Name.TextValue} became visibly dead during local approach recovery");
             return true;
         }
 
+        // Object-table visibility can extend across the whole zone. A distant mark
+        // must not bypass the long-approach mount/takeoff gate and start parking on foot.
+        var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
+            ActiveDistanceProfile.WaitingDistance);
+        if (!HuntProgressPolicy.IsWithinVisibleMarkApproachRange(
+                HorizontalDistance(PlayerPosition(), visible.Position), scanRange, ApproachScanTolerance))
+            return false;
+
+        mark = visible;
+        MarkWasIdentified(visible);
         vnav.StopSafe("actual hunt entity became visible during local coordinate approach");
         ResetApproachRouteTracking(clearProjectionCandidates: true);
         approachPoint = null;
