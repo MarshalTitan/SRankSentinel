@@ -1659,17 +1659,17 @@ public sealed partial class Plugin : IDalamudPlugin
             territoryAetheryteId = SelectNearestUsableAetheryte(attuned, alertPoint.Value);
         }
 
-        // Heritage Found's linked Level rows are absent in some game-data snapshots.
-        // Its map markers still locate all three crystals; use those when normal
-        // world-position selection cannot produce a candidate.
-        if (territoryAetheryteId == 0 && current.TerritoryId == 1191 &&
-            HasUsableMapCoordinates(current))
+        // Some game-data snapshots omit usable linked Level positions. Prefer
+        // the closest attuned crystal on the territory map before the fixed fallback.
+        if (territoryAetheryteId == 0 && HasUsableMapCoordinates(current) &&
+            !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
         {
-            territoryAetheryteId = HuntProgressPolicy.SelectHeritageFoundAetheryte(
-                current.MapX, current.MapY, attuned.Select(row => row.RowId).ToArray());
+            territoryAetheryteId = HuntProgressPolicy.SelectMapMarkerAetheryte(
+                current.TerritoryId, current.MapX, current.MapY,
+                attuned.Select(row => row.RowId).ToArray());
             if (territoryAetheryteId != 0)
-                log.Information("Selected Heritage Found map-marker aetheryte {Aetheryte} for X{MapX:0.0} Y{MapY:0.0}",
-                    territoryAetheryteId, current.MapX, current.MapY);
+                log.Information("Selected map-marker aetheryte {Aetheryte} for territory {Territory}, X{MapX:0.0} Y{MapY:0.0}",
+                    territoryAetheryteId, current.TerritoryId, current.MapX, current.MapY);
         }
 
         if (territoryAetheryteId == 0 && !TerritoryAetheryteOverrides.ContainsKey(current.TerritoryId))
@@ -3839,7 +3839,7 @@ public sealed partial class Plugin : IDalamudPlugin
         var scanRange = Math.Max(ActiveDistanceProfile.FlagApproachDistance,
             ActiveDistanceProfile.WaitingDistance);
         if (HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(
-                current.TerritoryId, HorizontalDistance(PlayerPosition(), visible.Position),
+                HorizontalDistance(PlayerPosition(), visible.Position),
                 scanRange, ApproachScanTolerance))
             return false;
 
