@@ -62,6 +62,36 @@ internal enum SentinelMountChoice
 /// </summary>
 internal static class HuntProgressPolicy
 {
+    // MapMarker subrows 626.0-626.2 on Heritage Found's map (861), keyed by
+    // Aetheryte IDs 210, 212, and 211. Map coordinates use the game's 41-unit
+    // scale over a 2048-pixel marker texture for this 100% scale map.
+    private static readonly (uint Id, float X, float Y)[] HeritageFoundMarkers =
+    [
+        (210, 1539f, 1231f),
+        (211, 802f, 441f),
+        (212, 805f, 1145f),
+    ];
+
+    public static uint SelectHeritageFoundAetheryte(
+        float mapX, float mapY, IReadOnlyCollection<uint> usableAetheryteIds)
+    {
+        if (mapX <= 0f || mapY <= 0f)
+            return 0;
+
+        var markerX = (mapX - 1f) * 2048f / 41f;
+        var markerY = (mapY - 1f) * 2048f / 41f;
+        return HeritageFoundMarkers
+            .Where(marker => usableAetheryteIds.Contains(marker.Id))
+            .OrderBy(marker => (marker.X - markerX) * (marker.X - markerX) +
+                               (marker.Y - markerY) * (marker.Y - markerY))
+            .Select(marker => marker.Id)
+            .FirstOrDefault();
+    }
+
+    public static bool IsWithinVisibleMarkApproachRange(
+        float horizontalDistance, float scanRange, float tolerance) =>
+        horizontalDistance <= scanRange + tolerance;
+
     public static SentinelMountChoice SelectMount(
         bool preferredAttemptAllowed,
         bool companyChocoboUnlocked,
