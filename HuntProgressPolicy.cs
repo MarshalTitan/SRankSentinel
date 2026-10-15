@@ -88,9 +88,9 @@ internal static class HuntProgressPolicy
             .FirstOrDefault();
     }
 
-    public static bool IsWithinVisibleMarkApproachRange(
-        float horizontalDistance, float scanRange, float tolerance) =>
-        horizontalDistance <= scanRange + tolerance;
+    public static bool ShouldDeferVisibleMarkDuringApproach(
+        uint territoryId, float horizontalDistance, float scanRange, float tolerance) =>
+        territoryId == 1191 && horizontalDistance > scanRange + tolerance;
 
     public static SentinelMountChoice SelectMount(
         bool preferredAttemptAllowed,
