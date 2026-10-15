@@ -27,8 +27,8 @@ var tests = new (string Name, Action Run)[]
     ("Heritage Found southwest flag chooses attuned western crystal", HeritageFoundSouthwestCrystal),
     ("Heritage Found eastern and northern flags choose their nearest crystals", HeritageFoundOtherCrystals),
     ("Heritage Found missing attunement chooses only available crystal", HeritageFoundRespectsAttunement),
-    ("distant visible mark remains on the confirmed flight approach", DistantMarkKeepsFlightApproach),
-    ("nearby visible mark enters protected parking", NearbyMarkEntersParking),
+    ("Heritage Found distant visible mark retains the flight approach", DistantMarkKeepsFlightApproach),
+    ("Heritage Found nearby mark parks and other zones retain their behavior", NearbyMarkEntersParking),
     ("long approach requests a mount before takeoff", LongApproachMountsFirst),
     ("mounted long approach waits for confirmed flight", LongApproachRequiresConfirmedFlight),
     ("confirmed flight permits the flying route", ConfirmedFlightPermitsRoute),
@@ -235,12 +235,13 @@ static void HeritageFoundRespectsAttunement()
 }
 
 static void DistantMarkKeepsFlightApproach() =>
-    False(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(1200f, 80f, 3f));
+    True(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(1191u, 1200f, 80f, 3f));
 
 static void NearbyMarkEntersParking()
 {
-    True(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(83f, 80f, 3f));
-    False(HuntProgressPolicy.IsWithinVisibleMarkApproachRange(83.1f, 80f, 3f));
+    False(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(1191u, 83f, 80f, 3f));
+    True(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(1191u, 83.1f, 80f, 3f));
+    False(HuntProgressPolicy.ShouldDeferVisibleMarkDuringApproach(1190u, 1200f, 80f, 3f));
 }
 
 static void LongApproachMountsFirst() =>
