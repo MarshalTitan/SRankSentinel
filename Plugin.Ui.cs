@@ -342,19 +342,10 @@ public sealed partial class Plugin
             config.Save();
         ImGui.BeginDisabled(current is null);
         if (DrawActionButton("SKIP CURRENT + KEEP QUEUE", danger: true))
-            FailCurrent("Current hunt skipped manually", HuntExitRequestSource.ManualSkip);
+            SkipCurrentKeepQueue();
         ImGui.EndDisabled();
         if (DrawActionButton("STOP + RESET THROUGH UL'DAH", danger: true))
-        {
-            pendingAlerts.Clear();
-            PersistQueue();
-            if (current is null)
-                SetState(SentinelState.ResetToUldah,
-                    "Manual reset requested",
-                    HuntExitRequestSource.ManualSkip);
-            else
-                FailCurrent("Stopped manually", HuntExitRequestSource.ManualSkip);
-        }
+            StopAndResetThroughUldah();
     }
 
     private void DrawAppearanceControls()
