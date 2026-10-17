@@ -5,8 +5,8 @@ if (!pluginPath || !combatPath || !policyPath || !projectPath) {
   throw new Error("Usage: node Audit-FieldRecovery.mjs <Plugin.cs> <CombatController.cs> <HuntProgressPolicy.cs> <project>");
 }
 
-// Recovery buttons now live in the presentation-only partial class.
-const plugin = readFileSync(pluginPath, "utf8") + readFileSync("Plugin.Ui.cs", "utf8");
+// Recovery UI and IPC now call the same extracted actions; include that partial in the veto audit.
+const plugin = readFileSync(pluginPath, "utf8") + readFileSync("Plugin.Ui.cs", "utf8") + readFileSync("Plugin.RemoteRecovery.cs", "utf8");
 const combat = readFileSync(combatPath, "utf8");
 const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
