@@ -1,7 +1,8 @@
-# Remote recovery v1 — experimental
+# Remote recovery v1
 
-Candidate **SRank 0.7.62.0**, based on published **0.7.56.0**, paired with experimental
-Relay **0.5.0.6**. No release/catalog promotion or live acceptance yet.
+Versions: **SRank 0.7.62.0 / Relay 0.5.0.6**, based on prior SRank **0.7.56.0**.
+The user authorized normal live-updater distribution on 2026-10-17 UTC with the Relay
+permission default OFF. Real in-game acceptance remains pending.
 Navigation PR #25 stays unchanged and separate.
 
 ## Contract
@@ -41,11 +42,12 @@ travel/tag/parking/reward algorithm is edited.
 
 ## Supervision and rollback
 
-Use the exact successful CI SRank **0.7.62.0** and Relay **0.5.0.6** artifacts;
-unload prior dev copies and keep public copies disabled. Follow the
-[Wrothy-first paired procedure](https://github.com/MarshalTitan/SentinelRelay/blob/feature/srank-remote-controls/docs/SRANK_REMOTE_CONTROLS.md):
+Update SRank **0.7.62.0** and Relay **0.5.0.6** through the normal permanent Sentinel
+repository URL in Dalamud. Keep dev copies disabled. Follow the
+[Wrothy-first paired procedure](https://github.com/MarshalTitan/SentinelRelay/blob/main/docs/SRANK_REMOTE_CONTROLS.md):
 permission on/save; status; safe skip preserving queue; reset request with no action;
 confirm within 30s; wrong profile and permission-off rejection.
 No live behavior or private Discord authentication is certified by a successful build.
-Rollback: permission OFF/save, unload experimental plugins, re-enable public
-SRank **0.7.56.0** / Relay **0.5.0.5**. Do not delete configuration.
+Rollback: permission OFF/save immediately stops remote controls while retaining normal
+hunting/Relay. If a binary rollback is necessary, unload the new copies and use the
+preserved prior SRank **0.7.56.0** / Relay **0.5.0.5** releases. Do not delete configuration.
