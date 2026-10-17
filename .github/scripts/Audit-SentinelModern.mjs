@@ -124,8 +124,8 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   }
   if (path === "Plugin.cs") {
     // Only constructor/teardown access-boundary hooks; no hunt implementation changes.
-    source = source.replace("        IPluginLog pluginLog,\\n        IPlayerState playerState)", "        IPluginLog pluginLog)");
-    for (const hook of ["        RegisterRemoteRecovery(playerState);\\n", "        DisposeRemoteRecovery();\\n"]) {
+    source = source.replace("        IPluginLog pluginLog,\n        IPlayerState playerState)", "        IPluginLog pluginLog)");
+    for (const hook of ["        RegisterRemoteRecovery(playerState);\n", "        DisposeRemoteRecovery();\n"]) {
       assert(source.split(hook).length === 2, "Missing/duplicated recovery IPC lifecycle hook");
       source = source.replace(hook, "");
     }
