@@ -328,7 +328,8 @@ public sealed partial class Plugin : IDalamudPlugin
         IGameGui gameGui,
         IFramework framework,
         ITargetManager targetManager,
-        IPluginLog pluginLog)
+        IPluginLog pluginLog,
+        IPlayerState playerState)
     {
         pi = pluginInterface;
         commands = commandManager;
@@ -380,6 +381,7 @@ public sealed partial class Plugin : IDalamudPlugin
             foreach (var issue in ssStagingAudit.Issues)
                 log.Error("Fixed SS staging coverage audit: {Issue}", issue);
 
+        RegisterRemoteRecovery(playerState);
         StartFaloopWithSavedAuthentication();
 
         log.Information(
@@ -388,6 +390,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        DisposeRemoteRecovery();
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
         faloop.SessionRejected -= OnFaloopSessionRejected;

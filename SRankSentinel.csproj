@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.7.56.0</Version>
+    <Version>0.7.62.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -16,6 +16,7 @@
     <Compile Remove="SentinelHunts\**\*.cs" />
     <Compile Remove="SRankSentinel.StateTests\**\*.cs" />
     <Compile Remove="SRankSentinel.UiTests\**\*.cs" />
+    <Compile Remove="SRankSentinel.RemoteTests\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
