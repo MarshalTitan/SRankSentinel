@@ -11,3 +11,9 @@ for (const endpoint of ["Status", "SkipCurrentKeepQueue", "StopResetThroughUldah
     assert(remote.includes('"SRankSentinel.Remote.v1.' + endpoint + '"'), "Missing fixed v1 endpoint");
 assert((remote.match(/GetIpcProvider</g) ?? []).length === 3, "Recovery surface must stay narrow");
 console.log("Remote recovery audit passed: UI/IPC share exact existing actions; three fixed v1 endpoints only.");
+
+for (const workflow of ["build.yml", "release.yml"]) {
+    const text = read(".github/workflows/" + workflow);
+    assert(text.includes("Audit-RemoteRecovery.mjs") && text.includes("SRankSentinel.RemoteTests"),
+        workflow + " must validate the new recovery contract before packaging/publication");
+}

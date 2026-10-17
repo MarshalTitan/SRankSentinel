@@ -76,6 +76,12 @@ jobs:
           node .github/scripts/Audit-V734TravelRestore.mjs Plugin.cs NativeTravel.cs HuntCatalog.cs VNavmeshIpc.cs
           node .github/scripts/Audit-FieldRecovery.mjs Plugin.cs CombatController.cs HuntProgressPolicy.cs SRankSentinel.csproj
 
+      - name: Audit shared UI and remote recovery equivalence
+        run: node .github/scripts/Audit-RemoteRecovery.mjs
+
+      - name: Run isolated remote recovery contract tests
+        run: dotnet run --project SRankSentinel.RemoteTests/SRankSentinel.RemoteTests.csproj -c Release
+
       - name: Run state-machine regression tests
         run: dotnet run --project SRankSentinel.StateTests/SRankSentinel.StateTests.csproj -c Release
 
