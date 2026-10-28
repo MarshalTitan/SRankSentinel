@@ -12,7 +12,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.62.0</Version>"],
+  [project, "<Version>0.7.63.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -138,3 +138,22 @@ if (settleBody.includes("Player.Rotation =") ||
   throw new Error("Post-landing facing settle contains a direct rotation/position write");
 
 console.log("Field-recovery audit passed: main-thread queue restoration, latched tag, live-entity exit veto, robust Raise, bounded recovery, preferred parking, bounded natural facing settle, Company Chocobo fallback, confirmed-flight startup, and v0.7.34 travel guard are present.");
+
+const instance = readFileSync("Plugin.InstanceChange.cs", "utf8");
+const instancePolicy = readFileSync("InstanceChangeRecovery.cs", "utf8");
+if (/FailCurrent\(|travel\.Teleport\(|EnsureMounted\(|TryStartApproachRoute\(/.test(instance))
+  throw new Error("Local instance recovery must not abandon/reroute/teleport/mount for the hunt");
+for (const hook of ["StopInstanceRangeMovement();", "InstanceChangeRecovery.IsLocalPath(",
+  "travel.SelectionMenuIsOpen()", "travel.InstanceTargetIsSelected(instanceAetheryte)",
+  "travel.InteractWithInstanceAetheryte(target, instanceRecovery.InteractionRange)"]) {
+  if (!instance.includes(hook)) throw new Error("Missing instance recovery boundary: " + hook);
+}
+for (const method of ["TickChangeInstance", "TickSelectInstance", "TickWaitForInstance"]) {
+  if (!plugin.includes(method + "(DateTime now) => TickInstanceChange(now);"))
+    throw new Error("Instance phase bypasses bounded recovery: " + method);
+}
+if (!instancePolicy.includes("MaximumFailures = 3") ||
+    !instancePolicy.includes("return length <= 25f") ||
+    !instance.includes("vnav.MovePathSafe(path, false)"))
+  throw new Error("Local instance recovery lost its retry/path/ground bounds");
+console.log("Local instance interaction recovery audit passed.");

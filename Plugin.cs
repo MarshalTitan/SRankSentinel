@@ -3288,6 +3288,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void BeginInstanceCheck()
     {
+        ResetInstanceRangeRecovery();
         if (current is null)
             return;
         var instance = travel.CurrentInstance;
@@ -3296,68 +3297,18 @@ public sealed partial class Plugin : IDalamudPlugin
             BeginPlayerReadyWait("Territory and instance selected");
             return;
         }
+        vnav.StopSafe("preparing local instance-change interaction");
+        log.Information("Instance change required: required={Required}, current={Current}, territory={Territory}, preferredAetheryte={Aetheryte}",
+            current.Instance, instance, current.TerritoryId, territoryAetheryteId);
         nextActionUtc = DateTime.UtcNow;
         SetState(SentinelState.ChangeInstance, $"Changing normally to instance {current.Instance}");
     }
 
-    private void TickChangeInstance(DateTime now)
-    {
-        if (current is null)
-            return;
-        if (travel.CurrentInstance == current.Instance)
-        {
-            BeginPlayerReadyWait("Correct instance reached");
-            return;
-        }
-        if (TravelTimedOut(now))
-        {
-            FailCurrent($"Could not change to instance {current.Instance}");
-            return;
-        }
-        if (travel.SelectInstanceTravelMenu())
-        {
-            SetState(SentinelState.SelectInstance, $"Selecting instance {current.Instance}");
-            return;
-        }
-        if (now < nextActionUtc || travel.IsBusy)
-            return;
-        if (condition[ConditionFlag.Mounted])
-            UseGeneralAction(23);
-        else if (!travel.InteractWithNearbyAetheryte(15f) &&
-                 (now - stateSinceUtc).TotalSeconds > 4 &&
-                 territoryAetheryteId != 0 && travel.Teleport(territoryAetheryteId))
-        {
-            status = "Repositioning normally at the territory aetheryte to change instance";
-        }
-        nextActionUtc = now.AddSeconds(3);
-    }
+    private void TickChangeInstance(DateTime now) => TickInstanceChange(now);
 
-    private void TickSelectInstance(DateTime now)
-    {
-        if (current is null)
-            return;
-        if (TravelTimedOut(now))
-        {
-            FailCurrent($"Instance {current.Instance} was not available");
-            return;
-        }
-        if (travel.SelectInstance(current.Instance))
-            SetState(SentinelState.WaitForInstance, $"Traveling to instance {current.Instance}");
-    }
+    private void TickSelectInstance(DateTime now) => TickInstanceChange(now);
 
-    private void TickWaitForInstance(DateTime now)
-    {
-        if (current is null)
-            return;
-        if (!travel.IsBusy && clientState.TerritoryType == current.TerritoryId &&
-            travel.CurrentInstance == current.Instance)
-        {
-            BeginPlayerReadyWait("Correct instance reached");
-            return;
-        }
-        if (TravelTimedOut(now))
-            FailCurrent($"Arrival in instance {current.Instance} timed out");
-    }
+    private void TickWaitForInstance(DateTime now) => TickInstanceChange(now);
 
     private void BeginPlayerReadyWait(string reason)
     {
@@ -7005,6 +6956,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ClearCurrent()
     {
+        ResetInstanceRangeRecovery();
         vnav.StopSafe();
         ResetParkingFacingSettleTracking();
         if (current is not null)
@@ -8237,6 +8189,8 @@ public sealed partial class Plugin : IDalamudPlugin
             resetToUldahRequestReason = string.Empty;
         }
 
+        if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))
+            ResetInstanceRangeRecovery();
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;
