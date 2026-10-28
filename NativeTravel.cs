@@ -147,6 +147,69 @@ internal sealed class NativeTravel(
         return true;
     }
 
+    internal sealed record InstanceAetheryteTarget(ulong ObjectId, uint BaseId, string Name, Vector3 Position);
+
+    public InstanceAetheryteTarget? ResolveInstanceAetheryte(InstanceAetheryteTarget? intended, Vector3 arrivalOrigin)
+    {
+        if (objects.LocalPlayer is null || IsBusy)
+            return null;
+        // Pin the nearest local crystal on arrival. A reload may replace its object ID,
+        // but must retain the same data ID and location; never chase another crystal.
+        var local = objects.Where(o => o.ObjectKind == ObjectKind.Aetheryte && o.IsTargetable &&
+            Vector3.Distance(o.Position, arrivalOrigin) <= 25f);
+        var resolved = intended is null
+            ? local.OrderBy(o => Vector3.Distance(o.Position, arrivalOrigin)).FirstOrDefault()
+            : local.FirstOrDefault(o => o.GameObjectId == intended.ObjectId && o.BaseId == intended.BaseId)
+              ?? local.FirstOrDefault(o => o.BaseId == intended.BaseId &&
+                  Vector3.Distance(o.Position, intended.Position) <= 2f);
+        return resolved is null ? null :
+            new(resolved.GameObjectId, resolved.BaseId, resolved.Name.TextValue, resolved.Position);
+    }
+
+    public bool InstanceTargetIsSelected(InstanceAetheryteTarget? intended) =>
+        intended is not null && targets.Target?.GameObjectId == intended.ObjectId;
+
+    public unsafe bool InteractWithInstanceAetheryte(InstanceAetheryteTarget intended, float range)
+    {
+        if (IsBusy || SelectionMenuIsOpen() || condition[ConditionFlag.Mounted] ||
+            condition[ConditionFlag.InFlight] || objects.LocalPlayer is not { } player)
+            return false;
+        var target = objects.FirstOrDefault(o => o.GameObjectId == intended.ObjectId &&
+            o.BaseId == intended.BaseId && o.ObjectKind == ObjectKind.Aetheryte && o.IsTargetable &&
+            Vector3.Distance(o.Position, intended.Position) <= 1f &&
+            Vector3.Distance(player.Position, o.Position) <= range);
+        var system = TargetSystem.Instance();
+        if (target is null || system is null)
+            return false;
+        targets.Target = target;
+        system->InteractWithObject((CSGameObject*)target.Address, false);
+        return true; // Dispatched only: the caller waits for the real selection UI.
+    }
+
+    public unsafe bool SelectionMenuIsOpen() =>
+        IsReady(gameGui.GetAddonByName<AtkUnitBase>("SelectString"));
+
+    public bool InstanceTravelMenuIsOpen() => StringMenuContains(text =>
+        text.Contains("Travel to Instanced Area", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("Change instance", StringComparison.OrdinalIgnoreCase));
+
+    public bool InstanceSelectionIsOpen(int requested) => StringMenuContains(text =>
+        text.Any(character => character is >= '\uE0B1' and <= '\uE0B9'));
+
+    private unsafe bool StringMenuContains(Func<string, bool> predicate)
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectString>("SelectString");
+        if (addon is null || !IsReady((AtkUnitBase*)addon))
+            return false;
+        var menu = &addon->PopupMenu.PopupMenu;
+        if (menu->EntryNames is null || menu->EntryCount <= 0)
+            return false;
+        for (var i = 0; i < menu->EntryCount; i++)
+            if (predicate(menu->EntryNames[i].ToString()))
+                return true;
+        return false;
+    }
+
     public unsafe bool SelectWorldVisitMenu() =>
         TrySelectStringEntry(text => text.Contains("Visit Another World", StringComparison.OrdinalIgnoreCase));
 

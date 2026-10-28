@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\HuntProgressPolicy.cs" Link="HuntProgressPolicy.cs" />
+    <Compile Include="..\InstanceChangeRecovery.cs" Link="InstanceChangeRecovery.cs" />
   </ItemGroup>
 </Project>

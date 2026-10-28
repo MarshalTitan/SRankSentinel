@@ -2,6 +2,13 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("instance change walks locally, interacts, selects and resumes", InstanceRangeRecoverySequence),
+    ("instance change in range interacts without mesh movement", InstanceAlreadyInRange),
+    ("correct instance and zoning preempt local movement", InstanceArrivalAndZoningPreempt),
+    ("instance menu opening preempts recovery movement", InstanceMenuPreemptsMovement),
+    ("reloaded Aetheryte cancels pending approach and re-resolves", InstanceObjectReload),
+    ("instance retries hold the active hunt after the bounded budget", InstanceRetriesAreBounded),
+    ("instance paths reject distant detours and invalid coordinates", InstancePathsStayLocal),
     ("threshold crossed while mounted still latches a tag", ThresholdCrossedWhileMounted),
     ("failed first tag remains required as HP falls", FailedFirstTagRemainsRequired),
     ("confirmed tag suppresses additional attacks", ConfirmedTagSuppressesAdditionalAttacks),
@@ -303,4 +310,103 @@ static void Equal<T>(T expected, T actual) where T : notnull
 {
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
         throw new InvalidOperationException($"Expected {expected}, got {actual}.");
+}
+
+static InstanceChangeObservation InstanceInput(bool range = false) =>
+    new(false, false, false, false, false, true, range, false, true);
+
+static void InstanceRangeRecoverySequence()
+{
+    var recovery = new InstanceChangeRecovery();
+    var now = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
+    Equal(InstanceChangeAction.Approach, recovery.Decide(now, InstanceInput()));
+    recovery.Submitted(InstanceChangeAction.Approach, now);
+    Equal(InstanceChangeAction.WaitForApproach, recovery.Decide(now.AddSeconds(1), InstanceInput()));
+    Equal(InstanceChangeAction.Interact, recovery.Decide(now.AddSeconds(2), InstanceInput(true)));
+    recovery.Submitted(InstanceChangeAction.Interact, now.AddSeconds(2));
+    Equal(InstanceChangeAction.WaitForMenu, recovery.Decide(now.AddSeconds(3), InstanceInput(true)));
+    Equal(InstanceChangeAction.OpenInstanceMenu,
+        recovery.Decide(now.AddSeconds(4), InstanceInput(true) with { MainMenu = true, AnyMenu = true }));
+    recovery.Submitted(InstanceChangeAction.OpenInstanceMenu, now.AddSeconds(4));
+    Equal(InstanceChangeAction.SelectInstance,
+        recovery.Decide(now.AddSeconds(5), InstanceInput(true) with { InstanceMenu = true, AnyMenu = true }));
+    recovery.Submitted(InstanceChangeAction.SelectInstance, now.AddSeconds(5));
+    Equal(InstanceChangeAction.WaitForTransition,
+        recovery.Decide(now.AddSeconds(6), InstanceInput() with { Busy = true, TargetAvailable = false }));
+    Equal(InstanceChangeAction.ResumeHunt,
+        recovery.Decide(now.AddSeconds(8), InstanceInput() with { CorrectInstance = true }));
+    recovery.Reset();
+    Equal(0, recovery.Failures);
+}
+
+static void InstanceAlreadyInRange()
+{
+    var recovery = new InstanceChangeRecovery();
+    Equal(InstanceChangeAction.Interact,
+        recovery.Decide(DateTime.UtcNow, InstanceInput(true) with { MeshReady = false }));
+}
+
+static void InstanceArrivalAndZoningPreempt()
+{
+    var recovery = new InstanceChangeRecovery();
+    var now = DateTime.UtcNow;
+    recovery.Submitted(InstanceChangeAction.Approach, now);
+    Equal(InstanceChangeAction.WaitForTransition,
+        recovery.Decide(now, InstanceInput() with { Busy = true }));
+    Equal(InstanceChangeAction.ResumeHunt,
+        recovery.Decide(now, InstanceInput() with { CorrectInstance = true, Busy = true, TargetAvailable = false }));
+}
+
+static void InstanceMenuPreemptsMovement()
+{
+    var recovery = new InstanceChangeRecovery();
+    var now = DateTime.UtcNow;
+    recovery.Submitted(InstanceChangeAction.Approach, now);
+    Equal(InstanceChangeAction.OpenInstanceMenu,
+        recovery.Decide(now, InstanceInput() with { MainMenu = true, AnyMenu = true }));
+    Equal(InstanceChangeAction.SelectInstance,
+        recovery.Decide(now, InstanceInput() with { InstanceMenu = true, AnyMenu = true, TargetAvailable = false }));
+}
+
+static void InstanceObjectReload()
+{
+    var recovery = new InstanceChangeRecovery();
+    var now = DateTime.UtcNow;
+    recovery.Submitted(InstanceChangeAction.Approach, now);
+    Equal(InstanceChangeAction.WaitForTarget,
+        recovery.Decide(now, InstanceInput() with { TargetAvailable = false }));
+    Equal(InstanceChangeAction.Approach, recovery.Decide(now.AddSeconds(1), InstanceInput()));
+    Equal(0, recovery.Failures);
+}
+
+static void InstanceRetriesAreBounded()
+{
+    var recovery = new InstanceChangeRecovery();
+    var now = DateTime.UtcNow;
+    for (var i = 0; i < InstanceChangeRecovery.MaximumFailures; i++)
+    {
+        Equal(InstanceChangeAction.Interact, recovery.Decide(now, InstanceInput(true)));
+        recovery.Submitted(InstanceChangeAction.Interact, now);
+        now = now.AddSeconds(5);
+        Equal(i < 2 ? InstanceChangeAction.Retry : InstanceChangeAction.Hold,
+            recovery.Decide(now, InstanceInput(true)));
+    }
+    Equal(InstanceChangeAction.Hold, recovery.Decide(now.AddSeconds(60), InstanceInput()));
+    Equal(InstanceChangeAction.ResumeHunt,
+        recovery.Decide(now.AddSeconds(61), InstanceInput() with { CorrectInstance = true }));
+    recovery.Reset();
+    Equal(InstanceChangeAction.WaitForTarget,
+        recovery.Decide(now, InstanceInput() with { TargetAvailable = false }));
+    Equal(InstanceChangeAction.Retry,
+        recovery.Decide(now.AddSeconds(11), InstanceInput() with { TargetAvailable = false }));
+}
+
+static void InstancePathsStayLocal()
+{
+    var origin = System.Numerics.Vector3.Zero;
+    var target = new System.Numerics.Vector3(12, 0, 0);
+    True(InstanceChangeRecovery.IsLocalPath([origin, new(6, 0, 0)], origin, origin, target));
+    False(InstanceChangeRecovery.IsLocalPath([origin, new(40, 0, 0), new(6, 0, 0)], origin, origin, target));
+    False(InstanceChangeRecovery.IsLocalPath([origin, new(float.NaN, 0, 0)], origin, origin, target));
+    False(InstanceChangeRecovery.IsLocalPath([origin], origin, origin, target));
 }
