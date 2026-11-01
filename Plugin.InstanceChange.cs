@@ -13,6 +13,8 @@ public sealed partial class Plugin
     private bool instanceLocalMovement;
     private bool instanceFailureLogged;
     private bool instanceTargetMissing;
+    private readonly Queue<Vector3> instanceApproachCandidates = new();
+    private DateTime instanceGeometryRetryUtc;
 
     private static bool IsInstanceRecoveryState(SentinelState value) => value is
         SentinelState.ChangeInstance or SentinelState.SelectInstance or SentinelState.WaitForInstance;
@@ -24,6 +26,7 @@ public sealed partial class Plugin
         instanceAetheryte = null;
         instanceRecoveryOrigin = null;
         instanceFailureLogged = instanceTargetMissing = false;
+        instanceGeometryRetryUtc = DateTime.MinValue;
     }
 
     private void StopInstanceRangeMovement()
@@ -33,6 +36,7 @@ public sealed partial class Plugin
         instanceLocalPath = null; // Never submit a result after menu/zoning/target loss.
         instanceLocalMovement = false;
         instancePathObjectId = 0;
+        instanceApproachCandidates.Clear();
     }
 
     private void HoldInstanceChange(string reason)
@@ -126,6 +130,7 @@ public sealed partial class Plugin
                 return;
             case InstanceChangeAction.Retry:
                 StopInstanceRangeMovement();
+                instanceGeometryRetryUtc = now.AddSeconds(2);
                 log.Warning("Instance interaction rejected/timed out: required={Required}, current={Current}, distance={Distance:0.0}y, failure={Failure}/{Limit}; re-resolving local Aetheryte: {Reason}",
                     current.Instance, travel.CurrentInstance, distance, instanceRecovery.Failures,
                     InstanceChangeRecovery.MaximumFailures, instanceRecovery.LastFailure);
@@ -192,61 +197,110 @@ public sealed partial class Plugin
 
     private void StartLocalInstanceApproach(NativeTravel.InstanceAetheryteTarget target, DateTime now)
     {
+        if (now < instanceGeometryRetryUtc)
+        {
+            status = "Waiting briefly before rechecking local Aetheryte ground points";
+            return;
+        }
         vnav.StopSafe("instance change requires a local Aetheryte approach");
         var player = PlayerPosition();
-        var away = player - target.Position;
-        away.Y = 0;
-        if (away.LengthSquared() < 0.01f)
+        var plan = InstanceChangeRecovery.PlanLocalApproach(
+            instanceRecoveryOrigin ?? player, player, target.Position,
+            instanceRecovery.InteractionRange, vnav.PointOnFloorSafe);
+        log.Information("Instance approach geometry: object={Object}, player={Player}, crystal={Crystal}, range={Range:0.0}y, candidates={Candidates}, projectionMisses={Misses}, localityRejected={Locality}, rangeRejected={RangeRejected}",
+            target.ObjectId, player, target.Position, instanceRecovery.InteractionRange,
+            plan.Points.Count, plan.ProjectionMisses, plan.LocalityRejections, plan.RangeRejections);
+        if (plan.Points.Count == 0)
         {
-            instanceRecovery.Failed("no local horizontal approach direction");
+            FailLocalInstanceApproach(now,
+                $"no local interaction ground point: projection misses={plan.ProjectionMisses}, locality rejected={plan.LocalityRejections}, range rejected={plan.RangeRejections}");
             return;
         }
-        away = Vector3.Normalize(away);
-        var goal = target.Position + away * (instanceRecovery.Failures == 0 ? 6f : 5f);
-        goal.Y = player.Y;
-        var floor = vnav.PointOnFloorSafe(goal, 2f);
-        if (floor is null || Vector3.Distance(player, floor.Value) > 15f)
-        {
-            instanceRecovery.Failed("no walkable interaction point within the local 15y approach bound");
-            return;
-        }
+
+        instanceApproachCandidates.Clear();
+        foreach (var point in plan.Points)
+            instanceApproachCandidates.Enqueue(point);
         instancePathObjectId = target.ObjectId;
-        instanceLocalPath = vnav.PathfindSafe(player, floor.Value, false);
-        if (instanceLocalPath is null)
+        instanceRecovery.Submitted(InstanceChangeAction.Approach, now);
+        TryNextLocalInstancePath(target, now);
+    }
+
+    private void TryNextLocalInstancePath(NativeTravel.InstanceAetheryteTarget target, DateTime now)
+    {
+        // Candidate failures share one bounded approach budget, rather than consuming
+        // all three recovery attempts at the same unprojectable point.
+        if (travel.IsBusy || travel.SelectionMenuIsOpen())
         {
-            instanceRecovery.Failed("local ground path query was rejected");
+            StopInstanceRangeMovement();
             return;
         }
-        instanceRecovery.Submitted(InstanceChangeAction.Approach, now);
-        log.Information("Local instance Aetheryte approach started: object={Object}, distance={Distance:0.0}y, goal={Goal}; ground only, no hunt reroute",
-            target.ObjectId, Vector3.Distance(player, target.Position), floor.Value);
-        status = "Walking a short distance into Aetheryte interaction range before changing instance";
+        while (instanceApproachCandidates.TryDequeue(out var goal))
+        {
+            instanceLocalPath = vnav.PathfindSafe(PlayerPosition(), goal, false);
+            if (instanceLocalPath is null)
+                continue;
+            log.Information("Local instance Aetheryte ground path requested: object={Object}, goal={Goal}, alternatives={Alternatives}",
+                target.ObjectId, goal, instanceApproachCandidates.Count);
+            status = "Preparing a short ground walk into Aetheryte interaction range";
+            return;
+        }
+        FailLocalInstanceApproach(now, "all nearby Aetheryte interaction paths were unavailable");
+    }
+
+    private void FailLocalInstanceApproach(DateTime now, string reason)
+    {
+        StopInstanceRangeMovement();
+        instanceRecovery.Failed(reason);
+        instanceGeometryRetryUtc = now.AddSeconds(2);
+        log.Warning("Local instance approach failed: attempt={Attempt}/{Limit}; {Reason}",
+            instanceRecovery.Failures, InstanceChangeRecovery.MaximumFailures, reason);
     }
 
     private void PollLocalInstanceApproach(NativeTravel.InstanceAetheryteTarget target, DateTime now)
     {
         if (!vnav.IsReadySafe())
         {
-            StopInstanceRangeMovement();
-            instanceRecovery.Failed("mesh readiness lost during local approach");
+            FailLocalInstanceApproach(now, "mesh readiness lost during local approach");
             return;
         }
         if (instanceLocalPath is not { IsCompleted: true } task)
             return;
         instanceLocalPath = null;
-        var path = task.GetAwaiter().GetResult();
-        if (instanceRecoveryOrigin is not Vector3 origin || target.ObjectId != instancePathObjectId ||
-            !InstanceChangeRecovery.IsLocalPath(path, origin, PlayerPosition(), target.Position) ||
-            travel.IsBusy || travel.SelectionMenuIsOpen())
+        // Revalidate races before reading/submitting any asynchronous path result.
+        if (travel.IsBusy || travel.SelectionMenuIsOpen())
         {
             StopInstanceRangeMovement();
-            instanceRecovery.Failed("local path/target/menu revalidation failed");
+            return;
+        }
+        if (target.ObjectId != instancePathObjectId)
+        {
+            FailLocalInstanceApproach(now, "Aetheryte object changed during local path query");
+            return;
+        }
+        List<Vector3> path;
+        try { path = task.GetAwaiter().GetResult(); }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Instance ground-path candidate failed; trying the next nearby point");
+            TryNextLocalInstancePath(target, now);
+            return;
+        }
+        if (instanceRecoveryOrigin is not Vector3 origin ||
+            !InstanceChangeRecovery.IsLocalPath(path, origin, PlayerPosition(), target.Position))
+        {
+            log.Information("Instance ground-path candidate rejected by local path limits; trying another nearby point");
+            TryNextLocalInstancePath(target, now);
             return;
         }
         instanceLocalMovement = vnav.MovePathSafe(path, false);
         if (!instanceLocalMovement)
-            instanceRecovery.Failed("local ground path submission was rejected");
+        {
+            TryNextLocalInstancePath(target, now);
+            return;
+        }
+        instanceApproachCandidates.Clear();
+        log.Information("Local instance Aetheryte ground movement started: object={Object}, waypoints={Waypoints}, distance={Distance:0.0}y",
+            target.ObjectId, path.Count, Vector3.Distance(PlayerPosition(), target.Position));
+        status = "Walking into local Aetheryte interaction range before changing instance";
     }
-
 }
-
