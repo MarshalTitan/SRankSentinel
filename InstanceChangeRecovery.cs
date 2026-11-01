@@ -12,6 +12,9 @@ internal readonly record struct InstanceChangeObservation(
     bool CorrectInstance, bool Busy, bool MainMenu, bool InstanceMenu, bool AnyMenu,
     bool TargetAvailable, bool InRange, bool Mounted, bool MeshReady);
 
+internal sealed record InstanceApproachPlan(
+    IReadOnlyList<Vector3> Points, int ProjectionMisses, int LocalityRejections, int RangeRejections);
+
 /// <summary>Bounded local interaction recovery; menu/zoning/arrival always preempt movement.</summary>
 internal sealed class InstanceChangeRecovery
 {
@@ -60,6 +63,53 @@ internal sealed class InstanceChangeRecovery
     {
         Failures = MaximumFailures;
         LastFailure = reason;
+    }
+
+    public static InstanceApproachPlan PlanLocalApproach(Vector3 origin, Vector3 player,
+        Vector3 target, float interactionRange, Func<Vector3, float, Vector3?> projectFloor)
+    {
+        var points = new List<Vector3>();
+        var misses = 0;
+        var nonLocal = 0;
+        var outOfRange = 0;
+        var away = player - target;
+        away.Y = 0;
+        away = away.LengthSquared() < 0.01f ? Vector3.UnitX : Vector3.Normalize(away);
+        foreach (var radius in new[] { interactionRange - 2f, interactionRange - 3.5f })
+        foreach (var angle in new[] { 0f, 25f, -25f, 50f, -50f, 75f, -75f, 100f, -100f })
+        {
+            var radians = angle * MathF.PI / 180f;
+            var direction = new Vector3(away.X * MathF.Cos(radians) - away.Z * MathF.Sin(radians),
+                0, away.X * MathF.Sin(radians) + away.Z * MathF.Cos(radians));
+            var sample = target + direction * radius;
+            // PointOnFloor excludes polygons above the query Y. Query from above the
+            // player's ground so a raised crystal plinth is not rejected before pathfinding.
+            sample.Y = player.Y + 4f;
+            var floor = projectFloor(sample, 2f);
+            if (floor is null)
+            {
+                misses++;
+                continue;
+            }
+            var point = floor.Value;
+            if (!float.IsFinite(point.X) || !float.IsFinite(point.Y) || !float.IsFinite(point.Z) ||
+                Vector3.Distance(player, point) > 15f || Vector3.Distance(origin, point) > 20f ||
+                MathF.Abs(point.Y - player.Y) > 3f)
+            {
+                nonLocal++;
+                continue;
+            }
+            // Leave room for normal path-follower endpoint tolerance before interacting.
+            if (Vector3.Distance(point, target) > interactionRange - 1.5f)
+            {
+                outOfRange++;
+                continue;
+            }
+            if (!points.Any(existing => Vector3.Distance(existing, point) < 0.75f))
+                points.Add(point);
+        }
+        return new(points.OrderBy(point => Vector3.Distance(player, point)).ToArray(),
+            misses, nonLocal, outOfRange);
     }
 
     public static bool IsLocalPath(IReadOnlyList<Vector3> path, Vector3 origin, Vector3 player, Vector3 target)

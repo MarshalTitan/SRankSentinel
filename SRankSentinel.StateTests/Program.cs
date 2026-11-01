@@ -2,6 +2,9 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("raised Aetheryte plinth projects from above player ground", InstanceRaisedPlinth),
+    ("blocked radial Aetheryte sample falls back to walkable perimeter", InstancePerimeterFallback),
+    ("Aetheryte candidate search rejects remote, high and invalid projections", InstanceCandidateBounds),
     ("instance change walks locally, interacts, selects and resumes", InstanceRangeRecoverySequence),
     ("instance change in range interacts without mesh movement", InstanceAlreadyInRange),
     ("correct instance and zoning preempt local movement", InstanceArrivalAndZoningPreempt),
@@ -409,4 +412,55 @@ static void InstancePathsStayLocal()
     False(InstanceChangeRecovery.IsLocalPath([origin, new(40, 0, 0), new(6, 0, 0)], origin, origin, target));
     False(InstanceChangeRecovery.IsLocalPath([origin, new(float.NaN, 0, 0)], origin, origin, target));
     False(InstanceChangeRecovery.IsLocalPath([origin], origin, origin, target));
+}
+
+static void InstanceRaisedPlinth()
+{
+    var player = System.Numerics.Vector3.Zero;
+    var crystal = new System.Numerics.Vector3(12, 0, 0);
+    System.Numerics.Vector3? Project(System.Numerics.Vector3 sample, float extent)
+    {
+        // Match vnavmesh's documented floor condition: pt.Y must be <= sample.Y.
+        const float groundY = 0.4f;
+        return sample.Y >= groundY ? new(sample.X, groundY, sample.Z) : null;
+    }
+    var oldQuery = new System.Numerics.Vector3(6, player.Y, 0);
+    True(Project(oldQuery, 2f) is null);
+    var plan = InstanceChangeRecovery.PlanLocalApproach(player, player, crystal, 8f, Project);
+    True(plan.Points.Count > 0);
+    True(plan.Points.All(point => point.Y == 0.4f));
+    True(plan.Points.All(point => System.Numerics.Vector3.Distance(point, crystal) <= 6.5f));
+}
+
+static void InstancePerimeterFallback()
+{
+    var player = System.Numerics.Vector3.Zero;
+    var crystal = new System.Numerics.Vector3(12, 0, 0);
+    System.Numerics.Vector3? Project(System.Numerics.Vector3 sample, float extent) =>
+        MathF.Abs(sample.Z) < 1f ? null : new(sample.X, 0, sample.Z);
+    var plan = InstanceChangeRecovery.PlanLocalApproach(player, player, crystal, 8f, Project);
+    True(plan.ProjectionMisses > 0);
+    True(plan.Points.Count > 0);
+    True(plan.Points.All(point => MathF.Abs(point.Z) >= 1f));
+    True(plan.Points.All(point => System.Numerics.Vector3.Distance(player, point) <= 15f));
+}
+
+static void InstanceCandidateBounds()
+{
+    var origin = System.Numerics.Vector3.Zero;
+    var target = new System.Numerics.Vector3(12, 0, 0);
+    var remote = InstanceChangeRecovery.PlanLocalApproach(origin, origin, target, 8f,
+        (sample, extent) => new(90, 0, 0));
+    Equal(0, remote.Points.Count);
+    True(remote.LocalityRejections > 0);
+    var high = InstanceChangeRecovery.PlanLocalApproach(origin, origin, target, 8f,
+        (sample, extent) => new(sample.X, 20, sample.Z));
+    Equal(0, high.Points.Count);
+    var invalid = InstanceChangeRecovery.PlanLocalApproach(origin, origin, target, 8f,
+        (sample, extent) => new(float.NaN, 0, 0));
+    Equal(0, invalid.Points.Count);
+    var unavailable = InstanceChangeRecovery.PlanLocalApproach(origin, origin, target, 8f,
+        (sample, extent) => null);
+    Equal(0, unavailable.Points.Count);
+    True(unavailable.ProjectionMisses > 0);
 }
