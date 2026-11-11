@@ -1275,9 +1275,11 @@ public sealed partial class Plugin : IDalamudPlugin
         }
 
         world = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
-        if (!travel.IsSameDataCenter(world))
+        var eligible = travel.IsWorldVisitCompatible(world);
+        LogProviderRegion(source, "spawn", world, eligible);
+        if (!eligible)
         {
-            status = $"Ignored {source} alert for {creature.Trim()} on {world}: normal World Visit cannot cross data centers";
+            status = $"Ignored {source} alert for {creature.Trim()} on {world}: outside the current World Visit region";
             return;
         }
 
@@ -1287,6 +1289,7 @@ public sealed partial class Plugin : IDalamudPlugin
             isSs ? "ssrank" : "srank", world, creature.Trim(), territory,
             definition?.DataId ?? 0, definition?.PreferredAetheryteId ?? 0,
             instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);
+        incoming = CanonicalizeObservedInstance(incoming);
         if (isSs && HuntCatalog.TryGetSsStagingLocation(territory, out var ssLocation))
         {
             if (Math.Abs(incoming.MapX - ssLocation.MapX) >= 0.1f ||
@@ -1766,7 +1769,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void RestorePersistentQueueOnFrameworkThread()
     {
-        if (!persistentQueueRestorePending)
+        if (!persistentQueueRestorePending || !travel.HasWorldVisitContext)
             return;
 
         // Dalamud may construct plugins on a worker thread. Queue freshness classification reads
@@ -1861,6 +1864,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             case SentinelState.WorldVisit:
                 TickWorldVisit(now);
+                return;
+            case SentinelState.SelectLogicalDataCenter:
+                TickSelectLogicalDataCenter(now);
                 return;
             case SentinelState.SelectWorld:
                 TickSelectWorld(now);
@@ -2107,8 +2113,7 @@ public sealed partial class Plugin : IDalamudPlugin
             if (!string.IsNullOrWhiteSpace(current.World) &&
                 !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
             {
-                nextActionUtc = now;
-                SetState(SentinelState.WorldVisit, $"Starting normal World Visit to {current.World}");
+                BeginRegionalWorldVisit(now);
                 return;
             }
 
@@ -3011,97 +3016,13 @@ public sealed partial class Plugin : IDalamudPlugin
         ResetDeadPostKillRewardGrace();
     }
 
-    private void TickWorldVisit(DateTime now)
-    {
-        var targetWorld = WorldVisitTarget();
-        if (string.IsNullOrWhiteSpace(targetWorld))
-        {
-            FailWorldVisit("World Visit had no valid destination");
-            return;
-        }
-        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))
-        {
-            CompleteWorldVisit(targetWorld);
-            return;
-        }
-        if (TravelTimedOut(now))
-        {
-            FailWorldVisit($"World Visit to {targetWorld} timed out");
-            return;
-        }
-
-        if (travel.SelectWorldVisitMenu())
-        {
-            vnav.StopSafe();
-            SetState(SentinelState.SelectWorld, $"Selecting {targetWorld} from World Visit");
-            return;
-        }
-
-        if (now < nextActionUtc || travel.IsBusy)
-            return;
-        if (condition[ConditionFlag.Mounted])
-            UseGeneralAction(23);
-        else if (!travel.InteractWithNearbyAetheryte() && vnav.IsReadySafe() &&
-                 !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
-        {
-            vnav.MoveToSafe(NativeTravel.UldahAetherytePosition, false);
-            status = "Walking normally to the Ul'dah World Visit aetheryte";
-        }
-        nextActionUtc = now.AddSeconds(2);
-    }
-
-    private void TickSelectWorld(DateTime now)
-    {
-        var targetWorld = WorldVisitTarget();
-        if (string.IsNullOrWhiteSpace(targetWorld))
-            return;
-        if (TravelTimedOut(now))
-        {
-            FailWorldVisit($"Could not select {targetWorld} in World Visit");
-            return;
-        }
-        if (travel.SelectWorld(targetWorld))
-            SetState(SentinelState.ConfirmWorldVisit, $"Confirming normal World Visit to {targetWorld}");
-    }
-
-    private void TickConfirmWorldVisit(DateTime now)
-    {
-        var targetWorld = WorldVisitTarget();
-        if (string.IsNullOrWhiteSpace(targetWorld))
-            return;
-        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))
-        {
-            SetState(SentinelState.WaitForWorld, $"Arriving on {targetWorld}");
-            return;
-        }
-        if (TravelTimedOut(now))
-        {
-            FailWorldVisit($"World Visit confirmation for {targetWorld} timed out");
-            return;
-        }
-        if (travel.ConfirmWorldVisit(targetWorld))
-            SetState(SentinelState.WaitForWorld, $"Queued for World Visit to {targetWorld}");
-    }
-
-    private void TickWaitForWorld(DateTime now)
-    {
-        var targetWorld = WorldVisitTarget();
-        if (string.IsNullOrWhiteSpace(targetWorld))
-            return;
-        if (!travel.IsBusy && travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase) &&
-            travel.IsInUldah(clientState.TerritoryType))
-        {
-            CompleteWorldVisit(targetWorld);
-            return;
-        }
-        if (TravelTimedOut(now))
-            FailWorldVisit($"Arrival on {targetWorld} timed out");
-    }
-
-    private string WorldVisitTarget() => current?.World ?? string.Empty;
-
     private void CompleteWorldVisit(string targetWorld)
     {
+        if (current is not null && !IsAlertFresh(current, DateTime.UtcNow))
+        {
+            FailWorldVisit("hunt report expired or was invalidated during World Visit");
+            return;
+        }
         vnav.StopSafe();
         if (current is not null)
             log.Information("Travel state entered for {Mark}: arrived on {World}; next territory {Territory}, instance {Instance}",
@@ -3289,14 +3210,14 @@ public sealed partial class Plugin : IDalamudPlugin
     private void BeginInstanceCheck()
     {
         ResetInstanceRangeRecovery();
+        if (current is not null)
+            BeginPlayerReadyWait("Territory reached; checking the live instance after zoning settles");
+    }
+
+    private void RequireInstanceChange(int instance)
+    {
         if (current is null)
             return;
-        var instance = travel.CurrentInstance;
-        if (instance == current.Instance || (current.Instance == 1 && instance == 0))
-        {
-            BeginPlayerReadyWait("Territory and instance selected");
-            return;
-        }
         vnav.StopSafe("preparing local instance-change interaction");
         log.Information("Instance change required: required={Required}, current={Current}, territory={Territory}, preferredAetheryte={Aetheryte}",
             current.Instance, instance, current.TerritoryId, territoryAetheryteId);
@@ -3324,25 +3245,34 @@ public sealed partial class Plugin : IDalamudPlugin
         if (current is null)
             return;
 
-        var instance = travel.CurrentInstance;
-        var correctInstance = instance == current.Instance || (current.Instance == 1 && instance == 0);
-        if (travel.IsBusy || objects.LocalPlayer is null || clientState.TerritoryType != current.TerritoryId ||
-            !correctInstance)
+        if (clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
+            !travel.TryReadLiveInstance(out var instance))
         {
             playerReadySinceUtc = DateTime.MinValue;
-            status = "Waiting at the aetheryte for zoning, the player object, and the requested instance to become ready";
+            playerReadyInstance = -1;
+            status = "Waiting at the aetheryte for zoning and the live instance state";
             return;
         }
 
-        if (playerReadySinceUtc == DateTime.MinValue)
+        if (playerReadySinceUtc == DateTime.MinValue || playerReadyInstance != instance)
         {
             playerReadySinceUtc = now;
-            status = "Zoning complete; allowing the local player state to settle at the aetheryte";
+            playerReadyInstance = instance;
+            status = "Zoning complete; allowing the live instance state to settle at the aetheryte";
             return;
         }
 
         if ((now - playerReadySinceUtc).TotalSeconds < 2)
             return;
+
+        // InstanceId == 0 means no public instance on the live, settled client.
+        RecordLiveInstanceTopology(instance);
+        if (WorldVisitPolicy.InstanceArrival(instance, current.Instance) == InstanceArrivalAction.ChangeInstance)
+        {
+            RequireInstanceChange(instance);
+            return;
+        }
 
         log.Information(
             "Hunt territory arrival confirmed: mark={Mark}, world={World}, territory={Territory}, instance={Instance}, mounted={Mounted}, inFlight={InFlight}; preparing local approach",
@@ -7473,12 +7403,14 @@ public sealed partial class Plugin : IDalamudPlugin
         DateTime deathAtUtc,
         string source)
     {
+        var eligible = travel.IsWorldVisitCompatible(world);
+        LogProviderRegion(source, "death", world, eligible);
+        if (!eligible)
+            return;
         bool Matches(HuntAlertSnapshot alert) =>
-            alert.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&
-            HuntCatalog.NamesMatch(alert.CreatureName, creature) &&
-            (territory == 0 || alert.TerritoryId == territory) &&
-            (instance <= 0 || alert.Instance == instance) &&
-            deathAtUtc >= alert.ReceivedAtUtc.AddMinutes(-1);
+            WorldVisitPolicy.MatchesDeath(alert, world, territory, instance, deathAtUtc,
+                HuntCatalog.NamesMatch(alert.CreatureName, creature),
+                IsObservedSingleInstance(alert.World, alert.TerritoryId));
 
         var currentMatched = current is not null && Matches(current);
         var removed = pendingAlerts.Where(Matches).ToArray();
@@ -7613,7 +7545,8 @@ public sealed partial class Plugin : IDalamudPlugin
         HasUsableMapCoordinates(alert) &&
         !HuntCatalog.IsChernobog(alert.TerritoryId, alert.CreatureName) &&
         !killedAlerts.ContainsKey(alert.Key) &&
-        travel.IsSameDataCenter(alert.World) &&
+        !killedAlerts.ContainsKey(CanonicalizeObservedInstance(alert).Key) &&
+        travel.IsWorldVisitCompatible(alert.World) &&
         HuntCatalog.IsSupportedTerritory(alert.TerritoryId) &&
         config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)) &&
         HuntCatalog.Resolve(alert.TerritoryId, alert.CreatureName) is not null;
@@ -8191,6 +8124,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))
             ResetInstanceRangeRecovery();
+        if (IsWorldVisitState(previous) && !IsWorldVisitState(next))
+            ReleaseWorldVisitMenus();
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;
@@ -8255,6 +8190,7 @@ public sealed partial class Plugin : IDalamudPlugin
         Idle,
         ResetToUldah,
         WorldVisit,
+        SelectLogicalDataCenter,
         SelectWorld,
         ConfirmWorldVisit,
         WaitForWorld,

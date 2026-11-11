@@ -23,11 +23,11 @@ public sealed partial class Plugin
                 return false;
             var resolvedWorld = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
             var reported = occurredAtUtc ?? DateTime.UtcNow;
-            if (!travel.IsSameDataCenter(resolvedWorld) || !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
+            if (!travel.IsWorldVisitCompatible(resolvedWorld) || !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
                 return false;
-            return History.Spawn(new(ss ? "ssrank" : "srank", resolvedWorld, definition.Name,
+            return History.Spawn(CanonicalizeObservedInstance(new(ss ? "ssrank" : "srank", resolvedWorld, definition.Name,
                 territory, definition.DataId, definition.PreferredAetheryteId, Math.Max(1, instance),
-                0, 0, reported), source);
+                0, 0, reported)), source);
         });
     }
 

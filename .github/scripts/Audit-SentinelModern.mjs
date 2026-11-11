@@ -145,9 +145,96 @@ const reviewedInstancePatches = {
     ]
   ]
 };
+// Reverse the exact reviewed 7.58 World Visit/instance entry changes, then enforce the same hunt baseline.
+const reviewedWorldVisitPatches = {
+  "NativeTravel.cs": [
+    [
+      "using CSGameObject",
+      "using System.Runtime.InteropServices;\nusing CSGameObject"
+    ],
+    [
+      "    private unsafe bool CanUseTravelAction(uint actionId)\n    {\n        if (IsBusy || condition[ConditionFlag.InCombat] || condition[ConditionFlag.Unconscious] ||\n            objects.LocalPlayer is not { IsTargetable: true })\n            return false;\n\n        var manager = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();\n        return manager is not null &&\n               manager->GetActionStatus(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, actionId) == 0;\n    }\n\n    private static unsafe bool IsReady(",
+      "    private static unsafe List<string> GetAvailableWorlds()\n    {\n        var result = new List<string>();\n        var module = RaptureAtkModule.Instance();\n        if (module is null)\n            return result;\n\n        var strings = module->AtkArrayDataHolder.StringArrays[(int)StringArrayType.WorldTranslate];\n        if (strings is null)\n            return result;\n\n        for (var i = 3; i <= 10; i++)\n        {\n            var value = strings->StringArray[i];\n            if (!value.HasValue)\n                break;\n\n            var name = (Marshal.PtrToStringUTF8((nint)value.Value) ?? string.Empty).Trim();\n            if (string.IsNullOrEmpty(name))\n                break;\n            result.Add(name);\n        }\n\n        return result;\n    }\n\n    private unsafe bool CanUseTravelAction(uint actionId)\n    {\n        if (IsBusy || condition[ConditionFlag.InCombat] || condition[ConditionFlag.Unconscious] ||\n            objects.LocalPlayer is not { IsTargetable: true })\n            return false;\n\n        var manager = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();\n        return manager is not null &&\n               manager->GetActionStatus(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, actionId) == 0;\n    }\n\n    private static unsafe bool IsReady("
+    ],
+    [
+      "    public unsafe bool ReturnConfirmationIsOpen(out string prompt)",
+      "    public unsafe bool SelectWorld(string world)\n    {\n        var addon = gameGui.GetAddonByName<AtkUnitBase>(\"WorldTravelSelect\");\n        if (!IsReady(addon))\n            return false;\n\n        var availableWorlds = GetAvailableWorlds();\n        var index = availableWorlds.FindIndex(value => value.Equals(world, StringComparison.OrdinalIgnoreCase));\n        if (index < 0)\n            return false;\n\n        FireCallback(addon, 0, index + 2);\n        return true;\n    }\n\n    public unsafe bool ConfirmWorldVisit(string world)\n    {\n        var addon = gameGui.GetAddonByName<AddonSelectYesno>(\"SelectYesno\");\n        if (addon is null || !IsReady((AtkUnitBase*)addon) || addon->YesButton is null || !addon->YesButton->IsEnabled)\n            return false;\n\n        var prompt = addon->PromptText is null ? string.Empty : addon->PromptText->NodeText.ToString();\n        if (!prompt.Contains(world, StringComparison.OrdinalIgnoreCase) &&\n            !prompt.Contains(\"World\", StringComparison.OrdinalIgnoreCase))\n            return false;\n\n        FireCallback((AtkUnitBase*)addon, 0);\n        return true;\n    }\n\n    public unsafe bool ReturnConfirmationIsOpen(out string prompt)"
+    ],
+    [
+      "    public unsafe bool CanTeleportTo(uint aetheryteId)",
+      "    public bool IsSameDataCenter(string world)\n    {\n        return TryGetDataCenterRelationship(world, out _, out _, out var isSameDataCenter) &&\n               isSameDataCenter;\n    }\n\n    /// <summary>\n    /// Refreshes the session data center from the character's current visited World. The cached\n    /// value survives short zoning transitions where LocalPlayer is temporarily unavailable.\n    /// </summary>\n    public void RefreshCurrentDataCenter()\n    {\n        if (objects.LocalPlayer is not { } player || player.CurrentWorld.Value.DataCenter.RowId == 0)\n            return;\n        lastKnownDataCenterId = player.CurrentWorld.Value.DataCenter.RowId;\n        lastKnownDataCenterName = player.CurrentWorld.Value.DataCenter.Value.Name.ToString();\n    }\n\n    public bool TryGetDataCenterRelationship(\n        string world,\n        out string currentDataCenter,\n        out string eventDataCenter,\n        out bool isSameDataCenter)\n    {\n        currentDataCenter = string.Empty;\n        eventDataCenter = string.Empty;\n        isSameDataCenter = false;\n        RefreshCurrentDataCenter();\n        if (lastKnownDataCenterId == 0 || string.IsNullOrWhiteSpace(world))\n            return false;\n\n        var target = data.GetExcelSheet<World>()\n            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));\n        if (target.RowId == 0 || target.DataCenter.RowId == 0)\n            return false;\n\n        currentDataCenter = lastKnownDataCenterName;\n        eventDataCenter = target.DataCenter.Value.Name.ToString();\n        isSameDataCenter = target.DataCenter.RowId == lastKnownDataCenterId;\n        return true;\n    }\n\n    public string GetDataCenterSlug(string world)\n    {\n        if (string.IsNullOrWhiteSpace(world))\n            return string.Empty;\n        var target = data.GetExcelSheet<World>()\n            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));\n        if (target.RowId == 0 || target.DataCenter.RowId == 0)\n            return string.Empty;\n        var name = target.DataCenter.Value.Name.ToString();\n        return new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());\n    }\n\n    public unsafe bool CanTeleportTo(uint aetheryteId)"
+    ],
+    [
+      "    public bool IsBetweenAreas =>",
+      "    private uint lastKnownDataCenterId;\n    private string lastKnownDataCenterName = string.Empty;\n\n    public bool IsBetweenAreas =>"
+    ],
+    [
+      "internal sealed partial class NativeTravel(",
+      "internal sealed class NativeTravel("
+    ]
+  ],
+  "Plugin.cs": [
+    [
+      "        WorldVisit,\n        SelectLogicalDataCenter,\n        SelectWorld,",
+      "        WorldVisit,\n        SelectWorld,"
+    ],
+    [
+      "        if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))\n            ResetInstanceRangeRecovery();\n        if (IsWorldVisitState(previous) && !IsWorldVisitState(next))\n            ReleaseWorldVisitMenus();\n        state = next;",
+      "        if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))\n            ResetInstanceRangeRecovery();\n        state = next;"
+    ],
+    [
+      "        var eligible = travel.IsWorldVisitCompatible(world);\n        LogProviderRegion(source, \"death\", world, eligible);\n        if (!eligible)\n            return;\n        bool Matches(HuntAlertSnapshot alert) =>\n            WorldVisitPolicy.MatchesDeath(alert, world, territory, instance, deathAtUtc,\n                HuntCatalog.NamesMatch(alert.CreatureName, creature),\n                IsObservedSingleInstance(alert.World, alert.TerritoryId));",
+      "        bool Matches(HuntAlertSnapshot alert) =>\n            alert.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&\n            HuntCatalog.NamesMatch(alert.CreatureName, creature) &&\n            (territory == 0 || alert.TerritoryId == territory) &&\n            (instance <= 0 || alert.Instance == instance) &&\n            deathAtUtc >= alert.ReceivedAtUtc.AddMinutes(-1);"
+    ],
+    [
+      "        !killedAlerts.ContainsKey(alert.Key) &&\n        !killedAlerts.ContainsKey(CanonicalizeObservedInstance(alert).Key) &&\n        travel.IsWorldVisitCompatible(alert.World) &&",
+      "        !killedAlerts.ContainsKey(alert.Key) &&\n        travel.IsSameDataCenter(alert.World) &&"
+    ],
+    [
+      "            instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);\n        incoming = CanonicalizeObservedInstance(incoming);\n        if (isSs && HuntCatalog.TryGetSsStagingLocation(territory, out var ssLocation))",
+      "            instance, mapX, mapY, occurredAtUtc ?? DateTime.UtcNow);\n        if (isSs && HuntCatalog.TryGetSsStagingLocation(territory, out var ssLocation))"
+    ],
+    [
+      "        var eligible = travel.IsWorldVisitCompatible(world);\n        LogProviderRegion(source, \"spawn\", world, eligible);\n        if (!eligible)\n        {\n            status = $\"Ignored {source} alert for {creature.Trim()} on {world}: outside the current World Visit region\";\n            return;\n        }",
+      "        if (!travel.IsSameDataCenter(world))\n        {\n            status = $\"Ignored {source} alert for {creature.Trim()} on {world}: normal World Visit cannot cross data centers\";\n            return;\n        }"
+    ],
+    [
+      "        if (clientState.TerritoryType != current.TerritoryId ||\n            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||\n            !travel.TryReadLiveInstance(out var instance))\n        {\n            playerReadySinceUtc = DateTime.MinValue;\n            playerReadyInstance = -1;\n            status = \"Waiting at the aetheryte for zoning and the live instance state\";\n            return;\n        }\n\n        if (playerReadySinceUtc == DateTime.MinValue || playerReadyInstance != instance)\n        {\n            playerReadySinceUtc = now;\n            playerReadyInstance = instance;\n            status = \"Zoning complete; allowing the live instance state to settle at the aetheryte\";\n            return;\n        }\n\n        if ((now - playerReadySinceUtc).TotalSeconds < 2)\n            return;\n\n        // InstanceId == 0 means no public instance on the live, settled client.\n        RecordLiveInstanceTopology(instance);\n        if (WorldVisitPolicy.InstanceArrival(instance, current.Instance) == InstanceArrivalAction.ChangeInstance)\n        {\n            RequireInstanceChange(instance);\n            return;\n        }\n",
+      "        var instance = travel.CurrentInstance;\n        var correctInstance = instance == current.Instance || (current.Instance == 1 && instance == 0);\n        if (travel.IsBusy || objects.LocalPlayer is null || clientState.TerritoryType != current.TerritoryId ||\n            !correctInstance)\n        {\n            playerReadySinceUtc = DateTime.MinValue;\n            status = \"Waiting at the aetheryte for zoning, the player object, and the requested instance to become ready\";\n            return;\n        }\n\n        if (playerReadySinceUtc == DateTime.MinValue)\n        {\n            playerReadySinceUtc = now;\n            status = \"Zoning complete; allowing the local player state to settle at the aetheryte\";\n            return;\n        }\n\n        if ((now - playerReadySinceUtc).TotalSeconds < 2)\n            return;\n"
+    ],
+    [
+      "    private void BeginInstanceCheck()\n    {\n        ResetInstanceRangeRecovery();\n        if (current is not null)\n            BeginPlayerReadyWait(\"Territory reached; checking the live instance after zoning settles\");\n    }\n\n    private void RequireInstanceChange(int instance)\n    {\n        if (current is null)\n            return;\n        vnav.StopSafe(\"preparing local instance-change interaction\");\n        log.Information(\"Instance change required: required={Required}, current={Current}, territory={Territory}, preferredAetheryte={Aetheryte}\",\n            current.Instance, instance, current.TerritoryId, territoryAetheryteId);\n        nextActionUtc = DateTime.UtcNow;\n        SetState(SentinelState.ChangeInstance, $\"Changing normally to instance {current.Instance}\");\n    }\n\n",
+      "    private void BeginInstanceCheck()\n    {\n        ResetInstanceRangeRecovery();\n        if (current is null)\n            return;\n        var instance = travel.CurrentInstance;\n        if (instance == current.Instance || (current.Instance == 1 && instance == 0))\n        {\n            BeginPlayerReadyWait(\"Territory and instance selected\");\n            return;\n        }\n        vnav.StopSafe(\"preparing local instance-change interaction\");\n        log.Information(\"Instance change required: required={Required}, current={Current}, territory={Territory}, preferredAetheryte={Aetheryte}\",\n            current.Instance, instance, current.TerritoryId, territoryAetheryteId);\n        nextActionUtc = DateTime.UtcNow;\n        SetState(SentinelState.ChangeInstance, $\"Changing normally to instance {current.Instance}\");\n    }\n\n"
+    ],
+    [
+      "    private void CompleteWorldVisit(string targetWorld)\n    {\n        if (current is not null && !IsAlertFresh(current, DateTime.UtcNow))\n        {\n            FailWorldVisit(\"hunt report expired or was invalidated during World Visit\");\n            return;\n        }\n        vnav.StopSafe();",
+      "    private void CompleteWorldVisit(string targetWorld)\n    {\n        vnav.StopSafe();"
+    ],
+    [
+      "    private void CompleteWorldVisit(string targetWorld)",
+      "    private void TickWorldVisit(DateTime now)\n    {\n        var targetWorld = WorldVisitTarget();\n        if (string.IsNullOrWhiteSpace(targetWorld))\n        {\n            FailWorldVisit(\"World Visit had no valid destination\");\n            return;\n        }\n        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))\n        {\n            CompleteWorldVisit(targetWorld);\n            return;\n        }\n        if (TravelTimedOut(now))\n        {\n            FailWorldVisit($\"World Visit to {targetWorld} timed out\");\n            return;\n        }\n\n        if (travel.SelectWorldVisitMenu())\n        {\n            vnav.StopSafe();\n            SetState(SentinelState.SelectWorld, $\"Selecting {targetWorld} from World Visit\");\n            return;\n        }\n\n        if (now < nextActionUtc || travel.IsBusy)\n            return;\n        if (condition[ConditionFlag.Mounted])\n            UseGeneralAction(23);\n        else if (!travel.InteractWithNearbyAetheryte() && vnav.IsReadySafe() &&\n                 !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())\n        {\n            vnav.MoveToSafe(NativeTravel.UldahAetherytePosition, false);\n            status = \"Walking normally to the Ul'dah World Visit aetheryte\";\n        }\n        nextActionUtc = now.AddSeconds(2);\n    }\n\n    private void TickSelectWorld(DateTime now)\n    {\n        var targetWorld = WorldVisitTarget();\n        if (string.IsNullOrWhiteSpace(targetWorld))\n            return;\n        if (TravelTimedOut(now))\n        {\n            FailWorldVisit($\"Could not select {targetWorld} in World Visit\");\n            return;\n        }\n        if (travel.SelectWorld(targetWorld))\n            SetState(SentinelState.ConfirmWorldVisit, $\"Confirming normal World Visit to {targetWorld}\");\n    }\n\n    private void TickConfirmWorldVisit(DateTime now)\n    {\n        var targetWorld = WorldVisitTarget();\n        if (string.IsNullOrWhiteSpace(targetWorld))\n            return;\n        if (travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase))\n        {\n            SetState(SentinelState.WaitForWorld, $\"Arriving on {targetWorld}\");\n            return;\n        }\n        if (TravelTimedOut(now))\n        {\n            FailWorldVisit($\"World Visit confirmation for {targetWorld} timed out\");\n            return;\n        }\n        if (travel.ConfirmWorldVisit(targetWorld))\n            SetState(SentinelState.WaitForWorld, $\"Queued for World Visit to {targetWorld}\");\n    }\n\n    private void TickWaitForWorld(DateTime now)\n    {\n        var targetWorld = WorldVisitTarget();\n        if (string.IsNullOrWhiteSpace(targetWorld))\n            return;\n        if (!travel.IsBusy && travel.CurrentWorld.Equals(targetWorld, StringComparison.OrdinalIgnoreCase) &&\n            travel.IsInUldah(clientState.TerritoryType))\n        {\n            CompleteWorldVisit(targetWorld);\n            return;\n        }\n        if (TravelTimedOut(now))\n            FailWorldVisit($\"Arrival on {targetWorld} timed out\");\n    }\n\n    private string WorldVisitTarget() => current?.World ?? string.Empty;\n\n    private void CompleteWorldVisit(string targetWorld)"
+    ],
+    [
+      "                BeginRegionalWorldVisit(now);",
+      "                nextActionUtc = now;\n                SetState(SentinelState.WorldVisit, $\"Starting normal World Visit to {current.World}\");"
+    ],
+    [
+      "            case SentinelState.SelectLogicalDataCenter:\n                TickSelectLogicalDataCenter(now);\n                return;\n            case SentinelState.SelectWorld:\n                TickSelectWorld(now);",
+      "            case SentinelState.SelectWorld:\n                TickSelectWorld(now);"
+    ],
+    [
+      "        if (!persistentQueueRestorePending || !travel.HasWorldVisitContext)\n            return;",
+      "        if (!persistentQueueRestorePending)\n            return;"
+    ]
+  ]
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedWorldVisitPatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated regional travel edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedInstancePatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated instance recovery edit: ${path}`);
     source = source.replace(change, original);
@@ -186,4 +273,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared UI, passive history hooks, and baseline hunt sources after removing exact reviewed routing changes.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1 packages, shared UI, passive history hooks, and baseline hunt sources after removing exact reviewed travel changes.");

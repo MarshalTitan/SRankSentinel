@@ -7,12 +7,11 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace SRankSentinel;
 
-internal sealed class NativeTravel(
+internal sealed partial class NativeTravel(
     IGameGui gameGui,
     IObjectTable objects,
     ITargetManager targets,
@@ -21,9 +20,6 @@ internal sealed class NativeTravel(
 {
     public const uint UldahAetheryteId = 9;
     public static readonly Vector3 UldahAetherytePosition = new(-144.52f, -1.36f, -169.67f);
-    private uint lastKnownDataCenterId;
-    private string lastKnownDataCenterName = string.Empty;
-
     public bool IsBetweenAreas =>
         condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
 
@@ -46,60 +42,6 @@ internal sealed class NativeTravel(
 
     // World Visit is available at the main Steps of Nald aetheryte (territory 130).
     public bool IsInUldah(uint territory) => territory == 130;
-
-    public bool IsSameDataCenter(string world)
-    {
-        return TryGetDataCenterRelationship(world, out _, out _, out var isSameDataCenter) &&
-               isSameDataCenter;
-    }
-
-    /// <summary>
-    /// Refreshes the session data center from the character's current visited World. The cached
-    /// value survives short zoning transitions where LocalPlayer is temporarily unavailable.
-    /// </summary>
-    public void RefreshCurrentDataCenter()
-    {
-        if (objects.LocalPlayer is not { } player || player.CurrentWorld.Value.DataCenter.RowId == 0)
-            return;
-        lastKnownDataCenterId = player.CurrentWorld.Value.DataCenter.RowId;
-        lastKnownDataCenterName = player.CurrentWorld.Value.DataCenter.Value.Name.ToString();
-    }
-
-    public bool TryGetDataCenterRelationship(
-        string world,
-        out string currentDataCenter,
-        out string eventDataCenter,
-        out bool isSameDataCenter)
-    {
-        currentDataCenter = string.Empty;
-        eventDataCenter = string.Empty;
-        isSameDataCenter = false;
-        RefreshCurrentDataCenter();
-        if (lastKnownDataCenterId == 0 || string.IsNullOrWhiteSpace(world))
-            return false;
-
-        var target = data.GetExcelSheet<World>()
-            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (target.RowId == 0 || target.DataCenter.RowId == 0)
-            return false;
-
-        currentDataCenter = lastKnownDataCenterName;
-        eventDataCenter = target.DataCenter.Value.Name.ToString();
-        isSameDataCenter = target.DataCenter.RowId == lastKnownDataCenterId;
-        return true;
-    }
-
-    public string GetDataCenterSlug(string world)
-    {
-        if (string.IsNullOrWhiteSpace(world))
-            return string.Empty;
-        var target = data.GetExcelSheet<World>()
-            .FirstOrDefault(row => row.Name.ToString().Equals(world.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (target.RowId == 0 || target.DataCenter.RowId == 0)
-            return string.Empty;
-        var name = target.DataCenter.Value.Name.ToString();
-        return new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
-    }
 
     public unsafe bool CanTeleportTo(uint aetheryteId)
     {
@@ -237,36 +179,6 @@ internal sealed class NativeTravel(
         return TrySelectStringEntry(text => text.Contains(glyph));
     }
 
-    public unsafe bool SelectWorld(string world)
-    {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>("WorldTravelSelect");
-        if (!IsReady(addon))
-            return false;
-
-        var availableWorlds = GetAvailableWorlds();
-        var index = availableWorlds.FindIndex(value => value.Equals(world, StringComparison.OrdinalIgnoreCase));
-        if (index < 0)
-            return false;
-
-        FireCallback(addon, 0, index + 2);
-        return true;
-    }
-
-    public unsafe bool ConfirmWorldVisit(string world)
-    {
-        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
-        if (addon is null || !IsReady((AtkUnitBase*)addon) || addon->YesButton is null || !addon->YesButton->IsEnabled)
-            return false;
-
-        var prompt = addon->PromptText is null ? string.Empty : addon->PromptText->NodeText.ToString();
-        if (!prompt.Contains(world, StringComparison.OrdinalIgnoreCase) &&
-            !prompt.Contains("World", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        FireCallback((AtkUnitBase*)addon, 0);
-        return true;
-    }
-
     public unsafe bool ReturnConfirmationIsOpen(out string prompt)
     {
         prompt = string.Empty;
@@ -316,32 +228,6 @@ internal sealed class NativeTravel(
         }
 
         return false;
-    }
-
-    private static unsafe List<string> GetAvailableWorlds()
-    {
-        var result = new List<string>();
-        var module = RaptureAtkModule.Instance();
-        if (module is null)
-            return result;
-
-        var strings = module->AtkArrayDataHolder.StringArrays[(int)StringArrayType.WorldTranslate];
-        if (strings is null)
-            return result;
-
-        for (var i = 3; i <= 10; i++)
-        {
-            var value = strings->StringArray[i];
-            if (!value.HasValue)
-                break;
-
-            var name = (Marshal.PtrToStringUTF8((nint)value.Value) ?? string.Empty).Trim();
-            if (string.IsNullOrEmpty(name))
-                break;
-            result.Add(name);
-        }
-
-        return result;
     }
 
     private unsafe bool CanUseTravelAction(uint actionId)
