@@ -2,6 +2,21 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("Crystal to Crystal World selects the exact World on the current DC", () => VisitRoute("Zalera", "Balmung")),
+    ("Crystal to Aether World selects Aether first", () => VisitRoute("Zalera", "Sargatanas")),
+    ("Aether to Dynamis World does not return to the Crystal Home World", () => VisitRoute("Sargatanas", "Seraph")),
+    ("Dynamis to Primal World does not return to the Crystal Home World", () => VisitRoute("Seraph", "Leviathan")),
+    ("Primal to Crystal World selects the destination rather than the Home World", () => VisitRoute("Leviathan", "Balmung")),
+    ("target World already current skips the World Visit menu", CurrentWorldSkipsVisit),
+    ("logical DC selected waits for the rendered World list to refresh", WaitForWorldListRefresh),
+    ("World Visit confirms only the exact named destination", ExactWorldConfirmation),
+    ("rejected World Visit retries once and recovers unresolved", BoundedWorldVisitRejection),
+    ("congested native queue waits and requires settled arrival", WorldVisitCongestionAndArrival),
+    ("queue keeps hunts on multiple logical DCs across visits", KeepRegionalQueue),
+    ("cross-DC death removes only the matching World, territory, instance and mark", MatchRegionalDeath),
+    ("a non-NA World is ineligible for NA hunts", RejectOutsideRegion),
+    ("Heritage Found stale instance 2 normalizes to the live single zone", NormalizeHeritageFound),
+    ("a real multi-instance zone still changes to the required instance", KeepRealInstanceChange),
     ("raised Aetheryte plinth projects from above player ground", InstanceRaisedPlinth),
     ("blocked radial Aetheryte sample falls back to walkable perimeter", InstancePerimeterFallback),
     ("Aetheryte candidate search rejects remote, high and invalid projections", InstanceCandidateBounds),
@@ -463,4 +478,144 @@ static void InstanceCandidateBounds()
         (sample, extent) => null);
     Equal(0, unavailable.Points.Count);
     True(unavailable.ProjectionMisses > 0);
+}
+
+static VisitWorld World(string name) => name switch
+{
+    "Zalera" => new(90, name, 8, "Crystal", 2),
+    "Balmung" => new(91, name, 8, "Crystal", 2),
+    "Sargatanas" => new(99, name, 4, "Aether", 2),
+    "Siren" => new(57, name, 4, "Aether", 2),
+    "Seraph" => new(405, name, 11, "Dynamis", 2),
+    "Leviathan" => new(64, name, 5, "Primal", 2),
+    "Phoenix" => new(56, name, 6, "Light", 3),
+    "Ravana" => new(22, name, 9, "Materia", 4),
+    _ => throw new ArgumentOutOfRangeException(nameof(name)),
+};
+
+static void VisitRoute(string from, string to)
+{
+    var source = World(from);
+    var target = World(to);
+    var home = World("Zalera");
+    True(WorldVisitPolicy.CanVisit(source, home, target));
+    if (source.LogicalDcId != target.LogicalDcId)
+    {
+        Equal(VisitMenuAction.SelectLogicalDataCenter,
+            WorldVisitPolicy.ChooseMenu(source, home, target, true, source.LogicalDc, [source]));
+        Equal(VisitMenuAction.WaitForSelector,
+            WorldVisitPolicy.ChooseMenu(source, home, target, false, null, [source]));
+    }
+    Equal(VisitMenuAction.SelectWorld,
+        WorldVisitPolicy.ChooseMenu(source, home, target, true, target.LogicalDc, [target]));
+    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 12, 3, 90));
+}
+
+static void CurrentWorldSkipsVisit()
+{
+    var current = World("Seraph");
+    Equal(VisitMenuAction.AlreadyCurrent,
+        WorldVisitPolicy.ChooseMenu(current, World("Zalera"), current, false, null, []));
+}
+
+static void WaitForWorldListRefresh()
+{
+    var source = World("Zalera");
+    var target = World("Sargatanas");
+    VisitMenuAction Select(params VisitWorld?[] rows) =>
+        WorldVisitPolicy.ChooseMenu(source, source, target, true, "Aether", rows);
+    Equal(VisitMenuAction.WaitForWorldList, Select());
+    Equal(VisitMenuAction.WaitForWorldList, Select(source, World("Balmung")));
+    Equal(VisitMenuAction.WaitForWorldList, Select(target, source));
+    Equal(VisitMenuAction.WaitForWorldList, Select(target, null));
+    Equal(VisitMenuAction.WaitForWorldList, Select(target, target));
+    Equal(VisitMenuAction.WaitForWorldList, Select(World("Siren")));
+    Equal(VisitMenuAction.SelectWorld, Select(World("Siren"), target));
+}
+
+static void ExactWorldConfirmation()
+{
+    True(WorldVisitPolicy.IsConfirmationFor("Travel to Seraph?\nParty restrictions apply.", "Seraph"));
+    False(WorldVisitPolicy.IsConfirmationFor("Travel to Sargatanas?", "Seraph"));
+    False(WorldVisitPolicy.IsConfirmationFor("Return to Seraph?", "Seraph"));
+    False(WorldVisitPolicy.IsConfirmationFor("Cancel travel to Seraph?", "Seraph"));
+}
+
+static void BoundedWorldVisitRejection()
+{
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, false, 7, null, 90));
+    Equal(VisitArrivalAction.AttemptFailed, WorldVisitPolicy.ObserveArrival(false, true, false, 8, null, 90));
+    Equal(VisitFailureAction.Retry, WorldVisitPolicy.AfterFailedAttempt(1, false));
+    Equal(VisitFailureAction.RecoverUnresolved, WorldVisitPolicy.AfterFailedAttempt(2, false));
+}
+
+static void WorldVisitCongestionAndArrival()
+{
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, true, 65, 0, 90));
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, false, 67, 2, 90));
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(true, true, true, 69, 0, 90));
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(true, false, false, 69, 1, 90));
+    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 70, 1, 90));
+    Equal(VisitArrivalAction.AttemptFailed, WorldVisitPolicy.ObserveArrival(false, true, true, 90, 0, 90));
+    Equal(VisitFailureAction.RecoverUnresolved, WorldVisitPolicy.AfterFailedAttempt(1, true));
+}
+
+static HuntAlertSnapshot VisitAlert(string world, int instance) =>
+    new("srank", world, "Atticus the Primogenitor", 1191, 13444, 0, instance, 16.7f, 9.5f,
+        new DateTime(2026, 11, 10, 15, 0, 0, DateTimeKind.Utc));
+
+static void KeepRegionalQueue()
+{
+    var home = World("Zalera");
+    var queue = new[] { VisitAlert("Balmung", 1), VisitAlert("Sargatanas", 1), VisitAlert("Seraph", 1),
+        VisitAlert("Leviathan", 1), VisitAlert("Phoenix", 1) };
+    foreach (var origin in new[] { home, World("Sargatanas"), World("Seraph"), World("Leviathan") })
+    {
+        var eligible = queue.Where(alert => WorldVisitPolicy.CanVisit(origin, home, World(alert.World))).ToArray();
+        Equal(4, eligible.Length);
+        Equal(4, eligible.Select(alert => alert.Key).Distinct().Count());
+    }
+}
+
+static void MatchRegionalDeath()
+{
+    var hunted = VisitAlert("Sargatanas", 2);
+    var local = VisitAlert("Balmung", 2);
+    var otherInstance = VisitAlert("Sargatanas", 1);
+    var otherTerritory = hunted with { TerritoryId = 1190 };
+    var otherMark = hunted with { CreatureName = "Different mark", MarkDataId = 1 };
+    var queue = new[] { hunted, local, otherInstance, otherTerritory, otherMark };
+    var removed = queue.Where(alert => WorldVisitPolicy.MatchesDeath(alert, "Sargatanas", 1191, 2,
+        hunted.ReceivedAtUtc.AddSeconds(10), alert.CreatureName == hunted.CreatureName, false)).ToArray();
+    Equal(1, removed.Length);
+    Equal(hunted.Key, removed[0].Key);
+    False(WorldVisitPolicy.MatchesDeath(hunted, hunted.World, 1191, 2,
+        hunted.ReceivedAtUtc.AddMinutes(-2), true, false));
+}
+
+static void RejectOutsideRegion()
+{
+    var na = World("Zalera");
+    var oceania = World("Ravana");
+    False(WorldVisitPolicy.CanVisit(na, na, World("Phoenix")));
+    False(WorldVisitPolicy.CanVisit(na, na, oceania));
+    False(WorldVisitPolicy.CanVisit(oceania, na, oceania));
+}
+
+static void NormalizeHeritageFound()
+{
+    var stale = VisitAlert("Balmung", 2);
+    Equal(InstanceArrivalAction.NormalizeSingle, WorldVisitPolicy.InstanceArrival(0, stale.Instance));
+    var normalized = WorldVisitPolicy.CanonicalizeInstance(stale, true);
+    Equal(1, normalized.Instance);
+    Equal(VisitAlert("Balmung", 1).Key, normalized.Key);
+    Equal(stale.Key, WorldVisitPolicy.CanonicalizeInstance(stale, false).Key);
+    True(WorldVisitPolicy.MatchesDeath(normalized, "Balmung", 1191, 2, stale.ReceivedAtUtc, true, true));
+}
+
+static void KeepRealInstanceChange()
+{
+    Equal(InstanceArrivalAction.ChangeInstance, WorldVisitPolicy.InstanceArrival(1, 2));
+    Equal(InstanceArrivalAction.Ready, WorldVisitPolicy.InstanceArrival(2, 2));
+    Equal(InstanceArrivalAction.ChangeInstance, WorldVisitPolicy.InstanceArrival(2, 1));
 }

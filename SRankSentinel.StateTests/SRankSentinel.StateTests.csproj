@@ -9,5 +9,7 @@
   <ItemGroup>
     <Compile Include="..\HuntProgressPolicy.cs" Link="HuntProgressPolicy.cs" />
     <Compile Include="..\InstanceChangeRecovery.cs" Link="InstanceChangeRecovery.cs" />
+    <Compile Include="..\WorldVisitPolicy.cs" Link="WorldVisitPolicy.cs" />
+    <Compile Include="..\HuntAlertSnapshot.cs" Link="HuntAlertSnapshot.cs" />
   </ItemGroup>
 </Project>
