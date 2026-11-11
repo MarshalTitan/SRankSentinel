@@ -28,8 +28,8 @@ public sealed partial class Plugin
         var origin = travel.CurrentVisitWorld;
         var destination = travel.ResolveVisitWorld(ownedWorldVisitDestination);
         log.Information("World Visit attempt {Attempt}/{Limit}: {CurrentWorld} ({CurrentDC}) -> {TargetWorld} ({TargetDC}); Ul'dah hub",
-            worldVisitAttempts, WorldVisitPolicy.MaximumAttempts, origin?.Name, origin?.LogicalDc,
-            ownedWorldVisitDestination, destination?.LogicalDc);
+            worldVisitAttempts, WorldVisitPolicy.MaximumAttempts, origin?.Name ?? "unknown", origin?.LogicalDc ?? "unknown",
+            ownedWorldVisitDestination, destination?.LogicalDc ?? "unknown");
         SetState(SentinelState.WorldVisit, $"Opening World Visit for {ownedWorldVisitDestination} ({destination?.LogicalDc})");
     }
 
@@ -205,7 +205,8 @@ public sealed partial class Plugin
         var origin = travel.CurrentVisitWorld;
         var target = travel.ResolveVisitWorld(world);
         log.Information("Provider regional observation: {Provider} {Action} on {World}/{LogicalDC} (region {Region}); character on {CurrentWorld}/{CurrentDC}; eligible={Eligible}",
-            source, action, world, target?.LogicalDc, target?.RegionId, origin?.Name, origin?.LogicalDc, eligible);
+            source, action, world, target?.LogicalDc ?? "unknown", target?.RegionId ?? 0,
+            origin?.Name ?? "unknown", origin?.LogicalDc ?? "unknown", eligible);
     }
 
     private bool IsObservedSingleInstance(string world, uint territory) =>
