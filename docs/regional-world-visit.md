@@ -10,7 +10,7 @@
 
 | Provider | What to check |
 | --- | --- |
-| Sonar | Set **Receive Jurisdiction** to **Region**. Ensure S/SS reports and map links are enabled. See [Sonar settings](https://ffxiv-sonar.github.io/Sonar/). |
+| Sonar | Set **Receive Jurisdiction** to **Region**. Ensure S/SS reports and map links are enabled. See [Sonar settings](https://wiki.ffxivsonar.com/settings/config/general-tab). |
 | HuntAlerts | Enable S-rank notifications for the four NA DCs where the installed build offers that scope. The public [HuntAlerts fork](https://github.com/priestkos/HuntAlerts) applies provider scope before emitting IPC. If a build delivers only current-DC reports, Sentinel cannot see its other reports. |
 
 Logs beginning with `Provider regional observation` show each parsed report's provider, action, World, logical DC and eligibility alongside the character's current World and logical DC. A received cross-DC spawn and death from each provider verifies the installed provider's scope. Code review and automated tests do not establish live provider coverage.
