@@ -14,6 +14,7 @@ internal sealed partial class NativeTravel
     // on 7.58 before emitting input. Regional selection never uses the old row callback.
     private const uint LogicalDcSelectorNode = 2;
     private const uint RegionalWorldListNode = 7;
+    private const uint LegacyWorldListNode = 20;
 
     private Dictionary<uint, VisitWorld>? visitWorlds;
     private VisitWorld? lastVisitWorld;
@@ -123,6 +124,9 @@ internal sealed partial class NativeTravel
         {
             // Legacy same-logical-DC client layout (e.g. a single-DC region).
             // This callback is the pre-regional behavior, only with validated legacy rows.
+            var legacyList = addon->GetComponentListById(LegacyWorldListNode);
+            if (legacyList is null || legacyList->OwnerNode is null || !legacyList->OwnerNode->IsVisible())
+                return (VisitMenuAction.WaitForSelector, "waiting for a verified regional selector or legacy World list");
             var worlds = GetLegacyWorldRows().Select(ResolveVisitWorld).ToArray();
             var decision = WorldVisitPolicy.ChooseMenu(source, home, target, false, null, worlds);
             if (decision != VisitMenuAction.SelectWorld || !submitWorld)
