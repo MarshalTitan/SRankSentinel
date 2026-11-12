@@ -2,6 +2,15 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("7.58 selector uses the nested dropdown below the Crystal page panel", RegionalMenuNestedDropdown),
+    ("7.58 same DC Crystal to Balmung uses the verified native World slot", () => RegionalMenuRoute("Zalera", "Balmung")),
+    ("7.58 Crystal to Midgardsormr selects Aether then confirms exact arrival", () => RegionalMenuRoute("Zalera", "Midgardsormr")),
+    ("7.58 visited Aether to Dynamis uses its native page with no Home World detour", () => RegionalMenuRoute("Midgardsormr", "Seraph")),
+    ("7.58 visited Dynamis to Primal uses its native page with no Home World detour", () => RegionalMenuRoute("Seraph", "Leviathan")),
+    ("7.58 visited Primal to Crystal uses its native page with no Home World detour", () => RegionalMenuRoute("Leviathan", "Balmung")),
+    ("7.58 selector initialization never submits a stale World row", RegionalSelectorInitialization),
+    ("7.58 selected DC waits for native slots and rendered rows to agree in order", RegionalRenderedRefresh),
+    ("7.58 genuinely absent destination is distinct from UI initialization", RegionalDestinationUnavailable),
     ("Crystal to Crystal World selects the exact World on the current DC", () => VisitRoute("Zalera", "Balmung")),
     ("Crystal to Aether World selects Aether first", () => VisitRoute("Zalera", "Sargatanas")),
     ("Aether to Dynamis World does not return to the Crystal Home World", () => VisitRoute("Sargatanas", "Seraph")),
@@ -484,6 +493,7 @@ static VisitWorld World(string name) => name switch
 {
     "Zalera" => new(90, name, 8, "Crystal", 2),
     "Balmung" => new(91, name, 8, "Crystal", 2),
+    "Midgardsormr" => new(65, name, 4, "Aether", 2),
     "Sargatanas" => new(99, name, 4, "Aether", 2),
     "Siren" => new(57, name, 4, "Aether", 2),
     "Seraph" => new(405, name, 11, "Dynamis", 2),
@@ -618,4 +628,90 @@ static void KeepRealInstanceChange()
     Equal(InstanceArrivalAction.ChangeInstance, WorldVisitPolicy.InstanceArrival(1, 2));
     Equal(InstanceArrivalAction.Ready, WorldVisitPolicy.InstanceArrival(2, 2));
     Equal(InstanceArrivalAction.ChangeInstance, WorldVisitPolicy.InstanceArrival(2, 1));
+}
+
+static string[] NaDcSlots() => ["Aether", "Crystal", "Dynamis", "Primal"];
+
+static void RegionalMenuNestedDropdown()
+{
+    // Parent IDs in the installed 7.58 worldtranslate.uld; the old cast at #2
+    // interpreted a plain resource node as the dropdown.
+    var layout = new Dictionary<uint, (uint Parent, string Kind)>
+    {
+        [2] = (1, "Resource"), [3] = (2, "Resource"), [4] = (3, "Dropdown"), [7] = (2, "List"),
+    };
+    var panel = layout[WorldVisitPolicy.RegionalPanelId];
+    var header = layout[WorldVisitPolicy.RegionalHeaderId];
+    var control = layout[WorldVisitPolicy.RegionalDropdownId];
+    var list = layout[WorldVisitPolicy.RegionalWorldListId];
+    Equal("Resource", panel.Kind);
+    Equal("Dropdown", control.Kind);
+    Equal("List", list.Kind);
+    True(WorldVisitPolicy.IsRegionalLayout(header.Parent, control.Parent, list.Parent));
+    False(WorldVisitPolicy.IsRegionalLayout(header.Parent, panel.Parent, list.Parent));
+}
+
+static void RegionalMenuRoute(string from, string to)
+{
+    var home = World("Zalera");
+    var source = World(from);
+    var target = World(to);
+    var dcSlots = NaDcSlots();
+    var selected = Array.IndexOf(dcSlots, source.LogicalDc);
+    var desired = Array.IndexOf(dcSlots, target.LogicalDc);
+    if (selected != desired)
+    {
+        Equal((VisitMenuAction.SelectLogicalDataCenter, desired),
+            WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, selected, [source], [source]));
+        Equal((VisitMenuAction.WaitForWorldList, -1),
+            WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, desired, [target], [source]));
+    }
+    VisitWorld?[] rows = target.LogicalDc == "Aether" ? [World("Siren"), target] : [target];
+    Equal((VisitMenuAction.SelectWorld, rows.Length - 1),
+        WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, desired, rows, rows));
+    True(WorldVisitPolicy.IsConfirmationFor($"Travel to {to}?", to));
+    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, true, 12, 0, 90));
+    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 14, 2, 90));
+}
+
+static void RegionalSelectorInitialization()
+{
+    var home = World("Zalera");
+    var target = World("Midgardsormr");
+    var dcs = NaDcSlots();
+    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, [], -1, [target], [target]));
+    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, -1, [target], [target]));
+    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, ["Aether", "", "Dynamis", "Primal"], 0, [target], [target]));
+    // Callback order comes from the live string slots, not the alphabetical sheet.
+    Equal((VisitMenuAction.SelectLogicalDataCenter, 2),
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, ["Crystal", "Primal", "Aether", "Dynamis"], 0, [], []));
+}
+
+static void RegionalRenderedRefresh()
+{
+    var home = World("Zalera");
+    var target = World("Midgardsormr");
+    var siren = World("Siren");
+    var dcs = NaDcSlots();
+    VisitMenuAction Choose(VisitWorld?[] slots, VisitWorld?[] rendered) =>
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, 0, slots, rendered).Action;
+    Equal(VisitMenuAction.WaitForWorldList, Choose([home, World("Balmung")], [home, World("Balmung")]));
+    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [target, home]));
+    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [siren, target]));
+    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [target, null]));
+    Equal(VisitMenuAction.WaitForWorldList, Choose([target, target], [target, target]));
+    Equal(VisitMenuAction.SelectWorld, Choose([target, siren], [target, siren]));
+}
+
+static void RegionalDestinationUnavailable()
+{
+    var home = World("Zalera");
+    var target = World("Midgardsormr");
+    var siren = World("Siren");
+    var dcs = NaDcSlots();
+    Equal((VisitMenuAction.DestinationUnavailable, -1),
+        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, 0, [siren], [siren]));
 }

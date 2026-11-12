@@ -9,11 +9,6 @@ namespace SRankSentinel;
 
 internal sealed partial class NativeTravel
 {
-    // WorldTravelSelect regional layout introduced in 7.57 (SimpleTweaks' cross-DC
-    // World Visit layout audit). Validate live component types, labels and event ownership
-    // on 7.58 before emitting input. Regional selection never uses the old row callback.
-    private const uint LogicalDcSelectorNode = 2;
-    private const uint RegionalWorldListNode = 7;
     private const uint LegacyWorldListNode = 20;
 
     private Dictionary<uint, VisitWorld>? visitWorlds;
@@ -118,7 +113,7 @@ internal sealed partial class NativeTravel
         if (!IsReady(addon) || IsBusy)
             return (VisitMenuAction.WaitForSelector, "waiting for the native World Visit window");
 
-        var node = addon->GetNodeById(LogicalDcSelectorNode);
+        var node = addon->GetNodeById(WorldVisitPolicy.RegionalPanelId);
         var regional = node is not null && node->IsVisible();
         if (!regional)
         {
@@ -126,72 +121,90 @@ internal sealed partial class NativeTravel
             // This callback is the pre-regional behavior, only with validated legacy rows.
             var legacyList = addon->GetComponentListById(LegacyWorldListNode);
             if (legacyList is null || legacyList->OwnerNode is null || !legacyList->OwnerNode->IsVisible())
-                return (VisitMenuAction.WaitForSelector, "waiting for a verified regional selector or legacy World list");
+                return (VisitMenuAction.WaitForRegionalLayout, "visible World Visit window has no verified regional selector or legacy World list");
             var worlds = GetLegacyWorldRows().Select(ResolveVisitWorld).ToArray();
             var decision = WorldVisitPolicy.ChooseMenu(source, home, target, false, null, worlds);
             if (decision != VisitMenuAction.SelectWorld || !submitWorld)
                 return (decision, "waiting for exact legacy World list");
-            var index = Array.FindIndex(worlds, row => row?.Id == target.Id);
-            FireCallback(addon, 0, index + 2);
+            var legacyIndex = Array.FindIndex(worlds, row => row?.Id == target.Id);
+            FireCallback(addon, 0, legacyIndex + 2);
             return (VisitMenuAction.WorldSubmitted, $"selected exact World {target.Name} in legacy list");
         }
 
-        var dropdown = node->GetAsAtkComponentDropdownList();
+        var header = addon->GetNodeById(WorldVisitPolicy.RegionalHeaderId);
+        var dropdownNode = addon->GetNodeById(WorldVisitPolicy.RegionalDropdownId);
+        var listNode = addon->GetNodeById(WorldVisitPolicy.RegionalWorldListId);
+        // Verified against the installed 7.58 worldtranslate.uld. Node 2 is a
+        // resource container, not an AtkComponentDropDownList.
+        if (node->Type != NodeType.Res || header is null || dropdownNode is null || listNode is null ||
+            header->ParentNode != node || dropdownNode->ParentNode != header || listNode->ParentNode != node ||
+            !WorldVisitPolicy.IsRegionalLayout(header->ParentNode->NodeId,
+                dropdownNode->ParentNode->NodeId, listNode->ParentNode->NodeId))
+            return (VisitMenuAction.WaitForRegionalLayout, "waiting for the regional selector panel, header, dropdown and World list");
+
+        var dropdown = dropdownNode->GetAsAtkComponentDropdownList();
+        var list = listNode->GetAsAtkComponentList();
         var dcList = dropdown is null ? null : dropdown->List;
-        if (dropdown is null || (AtkResNode*)dropdown->OwnerNode != node || dcList is null ||
-            dcList->GetItemCount() is < 1 or > 8 || dropdown->OpenStateChangePending)
-            return (VisitMenuAction.WaitForSelector, "regional DC selector is not ready or has an unsupported layout");
+        if (dropdown is null || (AtkResNode*)dropdown->OwnerNode != dropdownNode ||
+            !dropdownNode->IsVisible() || dcList is null || list is null ||
+            (AtkResNode*)list->OwnerNode != listNode || dropdown->OpenStateChangePending)
+            return (VisitMenuAction.WaitForRegionalLayout, "regional dropdown or World list is still initializing");
 
-        var count = dcList->GetItemCount();
-        var dcLabels = new string[count];
-        for (var i = 0; i < count; i++)
-            dcLabels[i] = ReadItemLabel(dcList, i);
-        if (dcLabels.Distinct(StringComparer.OrdinalIgnoreCase).Count() != count ||
-            dcLabels.Any(label => !VisitWorlds.Values.Any(row => row.RegionId == source.RegionId &&
-                row.LogicalDc.Equals(label, StringComparison.OrdinalIgnoreCase))))
-            return (VisitMenuAction.WaitForSelector, "native DC selector labels do not match this region's game data");
+        var expectedDcs = VisitWorlds.Values.Where(row => row.RegionId == source.RegionId)
+            .Select(row => row.LogicalDc).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var dcCount = expectedDcs.Length;
+        var strings = GetWorldTranslateStrings();
+        // Installed Lifestream 2.6.0.13 corroborates these native callbacks and
+        // slots: DC labels start at zero; World labels follow DC count + 2.
+        if (dcCount is < 1 or > 8 || strings is null || strings->StringArray is null ||
+            strings->Size < dcCount + 2 + WorldVisitPolicy.RegionalWorldSlots ||
+            dcList->GetItemCount() != dcCount)
+            return (VisitMenuAction.WaitForRegionalLayout, "native World Visit DC labels are still initializing");
 
-        var selected = dropdown->GetSelectedItemIndex();
-        var selectedDc = selected >= 0 && selected < count ? dcLabels[selected] : null;
-        if (!string.Equals(selectedDc, target.LogicalDc, StringComparison.OrdinalIgnoreCase))
+        var dcSlots = new string[dcCount];
+        for (var i = 0; i < dcCount; i++)
+            dcSlots[i] = ReadWorldTranslateString(strings, i);
+        var selectedDcIndex = dropdown->GetSelectedItemIndex();
+        var worldSlots = new List<VisitWorld?>();
+        for (var i = 0; i < WorldVisitPolicy.RegionalWorldSlots; i++)
         {
-            if (submitWorld)
-                return (VisitMenuAction.SelectLogicalDataCenter, $"waiting for the {target.LogicalDc} page");
-            var index = Array.FindIndex(dcLabels, label => label.Equals(target.LogicalDc, StringComparison.OrdinalIgnoreCase));
-            if (index < 0 || dcList->GetItemDisabledState(index) || !HasOwnedClick(dcList, (AtkEventListener*)dropdown))
-                return (VisitMenuAction.WaitForSelector, $"{target.LogicalDc} is unavailable or the selector event could not be verified");
-            dropdown->SelectItem(index);
-            if (dropdown->GetSelectedItemIndex() == index &&
-                ReadItemLabel(dcList, index).Equals(target.LogicalDc, StringComparison.OrdinalIgnoreCase) &&
-                HasOwnedClick(dcList, (AtkEventListener*)dropdown))
-            {
-                dcList->DispatchItemEvent(index, AtkEventType.ListItemClick);
-                return (VisitMenuAction.SelectLogicalDataCenter, $"requested logical DC {target.LogicalDc}; waiting for World list refresh");
-            }
-            return (VisitMenuAction.WaitForSelector, "DC selector changed during revalidation");
+            var name = ReadWorldTranslateString(strings, dcCount + 2 + i);
+            if (name.Length == 0)
+                break;
+            worldSlots.Add(ResolveVisitWorld(name));
         }
 
-        var list = addon->GetComponentListById(RegionalWorldListNode);
-        if (list is null || list->OwnerNode is null || !list->OwnerNode->IsVisible() ||
-            list->GetItemCount() is < 1 or > 16 || list->IsUpdatePending)
-            return (VisitMenuAction.WaitForWorldList, $"waiting for the rendered {target.LogicalDc} World list");
-        var rows = new VisitWorld?[list->GetItemCount()];
-        for (var i = 0; i < rows.Length; i++)
-            rows[i] = ReadWorldRow(list, i);
-        var action = WorldVisitPolicy.ChooseMenu(source, home, target, true, selectedDc, rows);
-        if (action != VisitMenuAction.SelectWorld || !submitWorld)
-            return (action, action == VisitMenuAction.SelectWorld
-                ? $"verified {target.LogicalDc} World list contains {target.Name}"
-                : $"waiting for the World list to refresh to {target.LogicalDc}");
-        var worldIndex = Array.FindIndex(rows, row => row?.Id == target.Id);
-        if (list->GetItemDisabledState(worldIndex) || !HasOwnedClick(list, (AtkEventListener*)addon))
-            return (VisitMenuAction.WaitForWorldList, $"{target.Name} is unavailable or the World row event could not be verified");
-        list->SelectItem(worldIndex, false);
-        if (list->SelectedItemIndex != worldIndex || ReadWorldRow(list, worldIndex)?.Id != target.Id ||
-            dropdown->GetSelectedItemIndex() != selected || !HasOwnedClick(list, (AtkEventListener*)addon))
-            return (VisitMenuAction.WaitForWorldList, "World row changed during revalidation");
-        list->DispatchItemEvent(worldIndex, AtkEventType.ListItemClick);
-        return (VisitMenuAction.WorldSubmitted, $"selected exact World {target.Name} on {target.LogicalDc}");
+        var rowCount = list->GetItemCount();
+        var rendered = listNode->IsVisible() && !list->IsUpdatePending && rowCount is > 0 and <= 8
+            ? new VisitWorld?[rowCount] : [];
+        for (var i = 0; i < rendered.Length; i++)
+            rendered[i] = ReadWorldRow(list, i);
+
+        var (action, index) = WorldVisitPolicy.ChooseRegionalMenu(
+            source, home, target, expectedDcs, dcSlots, selectedDcIndex, worldSlots, rendered);
+        switch (action)
+        {
+            case VisitMenuAction.WaitForRegionalLayout:
+                return (action, "native selector has not reported a valid selected DC and regional DC labels");
+            case VisitMenuAction.SelectLogicalDataCenter:
+                if (submitWorld)
+                    return (action, $"waiting for the {target.LogicalDc} page");
+                FireCallback(addon, 1, index);
+                return (action, $"requested logical DC {target.LogicalDc} (slot {index}); waiting for World list refresh");
+            case VisitMenuAction.WaitForWorldList:
+                return (action, $"waiting for the selected {target.LogicalDc} page and rendered World list to agree");
+            case VisitMenuAction.DestinationUnavailable:
+                return (action, $"{target.Name} is absent from the verified {target.LogicalDc} World list");
+            case VisitMenuAction.SelectWorld:
+                if (list->GetItemDisabledState(index))
+                    return (VisitMenuAction.DestinationUnavailable, $"{target.Name} is disabled on the verified {target.LogicalDc} page");
+                if (!submitWorld)
+                    return (action, $"verified {target.LogicalDc} World list contains {target.Name}");
+                FireCallback(addon, 0, index + 2);
+                return (VisitMenuAction.WorldSubmitted, $"selected exact World {target.Name} on {target.LogicalDc}");
+            default:
+                return (action, $"no World Visit input for {target.Name}");
+        }
     }
 
     private static unsafe string ReadItemLabel(AtkComponentList* list, int index)
@@ -202,11 +215,8 @@ internal sealed partial class NativeTravel
 
     private unsafe VisitWorld? ReadWorldRow(AtkComponentList* list, int index)
     {
-        var label = list->GetItemLabel(index);
-        if (label.HasValue && ResolveVisitWorld(label.ToString()) is { } named)
-            return named;
-
-        // WorldTravelSelect can render text via a row populator instead of ItemLabels.
+        // Prefer the current row renderer so an already-updated backing array
+        // cannot authorize a click while an old logical DC is still on screen.
         var renderer = list->GetItemRenderer(index);
         if (renderer is null || renderer->OwnerNode is null || !renderer->OwnerNode->IsVisible() ||
             renderer->UldManager.NodeList is null || renderer->UldManager.NodeListCount > 128)
@@ -227,42 +237,98 @@ internal sealed partial class NativeTravel
         return resolved;
     }
 
-    private static unsafe bool HasOwnedClick(AtkComponentList* list, AtkEventListener* listener)
+    private static unsafe StringArrayData* GetWorldTranslateStrings()
     {
-        if (list is null || list->OwnerNode is null)
-            return false;
-        var entry = list->OwnerNode->AtkEventManager.Event;
-        var matches = 0;
-        for (var i = 0; entry is not null && i < 32; i++, entry = entry->NextEvent)
-        {
-            if (entry->State.EventType != AtkEventType.ListItemClick)
-                continue;
-            if (entry->Listener != listener || ++matches > 1)
-                return false;
-        }
-        return entry is null && matches == 1;
+        var module = RaptureAtkModule.Instance();
+        return module is null ? null : module->AtkArrayDataHolder.StringArrays[(int)StringArrayType.WorldTranslate];
+    }
+
+    private static unsafe string ReadWorldTranslateString(StringArrayData* strings, int index)
+    {
+        if (strings is null || strings->StringArray is null || index < 0 || index >= strings->Size)
+            return string.Empty;
+        var value = strings->StringArray[index];
+        return value.HasValue ? (Marshal.PtrToStringUTF8((nint)value.Value) ?? string.Empty).Trim() : string.Empty;
     }
 
     private static unsafe List<string> GetLegacyWorldRows()
     {
         var result = new List<string>();
-        var module = RaptureAtkModule.Instance();
-        if (module is null)
-            return result;
-        var strings = module->AtkArrayDataHolder.StringArrays[(int)StringArrayType.WorldTranslate];
-        if (strings is null)
-            return result;
+        var strings = GetWorldTranslateStrings();
         for (var i = 3; i <= 10; i++)
         {
-            var value = strings->StringArray[i];
-            if (!value.HasValue)
-                break;
-            var name = (Marshal.PtrToStringUTF8((nint)value.Value) ?? string.Empty).Trim();
+            var name = ReadWorldTranslateString(strings, i);
             if (name.Length == 0)
                 break;
             result.Add(name);
         }
         return result;
+    }
+
+    public unsafe string DescribeWorldVisitMenu(string world)
+    {
+        var target = ResolveVisitWorld(world);
+        var addon = gameGui.GetAddonByName<AtkUnitBase>("WorldTravelSelect");
+        if (!IsReady(addon))
+            return $"WorldTravelSelect not ready; target={target?.LogicalDc}/{world}";
+
+        var panel = addon->GetNodeById(WorldVisitPolicy.RegionalPanelId);
+        var header = addon->GetNodeById(WorldVisitPolicy.RegionalHeaderId);
+        var dropdownNode = addon->GetNodeById(WorldVisitPolicy.RegionalDropdownId);
+        var dropdown = dropdownNode is null ? null : dropdownNode->GetAsAtkComponentDropdownList();
+        var dcList = dropdown is null ? null : dropdown->List;
+        var rowNode = addon->GetNodeById(WorldVisitPolicy.RegionalWorldListId);
+        var rows = rowNode is null ? null : rowNode->GetAsAtkComponentList();
+        var dcCount = dcList is null ? -1 : dcList->GetItemCount();
+        var selected = dropdown is null || dcList is null ? -1 : dropdown->GetSelectedItemIndex();
+        var rowCount = rows is null ? -1 : rows->GetItemCount();
+        var dcLabels = new List<string>();
+        var rowLabels = new List<string>();
+        for (var i = 0; i < Math.Clamp(dcCount, 0, 8); i++)
+            dcLabels.Add(ReadItemLabel(dcList, i));
+        for (var i = 0; i < Math.Clamp(rowCount, 0, 8); i++)
+            rowLabels.Add(ReadWorldRow(rows, i)?.Name ?? "?");
+
+        var strings = GetWorldTranslateStrings();
+        var arraySize = strings is null ? -1 : strings->Size;
+        var slots = new List<string>();
+        for (var i = 0; i < Math.Clamp(arraySize, 0, 18); i++)
+            slots.Add($"[{i}]={ReadWorldTranslateString(strings, i)}");
+
+        return $"WorldTravelSelect target={target?.LogicalDc}/{world}, atkValues={addon->AtkValuesCount}; " +
+            $"panel={DescribeVisitNode(panel)}, header={DescribeVisitNode(header)}, dropdownNode={DescribeVisitNode(dropdownNode)}, " +
+            $"dropdown={dropdown is not null}, owner={(dropdown is null || dropdown->OwnerNode is null ? 0 : dropdown->OwnerNode->NodeId)}, " +
+            $"dcList={dcList is not null}, dcCount={dcCount}, selected={selected}, dcLabels=[{string.Join(", ", dcLabels)}], " +
+            $"dcEvents=[{DescribeVisitEvents(dcList, (AtkEventListener*)addon, (AtkEventListener*)dropdown)}]; " +
+            $"worldNode={DescribeVisitNode(rowNode)}, worldCount={rowCount}, worldRows=[{string.Join(", ", rowLabels)}], " +
+            $"worldEvents=[{DescribeVisitEvents(rows, (AtkEventListener*)addon, null)}]; " +
+            $"WorldTranslate(size={arraySize})={string.Join(", ", slots)}";
+    }
+
+    private static unsafe string DescribeVisitNode(AtkResNode* node)
+    {
+        if (node is null)
+            return "missing";
+        var component = node->GetAsAtkComponentNode();
+        var kind = component is null || component->Component is null
+            ? "none" : component->Component->GetComponentType().ToString();
+        return $"#{node->NodeId} type={(ushort)node->Type}/{kind} parent={(node->ParentNode is null ? 0 : node->ParentNode->NodeId)} visible={node->IsVisible()}";
+    }
+
+    private static unsafe string DescribeVisitEvents(AtkComponentList* list, AtkEventListener* addon, AtkEventListener* dropdown)
+    {
+        if (list is null || list->OwnerNode is null)
+            return "none";
+        var descriptions = new List<string>();
+        var entry = list->OwnerNode->AtkEventManager.Event;
+        for (var i = 0; entry is not null && i < 12; i++, entry = entry->NextEvent)
+        {
+            var owner = entry->Listener == addon ? "addon" :
+                dropdown is not null && entry->Listener == dropdown ? "dropdown" :
+                entry->Listener == (AtkEventListener*)list ? "list" : "other";
+            descriptions.Add($"{entry->State.EventType}:{owner}");
+        }
+        return string.Join(", ", descriptions);
     }
 
     public unsafe bool ConfirmWorldVisit(string world)
