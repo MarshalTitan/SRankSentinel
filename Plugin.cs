@@ -7592,6 +7592,7 @@ public sealed partial class Plugin : IDalamudPlugin
     };
 
     private bool IsHuntDataCenterEnabled(string world) =>
+        config.HuntDataCenters == NorthAmericanDataCenters.All ||
         DataCenterHunting.Allows(travel.ResolveVisitWorld(world), config.HuntDataCenters);
 
     private bool IsQueuedAlertFresh(HuntAlertSnapshot alert, DateTime now) =>

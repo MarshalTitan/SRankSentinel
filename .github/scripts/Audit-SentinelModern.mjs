@@ -515,7 +515,7 @@ const reviewedCheckpointPatches = {
       "                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))"
     ],
     [
-      "    private bool IsHuntDataCenterEnabled(string world) =>\n        DataCenterHunting.Allows(travel.ResolveVisitWorld(world), config.HuntDataCenters);\n\n    private bool IsQueuedAlertFresh(HuntAlertSnapshot alert, DateTime now) =>\n        IsHuntDataCenterEnabled(alert.World) && IsAlertFresh(alert, now);\n\n    private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>",
+      "    private bool IsHuntDataCenterEnabled(string world) =>\n        config.HuntDataCenters == NorthAmericanDataCenters.All ||\n        DataCenterHunting.Allows(travel.ResolveVisitWorld(world), config.HuntDataCenters);\n\n    private bool IsQueuedAlertFresh(HuntAlertSnapshot alert, DateTime now) =>\n        IsHuntDataCenterEnabled(alert.World) && IsAlertFresh(alert, now);\n\n    private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>",
       "    private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>"
     ],
     [
