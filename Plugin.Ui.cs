@@ -114,6 +114,12 @@ public sealed partial class Plugin
         ImGui.TextUnformatted("EXPANSION HUNTING");
         DrawExpansionControls();
         ImGui.Separator();
+        ImGui.TextUnformatted("DATA CENTER HUNTING");
+        DrawDataCenterControls();
+        ImGui.Separator();
+        ImGui.TextUnformatted("TAGGING");
+        DrawTagCheckpointControls();
+        ImGui.Separator();
         ImGui.TextUnformatted("DISTANCE PROFILES");
         DrawDistanceControls();
         DrawRecoveryControls();
@@ -201,6 +207,10 @@ public sealed partial class Plugin
                 DrawHuntStatus();
                 SentinelModernUi.SectionHeader("EXPANSION HUNTING");
                 DrawExpansionControls();
+                SentinelModernUi.SectionHeader("DATA CENTER HUNTING");
+                DrawDataCenterControls();
+                SentinelModernUi.SectionHeader("TAGGING");
+                DrawTagCheckpointControls();
                 SentinelModernUi.SectionHeader("RECOVERY");
                 DrawRecoveryControls();
                 break;
@@ -298,6 +308,46 @@ public sealed partial class Plugin
             RemoveDisabledQueuedAlerts();
             config.Save();
         }
+    }
+
+    private void DrawDataCenterControls()
+    {
+        var enabled = config.HuntDataCenters;
+        void Switch(string label, NorthAmericanDataCenters center)
+        {
+            var selected = (enabled & center) != 0;
+            if (DrawBoolean(label, ref selected))
+                enabled = selected ? enabled | center : enabled & ~center;
+        }
+
+        Switch("Aether", NorthAmericanDataCenters.Aether);
+        Switch("Crystal", NorthAmericanDataCenters.Crystal);
+        Switch("Dynamis", NorthAmericanDataCenters.Dynamis);
+        Switch("Primal", NorthAmericanDataCenters.Primal);
+        if (enabled == config.HuntDataCenters)
+            return;
+        config.HuntDataCenters = enabled;
+        RemoveDisabledQueuedAlerts();
+        config.Save();
+    }
+
+    private void DrawTagCheckpointControls()
+    {
+        var at75 = config.TagAt75Percent;
+        var at50 = config.TagAt50Percent;
+        var at25 = config.TagAt25Percent;
+        var afterRaise = config.RetagAfterRaise;
+        var changed = DrawBoolean("Additional tag at 75%", ref at75);
+        changed |= DrawBoolean("Additional tag at 50%", ref at50);
+        changed |= DrawBoolean("Additional tag at 25%", ref at25);
+        changed |= DrawBoolean("Retag after Raise", ref afterRaise);
+        if (!changed)
+            return;
+        config.TagAt75Percent = at75;
+        config.TagAt50Percent = at50;
+        config.TagAt25Percent = at25;
+        config.RetagAfterRaise = afterRaise;
+        config.Save();
     }
 
     private void DrawDistanceControls()

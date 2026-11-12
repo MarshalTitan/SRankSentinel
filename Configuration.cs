@@ -23,6 +23,11 @@ public sealed class Configuration : IPluginConfiguration
     public bool EnableEndwalker { get; set; } = true;
     public bool EnableDawntrail { get; set; } = true;
     public bool EnableEvercold { get; set; }
+    public NorthAmericanDataCenters HuntDataCenters { get; set; } = NorthAmericanDataCenters.All;
+    public bool TagAt75Percent { get; set; } = true;
+    public bool TagAt50Percent { get; set; } = true;
+    public bool TagAt25Percent { get; set; } = true;
+    public bool RetagAfterRaise { get; set; } = true;
     public string FaloopUsername { get; set; } = string.Empty;
     public string FaloopSessionId { get; set; } = string.Empty;
     public bool RememberFaloopLogin { get; set; }

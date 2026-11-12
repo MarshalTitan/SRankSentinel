@@ -61,6 +61,7 @@ internal static partial class Program
             Test("clearing each history is independent and preserves active credit evidence", TestHistoryClearing);
             Test("unified clear-history button saves once with mouse, keyboard, and controller and rejects empty activation", TestHistoryClearInput);
             Test("history records and displays only enabled expansions without deleting saved reports", TestHistoryExpansionFilters);
+            Test("DC defaults, provider-neutral History, and disabled-DC death cleanup", TestHistoryDataCenterFilters);
             Test("daily activity splits reports into tagged and untagged without double counting", TestHistoryActivity);
             Test("unified clearing retains active credit evidence and clears legacy credit records", TestUnifiedHistoryClearing);
             Test("Core minimum audit and narrower saved sizes preserve window identity", TestNarrowWindowPlacement);

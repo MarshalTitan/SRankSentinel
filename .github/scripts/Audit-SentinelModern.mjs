@@ -331,9 +331,228 @@ const reviewedLifestreamPatches = {
     ]
   ]
 };
+// Reverse the reviewed DC intake and checkpoint migration before the unchanged hunt baseline.
+const reviewedCheckpointPatches = {
+  "Plugin.cs": [
+    [
+      "escalating landing/range recovery without advancing the checkpoint",
+      "escalating landing/range recovery without issuing any extra attack after confirmation"
+    ],
+    [
+      "                    \"Tag confirmed by handled action sequence: {Mark}, pull={Pull}, checkpoint={Checkpoint}, consumed={Consumed}, action={ActionId}, target={TargetId}, sequence={Sequence}\",\n                    mark.Name.TextValue, pullCycle, pending.Checkpoint.Label, tagCycle.Consumed, activeTagActionId, mark.GameObjectId, sequence);",
+      "                    \"Tag confirmed by handled action sequence: {Mark}, pull cycle={PullCycle}, action={ActionId}, target={TargetId}, sequence={Sequence}\",\n                    mark.Name.TextValue, pullCycle, activeTagActionId, mark.GameObjectId, sequence);"
+    ],
+    [
+      "        if (feedEvent.Action == FaloopEventAction.Death)\n        {\n            ObserveKnownHistoryDeaths(world, hasTerritory ? territory : 0, feedEvent.Instance,\n                feedEvent.OccurredAtUtc, name => HuntCatalog.NamesMatch(name, creature));\n            if (!TryMatchTrackedFaloopDeath",
+      "        if (feedEvent.Action == FaloopEventAction.Death)\n        {\n            if (!TryMatchTrackedFaloopDeath"
+    ],
+    [
+      "name => HuntCatalog.TextMentionsMark(text, name), requireContextForMissing: true);\n                RemoveKilledQueuedAlerts",
+      "name => HuntCatalog.TextMentionsMark(text, name));\n                RemoveKilledQueuedAlerts"
+    ],
+    [
+      "                ObserveHistoryTag(current, now, firstTagOfPull);\n                pendingTagDispatch = null;",
+      "                ObserveHistoryTag(current, now);\n                pendingTagDispatch = null;"
+    ],
+    [
+      "            var firstTagOfPull = !pullCycleTagged;\n            if (pending.Sequence is ushort sequence &&\n                ActionSequenceWasHandled",
+      "            if (pending.Sequence is ushort sequence &&\n                ActionSequenceWasHandled"
+    ],
+    [
+      "        if (current is null || killConfirmed || !markEverIdentified || !target.IsTargetable ||\n            target.ObjectKind != ObjectKind.BattleNpc || target.GameObjectId != identifiedMarkGameObjectId ||\n            !((current.MarkDataId != 0 && target.BaseId == current.MarkDataId) ||\n              target.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)) ||",
+      "        if (current is null || killConfirmed || !markEverIdentified || !target.IsTargetable ||\n            target.GameObjectId != identifiedMarkGameObjectId || !IsCurrentMarkActor(target) ||"
+    ],
+    [
+      "        if (tagCycle.RetreatPending &&\n            clearance < ActiveDistanceProfile.WaitingDistance - ParkingPreferredClearanceTolerance)\n        {\n            if (now >= nextActionUtc)\n            {\n                BeginSafeParking(mark, fly: false);\n                nextActionUtc = now.AddSeconds(2);\n            }\n            return;\n        }\n\n        var preferredError = HuntProgressPolicy.ParkingClearanceError(\n            clearance, ActiveDistanceProfile.WaitingDistance);\n        if (clearance > MaximumParkingClearance",
+      "        var preferredError = HuntProgressPolicy.ParkingClearanceError(\n            clearance, ActiveDistanceProfile.WaitingDistance);\n        if (clearance > MaximumParkingClearance"
+    ],
+    [
+      "parking is suspended until the current checkpoint is confirmed",
+      "parking is suspended until one ranged tag is confirmed"
+    ],
+    [
+      "    private bool IsExactCheckpointMark(IBattleChara target)\n    {\n        if (current is null || killConfirmed || !markEverIdentified || !target.IsTargetable ||\n            target.GameObjectId != identifiedMarkGameObjectId || !IsCurrentMarkActor(target) ||\n            HuntCatalog.IsAnyPrecursorName(target.Name.TextValue) || HuntCatalog.IsAnyPrecursorName(current.CreatureName) ||\n            clientState.TerritoryType != current.TerritoryId ||\n            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))\n            return false;\n        return travel.TryReadLiveInstance(out var instance) && Math.Max(1, instance) == current.Instance;\n    }\n\n    private bool CanActAfterRevival() =>\n        !combat.IsPlayerDead && !travel.IsBusy && objects.LocalPlayer is { IsTargetable: true } &&\n        !condition[ConditionFlag.Occupied] && !condition[ConditionFlag.OccupiedInEvent] &&\n        !condition[ConditionFlag.OccupiedInQuestEvent] && !condition[ConditionFlag.OccupiedInCutSceneEvent];\n\n    private void LatchTagRequirement(IBattleChara target, DateTime now)\n    {\n        var exact = IsExactCheckpointMark(target);\n        if (exact && tagCycle.RetreatPending && state == SentinelState.SafeWait &&\n            ClearanceFromMark(target) >= ActiveDistanceProfile.WaitingDistance - ParkingPreferredClearanceTolerance)\n            tagCycle.CompleteRetreat();\n\n        var hp = CombatController.HpPercent(target);\n        var enabled = (config.TagAt75Percent ? TagMilestone.At75 : TagMilestone.None) |\n                      (config.TagAt50Percent ? TagMilestone.At50 : TagMilestone.None) |\n                      (config.TagAt25Percent ? TagMilestone.At25 : TagMilestone.None);\n        if (tagCycle.TryLatch(exact, !target.IsDead && target.CurrentHp > 0,\n                CombatController.IsMarkInCombat(target), hp, ActiveDistanceProfile.EngageHpPercent, enabled))\n        {\n            tagRequiredSinceUtc = now;\n            tagLastProgressUtc = now;\n            tagLastProgressPosition = PlayerPosition();\n            tagBestClearance = ClearanceFromMark(target);\n            tagRecoveryFailures = 0;\n            tagHpEscalationMask = 0;\n            activeTagActionId = combat.ResolveTagActionId();\n            log.Information(\"Tag checkpoint latched: {Checkpoint}, mark={Mark}, pull={Pull}, HP={Hp:0.0}%\",\n                tagCycle.Pending!.Value.Label, target.Name.TextValue, pullCycle, hp);\n        }\n\n        ReportTagRecoveryEscalation(target);\n    }\n\n",
+      "    private void LatchTagRequirement(IBattleChara target, DateTime now)\n    {\n        var hp = CombatController.HpPercent(target);\n        if (!HuntProgressPolicy.ShouldLatchTag(\n                !target.IsDead && target.CurrentHp > 0,\n                CombatController.IsMarkInCombat(target),\n                hp,\n                ActiveDistanceProfile.EngageHpPercent,\n                pullCycleTagged || tagAttempted))\n            return;\n\n        if (!tagRequired)\n        {\n            tagRequired = true;\n            tagRequiredSinceUtc = now;\n            tagLastProgressUtc = now;\n            tagLastProgressPosition = PlayerPosition();\n            tagBestClearance = ClearanceFromMark(target);\n            tagRecoveryFailures = 0;\n            tagHpEscalationMask = 0;\n            activeTagActionId = combat.ResolveTagActionId();\n            log.Warning(\n                \"Tag requirement latched: {Mark}, pull cycle={PullCycle}, HP={Hp:0.0}%, mounted={Mounted}, flying={Flying}; parking/mounting cannot clear this obligation\",\n                target.Name.TextValue, pullCycle, hp,\n                condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);\n        }\n\n        ReportTagRecoveryEscalation(target);\n    }\n\n"
+    ],
+    [
+      "        if (tagRequired)\n        {\n            // A tag budget",
+      "        if (tagRequired && !pullCycleTagged && !tagAttempted)\n        {\n            // A tag budget"
+    ],
+    [
+      "            (!tagRequired && !pullCycleTagged) ||",
+      "            (!tagRequired && (!pullCycleTagged || !tagAttempted)) ||"
+    ],
+    [
+      "    private void ResetTagRecoveryTracking()\n    {",
+      "    private void ResetTagRecoveryTracking(bool clearRequirement = true)\n    {\n        if (clearRequirement)\n            tagRequired = false;"
+    ],
+    [
+      "        if (!tagRequired)\n            return;\n        var hp = CombatController.HpPercent(target);",
+      "        if (!tagRequired || pullCycleTagged || tagAttempted)\n            return;\n        var hp = CombatController.HpPercent(target);"
+    ],
+    [
+      "            pullCycleTagged ||\n            (now - parkingRecoveryStartedUtc)",
+      "            pullCycleTagged && tagAttempted ||\n            (now - parkingRecoveryStartedUtc)"
+    ],
+    [
+      "        if (pullCycleTagged)\n            return false;",
+      "        if (pullCycleTagged && tagAttempted)\n            return false;"
+    ],
+    [
+      "if (tagRequired)\n        {\n            BeginTagRequiredRecovery(target, now,\n                $\"Parking/landing recovery failed while a tag is required: {reason}\");",
+      "if (tagRequired && !pullCycleTagged && !tagAttempted)\n        {\n            BeginTagRequiredRecovery(target, now,\n                $\"Parking/landing recovery failed while a tag is required: {reason}\");"
+    ],
+    [
+      "if (tagRequired)\n        {\n            BeginTagRequiredRecovery(target, DateTime.UtcNow,\n                \"Tag remains required; ordinary retreat cannot replace the pending ranged tag\");",
+      "if (tagRequired && !pullCycleTagged && !tagAttempted)\n        {\n            BeginTagRequiredRecovery(target, DateTime.UtcNow,\n                \"Tag remains required; ordinary retreat cannot replace the pending ranged tag\");"
+    ],
+    [
+      "pullCycleTagged ? \"Confirmed tag completed; safe radius restored\"",
+      "tagAttempted ? \"Confirmed tag completed; safe radius restored\""
+    ],
+    [
+      "    DateTime SubmittedAtUtc,\n    TagCheckpoint Checkpoint,\n    TagMilestone CrossedOnSubmit);\n\ninternal sealed record TerritoryAetheryteOverride",
+      "    DateTime SubmittedAtUtc);\n\ninternal sealed record TerritoryAetheryteOverride"
+    ],
+    [
+      "waiting for server handling before completing {checkpoint.Label}",
+      "waiting for server handling before closing the tag gate"
+    ],
+    [
+      "                        attempt.DeferredForTarget,\n                        now, checkpoint, crossed);",
+      "                        attempt.DeferredForTarget,\n                        now);"
+    ],
+    [
+      "            if (now >= nextActionUtc && CanActAfterRevival() &&\n                tagCycle.Pending is { } checkpoint && tagCycle.CanDispatch(IsExactCheckpointMark(mark),\n                    !mark.IsDead && mark.CurrentHp > 0, CombatController.IsMarkInCombat(mark),\n                    CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))\n            {\n                var crossed = TagCheckpointCycle.Crossed(CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent);\n                var attempt = combat.TrySingleTag(activeTagActionId, mark);",
+      "            if (now >= nextActionUtc)\n            {\n                var attempt = combat.TrySingleTag(activeTagActionId, mark);"
+    ],
+    [
+      "        if (!tagCycle.CanDispatch(IsExactCheckpointMark(mark), !mark.IsDead && mark.CurrentHp > 0,\n                CombatController.IsMarkInCombat(mark), CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))\n        {\n            vnav.StopSafe();\n            status = $\"Waiting for the exact active mark to meet the {tagCycle.Pending?.Label}\";",
+      "        if (!CombatController.IsMarkInCombat(mark) ||\n            CombatController.HpPercent(mark) > ActiveDistanceProfile.EngageHpPercent)\n        {\n            vnav.StopSafe();\n            status = $\"Tag requirement remains latched for pull cycle {pullCycle}; waiting for the full-HP/out-of-combat reset confirmation\";"
+    ],
+    [
+      "(action {activeTagActionId}, sequence {sequence}); retreating before the next checkpoint",
+      "(action {activeTagActionId}, sequence {sequence}); attack cutoff is active"
+    ],
+    [
+      "                ActionSequenceWasHandled(pending.BaselineSequence, sequence, actionState.LastHandledSequence) &&\n                tagCycle.ConfirmHandled(pending.Checkpoint, pending.CrossedOnSubmit,\n                    CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))\n            {\n                ObserveHistoryTag(current, now);\n                pendingTagDispatch = null;\n                ResetTagRecoveryTracking();",
+      "                ActionSequenceWasHandled(pending.BaselineSequence, sequence, actionState.LastHandledSequence))\n            {\n                tagAttempted = true;\n                pullCycleTagged = true;\n                ObserveHistoryTag(current, now);\n                tagRequired = false;\n                pendingTagDispatch = null;\n                ResetTagRecoveryTracking(clearRequirement: false);"
+    ],
+    [
+      "        if (pendingTagDispatch is { } dispatched &&\n            (dispatched.TargetId != mark.GameObjectId || !IsExactCheckpointMark(mark) ||\n             tagCycle.Pending != dispatched.Checkpoint))\n            ResetPendingTagDispatch();\n\n        if (pendingTagDispatch is not null)\n        {\n            var pending = pendingTagDispatch;",
+      "        if (pendingTagDispatch is not null)\n        {\n            var pending = pendingTagDispatch;"
+    ],
+    [
+      "            if (tagCycle.RetreatPending)\n            {\n                if (now >= nextActionUtc)",
+      "            if (tagAttempted)\n            {\n                if (now >= nextActionUtc)"
+    ],
+    [
+      "        if (raiseDialogFirstSeenUtc == DateTime.MinValue &&\n            raiseAcceptanceSubmittedUtc == DateTime.MinValue)\n            return;\n        if (!CanActAfterRevival())\n            return;\n        if (current is not null && !killConfirmed &&\n            tagCycle.ObserveRevival(raiseAcceptanceSubmittedUtc, true, config.RetagAfterRaise))\n        {\n            ResetPendingTagDispatch();\n            ResetTagRecoveryTracking();\n            log.Information(\"Accepted Raise completed; one retag is eligible for {Mark} in pull {Pull}\",\n                current.CreatureName, pullCycle);\n        }\n        log.Information(\n            \"Raise recovery observed: player is conscious;",
+      "        if (raiseDialogFirstSeenUtc == DateTime.MinValue &&\n            raiseAcceptanceSubmittedUtc == DateTime.MinValue)\n            return;\n        log.Information(\n            \"Raise recovery observed: player is conscious;"
+    ],
+    [
+      "if (!combat.IsPlayerDead || !pullCycleTagged)",
+      "if (!combat.IsPlayerDead || !tagAttempted || !pullCycleTagged)"
+    ],
+    [
+      "if (!killConfirmed || !pullCycleTagged)",
+      "if (!killConfirmed || !tagAttempted || !pullCycleTagged)"
+    ],
+    [
+      "has a ranged tag checkpoint awaiting confirmation",
+      "crossed the engage threshold before a tag was confirmed"
+    ],
+    [
+      "            if (tagRequired && state != SentinelState.TagApproach &&",
+      "            ObserveRaiseRecoveryCompletion(now);\n            if (tagRequired && state != SentinelState.TagApproach &&"
+    ],
+    [
+      "            if (!combat.IsPlayerDead)\n                ObserveRaiseRecoveryCompletion(now);\n            IBattleChara? visibleMark = null;\n            if (CanResolveMarkInState())",
+      "            IBattleChara? visibleMark = null;\n            if (CanResolveMarkInState())"
+    ],
+    [
+      "private bool ObservePullCycleReset(IBattleChara target, DateTime now)\n    {\n        if (current is null || !markEverIdentified || !pullCycleCombatObserved ||\n            (!tagRequired && (!pullCycleTagged || !tagAttempted)) ||\n            killConfirmed || target.IsDead || target.CurrentHp == 0 ||\n            clientState.TerritoryType != current.TerritoryId ||\n            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||\n            identifiedMarkGameObjectId == 0 || target.GameObjectId != identifiedMarkGameObjectId)\n        {\n            pullResetCandidateSinceUtc = DateTime.MinValue;\n            return false;\n        }\n\n        var outOfCombatAtFullHealth = !CombatController.IsMarkInCombat(target) &&\n                                      CombatController.HpPercent(target) >= PullResetMinimumHpPercent;\n        if (!outOfCombatAtFullHealth)\n        {\n            pullResetCandidateSinceUtc = DateTime.MinValue;\n            return false;\n        }\n\n        if (pullResetCandidateSinceUtc == DateTime.MinValue)\n        {\n            pullResetCandidateSinceUtc = now;\n            log.Information(\n                \"Reset candidate started: same {Mark} entity, previous combat={PreviousCombat}, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, requiring {Seconds:0.0}s stable confirmation\",\n                target.Name.TextValue, pullCycleCombatObserved, pullCycleTagged,\n                CombatController.HpPercent(target), PullResetConfirmationSeconds);\n            return false;\n        }\n\n        if ((now - pullResetCandidateSinceUtc).TotalSeconds < PullResetConfirmationSeconds)\n            return false;\n\n        var completedCycle = pullCycle;\n        var completedCycleTagged = pullCycleTagged;\n        var stableSeconds = (now - pullResetCandidateSinceUtc).TotalSeconds;\n        pullCycle++;\n        pullCycleCombatObserved = false;\n        tagCycle.ResetPull();\n        ResetTagRecoveryTracking();\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        postTagRetreatActive = false;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        vnav.StopSafe();\n        log.Information(\n            \"Reset confirmed: same {Mark} entity {ObjectId}, previous combat=true, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, stable={Stable:0.0}s; completed pull cycle {PullCycle}\",\n            target.Name.TextValue, target.GameObjectId, completedCycleTagged,\n            CombatController.HpPercent(target), stableSeconds, completedCycle);\n        log.Information(\"Tag gate re-armed for pull cycle {PullCycle}\", pullCycle);\n\n        var resetClearance = ClearanceFromMark(target);\n        if (resetClearance < ActiveDistanceProfile.WaitingDistance ||\n            resetClearance > MaximumParkingClearance + 0.5f ||\n            state != SentinelState.SafeWait)\n        {\n            BeginSafeParking(target, fly: false);\n            status = $\"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle} and returning to safe parking\";\n        }\n        else\n        {\n            SetState(SentinelState.SafeWait,\n                $\"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle}\");\n        }\n        return true;\n    }\n",
+      "private bool ObservePullCycleReset(IBattleChara target, DateTime now)\n    {\n        if (current is null || !markEverIdentified || !pullCycleCombatObserved ||\n            (!tagRequired && (!pullCycleTagged || !tagAttempted)) ||\n            killConfirmed || target.IsDead || target.CurrentHp == 0 ||\n            clientState.TerritoryType != current.TerritoryId ||\n            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||\n            identifiedMarkGameObjectId == 0 || target.GameObjectId != identifiedMarkGameObjectId)\n        {\n            pullResetCandidateSinceUtc = DateTime.MinValue;\n            return false;\n        }\n\n        var outOfCombatAtFullHealth = !CombatController.IsMarkInCombat(target) &&\n                                      CombatController.HpPercent(target) >= PullResetMinimumHpPercent;\n        if (!outOfCombatAtFullHealth)\n        {\n            pullResetCandidateSinceUtc = DateTime.MinValue;\n            return false;\n        }\n\n        if (pullResetCandidateSinceUtc == DateTime.MinValue)\n        {\n            pullResetCandidateSinceUtc = now;\n            log.Information(\n                \"Reset candidate started: same {Mark} entity, previous combat={PreviousCombat}, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, requiring {Seconds:0.0}s stable confirmation\",\n                target.Name.TextValue, pullCycleCombatObserved, pullCycleTagged,\n                CombatController.HpPercent(target), PullResetConfirmationSeconds);\n            return false;\n        }\n\n        if ((now - pullResetCandidateSinceUtc).TotalSeconds < PullResetConfirmationSeconds)\n            return false;\n\n        var completedCycle = pullCycle;\n        var completedCycleTagged = pullCycleTagged;\n        var stableSeconds = (now - pullResetCandidateSinceUtc).TotalSeconds;\n        pullCycle++;\n        tagAttempted = false;\n        pullCycleCombatObserved = false;\n        pullCycleTagged = false;\n        ResetTagRecoveryTracking();\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        postTagRetreatActive = false;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        vnav.StopSafe();\n        log.Information(\n            \"Reset confirmed: same {Mark} entity {ObjectId}, previous combat=true, previous tag={PreviousTag}, combat=false, HP={Hp:0.0}%, stable={Stable:0.0}s; completed pull cycle {PullCycle}\",\n            target.Name.TextValue, target.GameObjectId, completedCycleTagged,\n            CombatController.HpPercent(target), stableSeconds, completedCycle);\n        log.Information(\"Tag gate re-armed for pull cycle {PullCycle}\", pullCycle);\n\n        var resetClearance = ClearanceFromMark(target);\n        if (resetClearance < ActiveDistanceProfile.WaitingDistance ||\n            resetClearance > MaximumParkingClearance + 0.5f ||\n            state != SentinelState.SafeWait)\n        {\n            BeginSafeParking(target, fly: false);\n            status = $\"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle} and returning to safe parking\";\n        }\n        else\n        {\n            SetState(SentinelState.SafeWait,\n                $\"Reset detected: HP restored and combat ended; tag gate re-armed for pull cycle {pullCycle}\");\n        }\n        return true;\n    }\n"
+    ],
+    [
+      "private void ClearCurrent()\n    {\n        worldTravel = null;\n        ResetInstanceRangeRecovery();\n        vnav.StopSafe();\n        ResetParkingFacingSettleTracking();\n        if (current is not null)\n            faloopReportIdsByAlertKey.Remove(current.Key);\n        current = null;\n        mark = null;\n        alertPoint = null;\n        approachPoint = null;\n        safePoint = null;\n        selectedParkingCandidate = null;\n        parkingPathTask = null;\n        parkingGroundPathTask = null;\n        parkingPathStartedUtc = DateTime.MinValue;\n        pendingParkingFlightPath = null;\n        parkingGroundPathGoal = default;\n        selectedParkingPath = null;\n        crowdFallbackAnnounced = false;\n        territoryAetheryteId = 0;\n        killConfirmed = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        tagCycle.ResetPull();\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        ssChainObserved = false;\n        ssSpawnAnnounced = false;\n        activeSsProfile = null;\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        resetToUldahAllowsLiveEntityExit = false;\n        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;\n        resetToUldahRequestedFromState = SentinelState.Idle;\n        resetToUldahRequestReason = string.Empty;\n        ResetRaiseTracking();\n        ResetReturnLandingRecovery();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        parkingCandidates.Clear();\n        ResetApproachRouteTracking(clearProjectionCandidates: true);\n        ResetLocalApproachRecovery();\n        ResetLocateSearchTracking();\n    }\n",
+      "private void ClearCurrent()\n    {\n        worldTravel = null;\n        ResetInstanceRangeRecovery();\n        vnav.StopSafe();\n        ResetParkingFacingSettleTracking();\n        if (current is not null)\n            faloopReportIdsByAlertKey.Remove(current.Key);\n        current = null;\n        mark = null;\n        alertPoint = null;\n        approachPoint = null;\n        safePoint = null;\n        selectedParkingCandidate = null;\n        parkingPathTask = null;\n        parkingGroundPathTask = null;\n        parkingPathStartedUtc = DateTime.MinValue;\n        pendingParkingFlightPath = null;\n        parkingGroundPathGoal = default;\n        selectedParkingPath = null;\n        crowdFallbackAnnounced = false;\n        territoryAetheryteId = 0;\n        killConfirmed = false;\n        tagAttempted = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        pullCycleTagged = false;\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        ssChainObserved = false;\n        ssSpawnAnnounced = false;\n        activeSsProfile = null;\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        resetToUldahAllowsLiveEntityExit = false;\n        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;\n        resetToUldahRequestedFromState = SentinelState.Idle;\n        resetToUldahRequestReason = string.Empty;\n        ResetRaiseTracking();\n        ResetReturnLandingRecovery();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        parkingCandidates.Clear();\n        ResetApproachRouteTracking(clearProjectionCandidates: true);\n        ResetLocalApproachRecovery();\n        ResetLocateSearchTracking();\n    }\n"
+    ],
+    [
+      "private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {\n        vnav.StopSafe();\n        current = alert;\n        mark = null;\n        killConfirmed = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        tagCycle.ResetPull();\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        ssChainObserved = true;\n        ssSpawnAnnounced = true;\n        activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName) ??\n                          HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        ResetRaiseTracking();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        PrepareCurrentTravel();\n\n        // A real loaded SS entity always supersedes static/provider coordinates. Provider links\n        // can arrive during the prey phase and must not pull staging away from the documented\n        // territory spawn location.\n        var visibleSs = FindMark();\n        if (visibleSs is not null)\n        {\n            mark = visibleSs;\n            MarkWasIdentified(visibleSs);\n            SetState(SentinelState.LocateMark,\n                $\"{source}: {alert.CreatureName} is already visible; switching to dynamic safe parking\");\n            return;\n        }\n\n        if (!vnav.IsReadySafe())\n        {\n            BeginMeshWait($\"{source}: prioritizing {alert.CreatureName} directly without an Ul'dah reset\");\n            return;\n        }\n\n        SetState(SentinelState.PrepareApproachDestination,\n            $\"{source}: prioritizing {alert.CreatureName} directly from its alert coordinates\");\n    }\n",
+      "private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {\n        vnav.StopSafe();\n        current = alert;\n        mark = null;\n        killConfirmed = false;\n        tagAttempted = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        pullCycleTagged = false;\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        ssChainObserved = true;\n        ssSpawnAnnounced = true;\n        activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName) ??\n                          HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        ResetRaiseTracking();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        PrepareCurrentTravel();\n\n        // A real loaded SS entity always supersedes static/provider coordinates. Provider links\n        // can arrive during the prey phase and must not pull staging away from the documented\n        // territory spawn location.\n        var visibleSs = FindMark();\n        if (visibleSs is not null)\n        {\n            mark = visibleSs;\n            MarkWasIdentified(visibleSs);\n            SetState(SentinelState.LocateMark,\n                $\"{source}: {alert.CreatureName} is already visible; switching to dynamic safe parking\");\n            return;\n        }\n\n        if (!vnav.IsReadySafe())\n        {\n            BeginMeshWait($\"{source}: prioritizing {alert.CreatureName} directly without an Ul'dah reset\");\n            return;\n        }\n\n        SetState(SentinelState.PrepareApproachDestination,\n            $\"{source}: prioritizing {alert.CreatureName} directly from its alert coordinates\");\n    }\n"
+    ],
+    [
+      "private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n        worldTravel = null;\n        if (HuntCatalog.IsAnySsName(alert.CreatureName) &&\n            HuntCatalog.TryGetSsStagingLocation(alert.TerritoryId, out var ssLocation))\n            alert = alert with { MapX = ssLocation.MapX, MapY = ssLocation.MapY };\n        current = alert;\n        mark = null;\n        killConfirmed = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        tagCycle.ResetPull();\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName);\n        ssChainObserved = activeSsProfile is not null;\n        ssSpawnAnnounced = activeSsProfile is not null && !IsReservedSsWatch(alert);\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        resetToUldahAllowsLiveEntityExit = false;\n        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;\n        resetToUldahRequestedFromState = SentinelState.Idle;\n        resetToUldahRequestReason = string.Empty;\n        ResetRaiseTracking();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        PrepareCurrentTravel();\n        log.Information(\n            \"Hunt activated: {Mark} on {World}, territory {Territory}, instance {Instance}; positive kill evidence remains required\",\n            alert.CreatureName, alert.World, alert.TerritoryId, alert.Instance);\n        SetState(SentinelState.ResetToUldah,\n            $\"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}\");\n    }\n",
+      "private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n        worldTravel = null;\n        if (HuntCatalog.IsAnySsName(alert.CreatureName) &&\n            HuntCatalog.TryGetSsStagingLocation(alert.TerritoryId, out var ssLocation))\n            alert = alert with { MapX = ssLocation.MapX, MapY = ssLocation.MapY };\n        current = alert;\n        mark = null;\n        killConfirmed = false;\n        tagAttempted = false;\n        postTagRetreatActive = false;\n        markEverIdentified = false;\n        markCombatObserved = false;\n        pullCycleCombatObserved = false;\n        pullCycleTagged = false;\n        ResetTagRecoveryTracking();\n        identifiedMarkGameObjectId = 0;\n        pullCycle = 1;\n        pullResetCandidateSinceUtc = DateTime.MinValue;\n        activeTagActionId = 0;\n        ResetPendingTagDispatch();\n        discardAtUldah = false;\n        discardReason = string.Empty;\n        activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName);\n        ssChainObserved = activeSsProfile is not null;\n        ssSpawnAnnounced = activeSsProfile is not null && !IsReservedSsWatch(alert);\n        postKillSsGraceDeadlineUtc = DateTime.MinValue;\n        ssWatchDeadlineUtc = DateTime.MinValue;\n        ClearPendingSsChainEvidence();\n        ResetSsStagingTracking();\n        playerReadySinceUtc = DateTime.MinValue;\n        lastMarkSeenUtc = DateTime.MinValue;\n        ResetReturnRecoveryTracking();\n        resetToUldahAllowsLiveEntityExit = false;\n        resetToUldahRequestSource = HuntExitRequestSource.AutomaticStateTransition;\n        resetToUldahRequestedFromState = SentinelState.Idle;\n        resetToUldahRequestReason = string.Empty;\n        ResetRaiseTracking();\n        ResetIncidentalAggroTracking();\n        ResetParkingRecoveryTracking();\n        PrepareCurrentTravel();\n        log.Information(\n            \"Hunt activated: {Mark} on {World}, territory {Territory}, instance {Instance}; positive kill evidence remains required\",\n            alert.CreatureName, alert.World, alert.TerritoryId, alert.Instance);\n        SetState(SentinelState.ResetToUldah,\n            $\"{source}: resetting through Ul'dah before {alert.CreatureName} on {alert.World}\");\n    }\n"
+    ],
+    [
+      "    private readonly TagCheckpointCycle tagCycle = new();\n    private bool pullCycleTagged => tagCycle.HasConfirmedTag;\n    private bool tagRequired => tagCycle.Pending is not null;",
+      "    private bool pullCycleTagged;\n    private bool tagRequired;"
+    ],
+    [
+      "    private bool markEverIdentified;\n",
+      "    private bool tagAttempted;\n    private bool markEverIdentified;\n"
+    ],
+    [
+      "        var currentMatched = current is not null && Matches(current);\n        ObserveKnownHistoryDeaths(world, territory, instance, deathAtUtc,\n            name => HuntCatalog.NamesMatch(name, creature));\n        var removed = pendingAlerts.Where(Matches).ToArray();",
+      "        var currentMatched = current is not null && Matches(current);\n        var removed = pendingAlerts.Where(Matches).ToArray();"
+    ],
+    [
+      "                ObserveKnownHistoryDeaths(killedWorld, killedTerritory, killedInstance, DateTime.UtcNow,\n                    name => HuntCatalog.TextMentionsMark(text, name));\n                RemoveKilledQueuedAlerts(text, killedWorld, killedTerritory, killedInstance);",
+      "                RemoveKilledQueuedAlerts(text, killedWorld, killedTerritory, killedInstance);"
+    ],
+    [
+      "status = $\"Removed {removed} queued hunt(s) from disabled expansions or Data Centers\";",
+      "status = $\"Removed {removed} queued hunt(s) from disabled expansions\";"
+    ],
+    [
+      "    private void RemoveDisabledQueuedAlerts()\n    {\n        PruneUnresolvedFaloopAlerts();\n        var survivors = pendingAlerts\n            .Where(alert => config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)) &&\n                            IsHuntDataCenterEnabled(alert.World))",
+      "    private void RemoveDisabledQueuedAlerts()\n    {\n        var survivors = pendingAlerts\n            .Where(alert => config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)))"
+    ],
+    [
+      "                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)) ||\n                           !IsHuntDataCenterEnabled(pair.Value.Alert.World))",
+      "                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))"
+    ],
+    [
+      "    private bool IsHuntDataCenterEnabled(string world) =>\n        DataCenterHunting.Allows(travel.ResolveVisitWorld(world), config.HuntDataCenters);\n\n    private bool IsQueuedAlertFresh(HuntAlertSnapshot alert, DateTime now) =>\n        IsHuntDataCenterEnabled(alert.World) && IsAlertFresh(alert, now);\n\n    private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>",
+      "    private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>"
+    ],
+    [
+      "var valid = queued.Where(candidate => IsQueuedAlertFresh(candidate, now))",
+      "var valid = queued.Where(candidate => IsAlertFresh(candidate, now))"
+    ],
+    [
+      "if (IsQueuedAlertFresh(alert, now) && pendingAlerts.All(existing => existing.Key != alert.Key))",
+      "if (IsAlertFresh(alert, now) && pendingAlerts.All(existing => existing.Key != alert.Key))"
+    ],
+    [
+      "        if (ssAlert is not null && !IsHuntDataCenterEnabled(ssAlert.World))\n        {\n            nextActionUtc = now;\n            SetState(SentinelState.ResetToUldah, $\"{reason}; SS follow-up Data Center is disabled\");\n            return;\n        }\n        if (ssAlert is null)\n        {\n            log.Warning(\n                \"Could not reserve {Ss} after completed {Mark}: fixed SS staging coordinates are unavailable\",",
+      "        if (ssAlert is null)\n        {\n            log.Warning(\n                \"Could not reserve {Ss} after completed {Mark}: fixed SS staging coordinates are unavailable\","
+    ],
+    [
+      "        var dcEnabled = IsHuntDataCenterEnabled(world);\n        LogProviderRegion(source, \"spawn\", world, eligible && dcEnabled);\n        if (!eligible || !dcEnabled)\n        {\n            status = $\"Ignored {source} alert for {creature.Trim()} on {world}: \" +\n                     (!eligible ? \"outside the current World Visit region\" : \"its logical Data Center is disabled\");\n            return;\n        }",
+      "        LogProviderRegion(source, \"spawn\", world, eligible);\n        if (!eligible)\n        {\n            status = $\"Ignored {source} alert for {creature.Trim()} on {world}: outside the current World Visit region\";\n            return;\n        }"
+    ],
+    [
+      "        if (!IsHuntDataCenterEnabled(world))\n            return;\n\n        var expansion = HuntCatalog.GetExpansion(territory);\n        if (!config.IsExpansionEnabled(expansion))\n        {\n            log.Debug(\"Ignored supported S/SS event",
+      "        var expansion = HuntCatalog.GetExpansion(territory);\n        if (!config.IsExpansionEnabled(expansion))\n        {\n            log.Debug(\"Ignored supported S/SS event"
+    ]
+  ],
+  "HuntProgressPolicy.cs": [
+    [
+      "    public static bool IsConfirmedPullReset(\n ",
+      "    public static bool ShouldLatchTag(\n        bool markAlive,\n        bool markInCombat,\n        float hpPercent,\n        float engageThreshold,\n        bool tagConfirmed) =>\n        markAlive && markInCombat && hpPercent <= engageThreshold && !tagConfirmed;\n\n    public static bool IsConfirmedPullReset(\n "
+    ]
+  ]
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedCheckpointPatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated DC or checkpoint edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedLifestreamPatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated Lifestream handoff edit: ${path}`);
     source = source.replace(change, original);

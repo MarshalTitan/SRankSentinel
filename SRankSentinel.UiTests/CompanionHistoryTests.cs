@@ -442,6 +442,44 @@ internal static partial class Program
         });
     }
 
+    private static void TestHistoryDataCenterFilters()
+    {
+        var config = JsonSerializer.Deserialize<Configuration>("{\"Version\":16}")!;
+        Check(config.HuntDataCenters == NorthAmericanDataCenters.All && config.TagAt75Percent &&
+            config.TagAt50Percent && config.TagAt25Percent && config.RetagAfterRaise,
+            "Existing settings did not default to all DCs and all new checkpoints.");
+        var worlds = new Dictionary<string, VisitWorld>
+        {
+            ["Balmung"] = new(91, "Balmung", 8, "Crystal", 2),
+            ["Seraph"] = new(405, "Seraph", 11, "Dynamis", 2),
+            ["Midgardsormr"] = new(65, "Midgardsormr", 4, "Aether", 2),
+            ["Leviathan"] = new(64, "Leviathan", 5, "Primal", 2),
+        };
+        var now = DateTime.UtcNow;
+        var journal = new HuntHistoryJournal(config, name =>
+            DataCenterHunting.Allows(worlds.GetValueOrDefault(name), config.HuntDataCenters));
+        var report = HistoryAlert(now);
+        var primal = report with { World = "Leviathan" };
+        Check(journal.Spawn(primal, "Sonar"), "An initially enabled Primal report was dropped.");
+        config.HuntDataCenters = NorthAmericanDataCenters.Crystal | NorthAmericanDataCenters.Dynamis;
+        var aether = report with { World = "Midgardsormr" };
+        Check(!journal.Spawn(aether, "Sonar") && !journal.Spawn(aether, "HuntAlerts"),
+            "A provider bypassed the disabled DC history gate.");
+        Check(journal.Spawn(report with { World = "Balmung" }, "Sonar") &&
+            journal.Spawn(report with { World = "Seraph" }, "HuntAlerts") && journal.VisibleReports().Length == 2,
+            "Enabled DCs did not contribute the expected reports.");
+        Check(!journal.MarkKnownDeaths(primal.World, primal.TerritoryId, primal.Instance, now.AddSeconds(1),
+            _ => true, _ => false, primal.Key), "Passive history bypassed the active kill guard.");
+        Check(journal.MarkKnownDeaths(primal.World, primal.TerritoryId, primal.Instance, now.AddSeconds(2),
+            _ => true, _ => false, null), "A disabled DC prevented cleanup of an existing report.");
+        Check(!journal.MarkKnownDeaths(aether.World, aether.TerritoryId, aether.Instance, now.AddSeconds(2),
+            _ => true, _ => false, null), "Unknown death created a History report.");
+        config.HuntDataCenters = NorthAmericanDataCenters.All;
+        Check(journal.Spawn(aether, "HuntAlerts") && journal.VisibleReports().Length == 4 &&
+            journal.VisibleReports().Single(entry => entry.World == primal.World).KilledAtUtc is not null,
+            "Re-enabling a DC did not admit new reports or retain known kill evidence.");
+    }
+
     private static void TestHistoryExpansionFilters()
     {
         var config = new Configuration();
