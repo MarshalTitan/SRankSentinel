@@ -161,6 +161,22 @@ internal static partial class Program
             "Credited history is not bounded independently.");
     }
 
+    private static void TestWorldVisitDeathHistory()
+    {
+        var config = new Configuration();
+        var journal = new HuntHistoryJournal(config);
+        var now = DateTime.UtcNow;
+        var alert = HistoryAlert(now) with { World = "Kraken" };
+        Check(journal.Spawn(alert, "Sonar"), "The destination hunt report was lost.");
+        journal.Kill(alert, false, now.AddSeconds(15));
+
+        var restored = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(config))!;
+        var killed = restored.SpawnHistory.Single();
+        Check(killed.World == alert.World && killed.KilledAtUtc is not null &&
+            killed.TaggedAtUtc is null && killed.CreditedAtUtc is null && restored.CreditedHistory.Count == 0,
+            "The killed destination must remain in History without a tag or personal credit.");
+    }
+
     private static void TestHistoryCredit()
     {
         foreach (var rewardFirst in new[] { false, true })

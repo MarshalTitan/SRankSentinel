@@ -10,6 +10,8 @@ internal sealed class LifestreamIpc(IDalamudPluginInterface pi, IPluginLog log)
     private readonly ICallGateSubscriber<string, bool> changeWorld =
         pi.GetIpcSubscriber<string, bool>("Lifestream.ChangeWorld");
 
+    private readonly ICallGateSubscriber<object> abort = pi.GetIpcSubscriber<object>("Lifestream.Abort");
+
     public bool HasRequiredIpc => isBusy.HasFunction && changeWorld.HasFunction;
 
     public LifestreamReadiness ReadReadiness()
@@ -18,6 +20,22 @@ internal sealed class LifestreamIpc(IDalamudPluginInterface pi, IPluginLog log)
             return LifestreamReadiness.Unavailable;
         try { return isBusy.InvokeFunc() ? LifestreamReadiness.Busy : LifestreamReadiness.Idle; }
         catch { return LifestreamReadiness.Unavailable; }
+    }
+
+    public bool TryAbort()
+    {
+        if (!abort.HasAction)
+            return false;
+        try
+        {
+            abort.InvokeAction();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Lifestream.Abort IPC failed");
+            return false;
+        }
     }
 
     public bool TryChangeWorld(string world)

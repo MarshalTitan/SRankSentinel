@@ -17,6 +17,12 @@ internal sealed class LifestreamTravel(VisitWorld destination, DateTime startedU
     internal VisitWorld Destination { get; } = destination;
     internal int Attempts { get; private set; }
     internal bool AwaitingArrival { get; private set; }
+    internal uint AcceptedSourceId { get; private set; }
+    internal WorldVisitDeathCancellation? DeathCancellation { get; private set; }
+
+    internal void BeginDeathCancellation(uint actualWorldId, DateTime now) =>
+        DeathCancellation ??= new(AwaitingArrival ? AcceptedSourceId : actualWorldId,
+            Destination.Id, AwaitingArrival, now);
     private DateTime deadlineUtc = startedUtc + timeout;
     private DateTime earliestRequestUtc = startedUtc;
 
@@ -61,6 +67,7 @@ internal sealed class LifestreamTravel(VisitWorld destination, DateTime startedU
         if (request(Destination.Name))
         {
             AwaitingArrival = true;
+            AcceptedSourceId = actualWorldId;
             deadlineUtc = now + timeout;
             return LifestreamTravelStep.RequestAccepted;
         }
