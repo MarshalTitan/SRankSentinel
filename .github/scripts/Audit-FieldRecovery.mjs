@@ -12,10 +12,10 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.67.0</Version>"],
-  [plugin, "tagRequired = true"],
+  [project, "<Version>0.7.68.0</Version>"],
+  [plugin, "tagCycle.TryLatch"],
   [plugin, "BeginTagRequiredRecovery"],
-  [plugin, "parking is suspended until one ranged tag is confirmed"],
+  [plugin, "parking is suspended until the current checkpoint is confirmed"],
   [plugin, "TickRaiseAcceptance"],
   [plugin, "TickCompletedRaiseResolution"],
   [combat, "RaiseInteractionState.Submitted"],
@@ -171,3 +171,8 @@ if (!plugin.includes("!config.Enabled || !CanRunHuntTick(now)") ||
     !lifestream.includes('"Lifestream.ChangeWorld"') || !lifestream.includes('"Lifestream.IsBusy"'))
   throw new Error("Required Lifestream ownership or confirmed-arrival handoff is missing.");
 console.log("Lifestream owns World travel; the native World Visit parser is removed.");
+
+if (!tagBody?.includes("ActionSequenceWasHandled") || !tagBody.includes("tagCycle.ConfirmHandled") ||
+    !tagBody.includes("tagCycle.CanDispatch") || !tagBody.includes("BeginGroundRetreat(mark, postTag: true)") ||
+    !plugin.includes("IsQueuedAlertFresh") || !plugin.includes("tagCycle.ObserveRevival"))
+  throw new Error("Checkpoint confirmation/retreat, Raise, or DC queue gates are missing.");

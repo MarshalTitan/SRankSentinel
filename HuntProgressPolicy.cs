@@ -195,14 +195,6 @@ internal static class HuntProgressPolicy
         return BlockedLiveEntityRecoveryAction.SafeWait;
     }
 
-    public static bool ShouldLatchTag(
-        bool markAlive,
-        bool markInCombat,
-        float hpPercent,
-        float engageThreshold,
-        bool tagConfirmed) =>
-        markAlive && markInCombat && hpPercent <= engageThreshold && !tagConfirmed;
-
     public static bool IsConfirmedPullReset(
         bool markAlive,
         bool markInCombat,

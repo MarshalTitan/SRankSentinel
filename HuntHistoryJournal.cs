@@ -20,7 +20,7 @@ public sealed record HuntHistoryEntry
 }
 
 /// <summary>Passive bounded history. No queue, targeting, or travel decisions depend on it.</summary>
-internal sealed class HuntHistoryJournal(Configuration config)
+internal sealed class HuntHistoryJournal(Configuration config, Func<string, bool>? worldEnabled = null)
 {
     internal const int Capacity = 500;
     internal static readonly TimeSpan RewardWindow = TimeSpan.FromSeconds(20);
@@ -55,7 +55,8 @@ internal sealed class HuntHistoryJournal(Configuration config)
     }
 
     internal HuntHistoryEntry[] VisibleReports() => Snapshot().Spawns
-        .Where(entry => config.IsExpansionEnabled(HuntCatalog.GetExpansion(entry.TerritoryId))).ToArray();
+        .Where(entry => config.IsExpansionEnabled(HuntCatalog.GetExpansion(entry.TerritoryId)) &&
+                        (worldEnabled?.Invoke(entry.World) ?? true)).ToArray();
 
     internal bool ClearAll()
     {
@@ -67,7 +68,9 @@ internal sealed class HuntHistoryJournal(Configuration config)
         }
     }
 
-    internal bool Spawn(HuntAlertSnapshot alert, string source)
+    internal bool Spawn(HuntAlertSnapshot alert, string source) => Spawn(alert, source, active: false);
+
+    private bool Spawn(HuntAlertSnapshot alert, string source, bool active)
     {
         lock (sync)
         {
@@ -75,6 +78,7 @@ internal sealed class HuntHistoryJournal(Configuration config)
             var existing = Find(alert);
             if (existing is not null) return false;
             if (!config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId))) return false;
+            if (!active && worldEnabled?.Invoke(alert.World) == false) return false;
             config.SpawnHistory.Add(new()
             {
                 AlertKey = alert.Key, CreatureName = alert.CreatureName, World = alert.World,
@@ -87,15 +91,16 @@ internal sealed class HuntHistoryJournal(Configuration config)
         }
     }
 
-    internal bool Tag(HuntAlertSnapshot alert, DateTime now)
+    internal bool Tag(HuntAlertSnapshot alert, DateTime now, bool firstTagOfPull = true)
     {
         lock (sync)
         {
-            Spawn(alert, "Local observation");
+            Spawn(alert, "Local observation", active: true);
             var entry = Find(alert);
             if (entry is null) return false;
             taggedThisSession.Add(entry.Id);
-            pendingRewards.Remove(entry.Id);
+            if (firstTagOfPull)
+                pendingRewards.Remove(entry.Id);
             entry.TaggedAtUtc = now;
             return true;
         }
@@ -105,7 +110,7 @@ internal sealed class HuntHistoryJournal(Configuration config)
     {
         lock (sync)
         {
-            Spawn(alert, "Local observation");
+            Spawn(alert, "Local observation", active: true);
             var entry = Find(alert);
             if (entry is null) return false;
             entry.KilledAtUtc ??= now;
@@ -118,6 +123,28 @@ internal sealed class HuntHistoryJournal(Configuration config)
             }
             TryCredit(entry, now);
             return true;
+        }
+    }
+
+    internal bool MarkKnownDeaths(string world, uint territory, int instance, DateTime when,
+        Func<string, bool> matchesName, Func<HuntHistoryEntry, bool> singleInstance, string? activeKey,
+        Func<HuntHistoryEntry, bool>? hasRequiredContext = null)
+    {
+        lock (sync)
+        {
+            var changed = false;
+            foreach (var entry in CreditCandidates.Where(entry => entry.KilledAtUtc is null &&
+                entry.AlertKey != activeKey && entry.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&
+                (territory == 0 || entry.TerritoryId == territory) &&
+                (instance <= 0 || entry.Instance == instance || singleInstance(entry)) &&
+                when >= entry.ReportedAtUtc.AddMinutes(-1) &&
+                when <= entry.ReportedAtUtc.AddMinutes(Math.Max(10, config.AlertFreshnessMinutes)) && matchesName(entry.CreatureName) &&
+                (hasRequiredContext?.Invoke(entry) ?? true)))
+            {
+                entry.KilledAtUtc = when;
+                changed = true;
+            }
+            return changed;
         }
     }
 

@@ -28,9 +28,19 @@ var tests = new (string Name, Action Run)[]
     ("reloaded Aetheryte cancels pending approach and re-resolves", InstanceObjectReload),
     ("instance retries hold the active hunt after the bounded budget", InstanceRetriesAreBounded),
     ("instance paths reject distant detours and invalid coordinates", InstancePathsStayLocal),
-    ("threshold crossed while mounted still latches a tag", ThresholdCrossedWhileMounted),
-    ("failed first tag remains required as HP falls", FailedFirstTagRemainsRequired),
-    ("confirmed tag suppresses additional attacks", ConfirmedTagSuppressesAdditionalAttacks),
+    ("all NA logical DCs are enabled by default policy; subsets narrow reports", DataCenterScope),
+    ("disabling DCs filters queued reports while keeping the active hunt eligible for travel", DataCenterQueueScope),
+    ("95, 75, 50, 25 each confirm once with a protected retreat between tags", ConfirmEachCheckpoint),
+    ("checkpoint requires live exact in-combat context and retries an unhandled action", CheckpointRequiresCombatAndConfirmation),
+    ("late arrival at 70 percent consumes 95 and 75", () => LateCheckpoint(70f, 50f)),
+    ("late arrival at 48 percent consumes 95, 75 and 50", () => LateCheckpoint(48f, 25f)),
+    ("late arrival below 25 percent consumes all passed checkpoints", () => LateCheckpoint(18f, null)),
+    ("late checkpoints remain consumed if the mark heals before dispatch", LateCheckpointHealing),
+    ("fixed checkpoints still honor the initial threshold and enabled switches", CheckpointSettings),
+    ("a completed Raise at 61 percent retags once then waits for 50", () => RaiseRetag(61f, 50f)),
+    ("a completed Raise at 42 percent retags once then waits for 25", () => RaiseRetag(42f, 25f)),
+    ("Raise waits for usable player and refuses dead or idle marks", RaiseSafety),
+    ("a genuine pull reset clears milestones and Raise is not a reset", CheckpointPullReset),
     ("recognized Raise is accepted independently of button focus", RecognizedRaiseIsAccepted),
     ("incidental escape escalates only for a positive non-mark threat", IncidentalEscapeEscalatesSafely),
     ("LocateMark expires into a final scan then unresolved abandonment", LocateBudgetIsBounded),
@@ -82,22 +92,6 @@ foreach (var test in tests)
 
 Console.WriteLine($"{tests.Length - failures}/{tests.Length} tests passed");
 return failures == 0 ? 0 : 1;
-
-static void ThresholdCrossedWhileMounted()
-{
-    // Mount state is deliberately absent from the decision: it changes recovery mechanics,
-    // never whether the current pull requires a tag.
-    True(HuntProgressPolicy.ShouldLatchTag(true, true, 94.9f, 95f, false));
-}
-
-static void FailedFirstTagRemainsRequired()
-{
-    True(HuntProgressPolicy.ShouldLatchTag(true, true, 49f, 95f, false));
-    True(HuntProgressPolicy.ShouldLatchTag(true, true, 24f, 95f, false));
-}
-
-static void ConfirmedTagSuppressesAdditionalAttacks() =>
-    False(HuntProgressPolicy.ShouldLatchTag(true, true, 10f, 95f, true));
 
 static void RecognizedRaiseIsAccepted()
 {
@@ -702,4 +696,170 @@ static void KeepRegionalQueue()
     string[] route = ["Balmung", "Midgardsormr", "Seraph", "Leviathan", "Zalera"];
     True(requests.SequenceEqual(route));
     True(handoffs.SequenceEqual(route));
+}
+
+
+static void DataCenterScope()
+{
+    string[] na = ["Balmung", "Zalera", "Midgardsormr", "Seraph", "Leviathan"];
+    True(na.All(world => DataCenterHunting.Allows(World(world), NorthAmericanDataCenters.All)));
+    True(na.Where(world => DataCenterHunting.Allows(World(world), NorthAmericanDataCenters.Crystal))
+        .SequenceEqual(["Balmung", "Zalera"]));
+    True(na.Where(world => DataCenterHunting.Allows(World(world),
+        NorthAmericanDataCenters.Crystal | NorthAmericanDataCenters.Dynamis))
+        .SequenceEqual(["Balmung", "Zalera", "Seraph"]));
+}
+
+static void DataCenterQueueScope()
+{
+    var active = World("Leviathan");
+    var scope = NorthAmericanDataCenters.Crystal | NorthAmericanDataCenters.Dynamis;
+    var queued = new[] { VisitAlert("Leviathan", 1), VisitAlert("Balmung", 1), VisitAlert("Seraph", 1) };
+    True(queued.Where(alert => DataCenterHunting.Allows(World(alert.World), scope))
+        .Select(alert => alert.World).SequenceEqual(["Balmung", "Seraph"]));
+    False(DataCenterHunting.Allows(active, scope));
+    True(WorldVisitPolicy.CanVisit(World("Zalera"), World("Zalera"), active));
+    True(DataCenterHunting.Allows(active, scope | NorthAmericanDataCenters.Primal));
+}
+
+static TagMilestone AllCheckpoints() => TagMilestone.At75 | TagMilestone.At50 | TagMilestone.At25;
+static bool Latch(TagCheckpointCycle pull, float hp) => pull.TryLatch(true, true, true, hp, 95f, AllCheckpoints());
+static void Confirm(TagCheckpointCycle pull, float hp)
+{
+    var checkpoint = pull.Pending ?? throw new InvalidOperationException("Expected a checkpoint");
+    True(pull.ConfirmHandled(checkpoint, TagCheckpointCycle.Crossed(hp, 95f), hp, 95f));
+}
+
+static void ConfirmEachCheckpoint()
+{
+    var pull = new TagCheckpointCycle();
+    False(Latch(pull, 95.1f));
+    foreach (var (hp, kind) in new[] { (95f, TagMilestone.Initial), (75f, TagMilestone.At75),
+        (50f, TagMilestone.At50), (25f, TagMilestone.At25) })
+    {
+        True(Latch(pull, hp));
+        Equal(kind, pull.Pending!.Value.Kind);
+        Confirm(pull, hp);
+        True(pull.HasConfirmedTag);
+        True(pull.RetreatPending);
+        False(Latch(pull, hp - 1));
+        pull.CompleteRetreat();
+        False(Latch(pull, hp));
+    }
+    False(Latch(pull, 1f));
+}
+
+static void CheckpointRequiresCombatAndConfirmation()
+{
+    var pull = new TagCheckpointCycle();
+    False(pull.TryLatch(false, true, true, 90f, 95f, AllCheckpoints()));
+    False(pull.TryLatch(true, false, true, 90f, 95f, AllCheckpoints()));
+    False(pull.TryLatch(true, true, false, 90f, 95f, AllCheckpoints()));
+    False(Latch(pull, 0f));
+    True(Latch(pull, 95f));
+    Confirm(pull, 95f);
+    pull.CompleteRetreat();
+    True(Latch(pull, 75f));
+    var pending = pull.Pending;
+    False(pull.CanDispatch(true, true, false, 74f, 95f));
+    False(pull.CanDispatch(false, true, true, 74f, 95f));
+    False(pull.CanDispatch(true, true, true, 76f, 95f));
+    True(pull.CanDispatch(true, true, true, 74f, 95f));
+    // Rejected submission: no handled confirmation is delivered.
+    False(Latch(pull, 49f));
+    Equal(pending!.Value, pull.Pending!.Value);
+    Equal(TagMilestone.Initial, pull.Consumed);
+    Confirm(pull, 49f);
+    Equal(TagMilestone.Initial | TagMilestone.At75 | TagMilestone.At50, pull.Consumed);
+}
+
+static void LateCheckpoint(float hp, float? next)
+{
+    var pull = new TagCheckpointCycle();
+    True(Latch(pull, hp));
+    Confirm(pull, hp);
+    True(pull.HasConfirmedTag);
+    pull.CompleteRetreat();
+    False(Latch(pull, hp));
+    if (next is { } threshold)
+    {
+        False(Latch(pull, threshold + 0.1f));
+        True(Latch(pull, threshold));
+        Equal(threshold, pull.Pending!.Value.Hp);
+    }
+    else
+        False(Latch(pull, 1f));
+}
+
+static void LateCheckpointHealing()
+{
+    var pull = new TagCheckpointCycle();
+    True(Latch(pull, 48f));
+    Confirm(pull, 61f);
+    pull.CompleteRetreat();
+    False(Latch(pull, 49f));
+    True(Latch(pull, 25f));
+    Equal(TagMilestone.At25, pull.Pending!.Value.Kind);
+}
+
+static void CheckpointSettings()
+{
+    var pull = new TagCheckpointCycle();
+    False(pull.TryLatch(true, true, true, 72f, 60f, AllCheckpoints()));
+    True(pull.TryLatch(true, true, true, 60f, 60f, TagMilestone.At25));
+    var first = pull.Pending!.Value;
+    True(pull.ConfirmHandled(first, TagCheckpointCycle.Crossed(60f, 60f), 60f, 60f));
+    pull.CompleteRetreat();
+    False(pull.TryLatch(true, true, true, 49f, 60f, TagMilestone.At25));
+    True(pull.TryLatch(true, true, true, 25f, 60f, TagMilestone.At25));
+}
+
+static void RaiseRetag(float hp, float next)
+{
+    var pull = new TagCheckpointCycle();
+    True(Latch(pull, 95f));
+    Confirm(pull, 95f);
+    var accepted = TravelStart();
+    True(pull.ObserveRevival(accepted, true, true));
+    True(pull.HasConfirmedTag);
+    Equal(TagMilestone.Initial, pull.Consumed);
+    True(Latch(pull, hp));
+    Equal(TagMilestone.Raise, pull.Pending!.Value.Kind);
+    Confirm(pull, hp);
+    pull.CompleteRetreat();
+    False(pull.ObserveRevival(accepted, true, true));
+    False(Latch(pull, hp));
+    True(Latch(pull, next));
+    Equal(next, pull.Pending!.Value.Hp);
+}
+
+static void RaiseSafety()
+{
+    var pull = new TagCheckpointCycle();
+    var accepted = TravelStart();
+    False(pull.ObserveRevival(accepted, false, true));
+    False(pull.RaisePending);
+    True(pull.ObserveRevival(accepted, true, true));
+    False(pull.TryLatch(true, false, true, 0f, 95f, AllCheckpoints()));
+    False(pull.TryLatch(true, true, false, 50f, 95f, AllCheckpoints()));
+    False(Latch(pull, 96f));
+    True(Latch(pull, 50f));
+    var disabled = new TagCheckpointCycle();
+    False(disabled.ObserveRevival(accepted, true, false));
+    False(disabled.RaisePending);
+}
+
+static void CheckpointPullReset()
+{
+    var pull = new TagCheckpointCycle();
+    True(Latch(pull, 18f));
+    Confirm(pull, 18f);
+    True(pull.ObserveRevival(TravelStart(), true, true));
+    True(pull.HasConfirmedTag);
+    Equal(TagMilestone.Initial | AllCheckpoints(), pull.Consumed);
+    pull.ResetPull(); // Production calls this only after the stable, same-entity reset check.
+    False(pull.HasConfirmedTag);
+    False(pull.RaisePending);
+    Equal(TagMilestone.None, pull.Consumed);
+    True(Latch(pull, 95f));
 }

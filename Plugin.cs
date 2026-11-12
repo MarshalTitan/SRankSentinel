@@ -218,12 +218,12 @@ public sealed partial class Plugin : IDalamudPlugin
     private DateTime lastTickUtc = DateTime.MinValue;
     private DateTime nextActionUtc = DateTime.MinValue;
     private bool killConfirmed;
-    private bool tagAttempted;
     private bool markEverIdentified;
     private bool markCombatObserved;
     private bool pullCycleCombatObserved;
-    private bool pullCycleTagged;
-    private bool tagRequired;
+    private readonly TagCheckpointCycle tagCycle = new();
+    private bool pullCycleTagged => tagCycle.HasConfirmedTag;
+    private bool tagRequired => tagCycle.Pending is not null;
     private DateTime tagRequiredSinceUtc = DateTime.MinValue;
     private DateTime tagEntityMissingSinceUtc = DateTime.MinValue;
     private DateTime tagLastProgressUtc = DateTime.MinValue;
@@ -650,6 +650,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (feedEvent.Action == FaloopEventAction.Death)
         {
+            ObserveKnownHistoryDeaths(world, hasTerritory ? territory : 0, feedEvent.Instance,
+                feedEvent.OccurredAtUtc, name => HuntCatalog.NamesMatch(name, creature));
             if (!TryMatchTrackedFaloopDeath(feedEvent, world, creature,
                     hasTerritory ? territory : 0, out var matchDetail))
             {
@@ -733,6 +735,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 creature, world, territory);
             return; // Faloop reports many ranks; only the strict configured S/SS catalog is eligible.
         }
+        if (!IsHuntDataCenterEnabled(world))
+            return;
+
         var expansion = HuntCatalog.GetExpansion(territory);
         if (!config.IsExpansionEnabled(expansion))
         {
@@ -1188,6 +1193,8 @@ public sealed partial class Plugin : IDalamudPlugin
                     HuntCatalog.TextMentionsMark(text, current.CreatureName) &&
                     KillNoticeMatchesAlert(killedWorld, killedTerritory, killedInstance, current))
                     ConfirmKill($"Sonar confirmed {current.CreatureName} was killed");
+                ObserveKnownHistoryDeaths(killedWorld, killedTerritory, killedInstance, DateTime.UtcNow,
+                    name => HuntCatalog.TextMentionsMark(text, name), requireContextForMissing: true);
                 RemoveKilledQueuedAlerts(text, killedWorld, killedTerritory, killedInstance);
                 return;
             }
@@ -1278,10 +1285,12 @@ public sealed partial class Plugin : IDalamudPlugin
 
         world = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
         var eligible = travel.IsWorldVisitCompatible(world);
-        LogProviderRegion(source, "spawn", world, eligible);
-        if (!eligible)
+        var dcEnabled = IsHuntDataCenterEnabled(world);
+        LogProviderRegion(source, "spawn", world, eligible && dcEnabled);
+        if (!eligible || !dcEnabled)
         {
-            status = $"Ignored {source} alert for {creature.Trim()} on {world}: outside the current World Visit region";
+            status = $"Ignored {source} alert for {creature.Trim()} on {world}: " +
+                     (!eligible ? "outside the current World Visit region" : "its logical Data Center is disabled");
             return;
         }
 
@@ -1444,12 +1453,11 @@ public sealed partial class Plugin : IDalamudPlugin
         current = alert;
         mark = null;
         killConfirmed = false;
-        tagAttempted = false;
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
         pullCycleCombatObserved = false;
-        pullCycleTagged = false;
+        tagCycle.ResetPull();
         ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
@@ -1489,12 +1497,11 @@ public sealed partial class Plugin : IDalamudPlugin
         current = alert;
         mark = null;
         killConfirmed = false;
-        tagAttempted = false;
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
         pullCycleCombatObserved = false;
-        pullCycleTagged = false;
+        tagCycle.ResetPull();
         ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
@@ -1820,6 +1827,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (current is not null && !killConfirmed && clientState.TerritoryType == current.TerritoryId)
         {
+            if (!combat.IsPlayerDead)
+                ObserveRaiseRecoveryCompletion(now);
             IBattleChara? visibleMark = null;
             if (CanResolveMarkInState())
             {
@@ -1849,12 +1858,11 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             }
 
-            ObserveRaiseRecoveryCompletion(now);
             if (tagRequired && state != SentinelState.TagApproach &&
                 state != SentinelState.AvoidIncidentalAggro && IsLocalHuntState(state))
             {
                 BeginTagRequiredRecovery(visibleMark, now,
-                    $"{visibleMark?.Name.TextValue ?? current.CreatureName} crossed the engage threshold before a tag was confirmed");
+                    $"{visibleMark?.Name.TextValue ?? current.CreatureName} has a ranged tag checkpoint awaiting confirmation");
                 return;
             }
         }
@@ -2796,7 +2804,7 @@ public sealed partial class Plugin : IDalamudPlugin
         if (deadPostKillRewardGraceDeadlineUtc == DateTime.MinValue)
             return false;
 
-        if (!killConfirmed || !tagAttempted || !pullCycleTagged)
+        if (!killConfirmed || !pullCycleTagged)
         {
             ResetDeadPostKillRewardGrace();
             return false;
@@ -2828,7 +2836,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private void BeginDeadPostKillRewardGrace(DateTime now)
     {
         ResetDeadPostKillRewardGrace();
-        if (!combat.IsPlayerDead || !tagAttempted || !pullCycleTagged)
+        if (!combat.IsPlayerDead || !pullCycleTagged)
             return;
 
         deadPostKillRewardGraceDeadlineUtc = now.AddSeconds(DeadPostKillRewardGraceSeconds);
@@ -2958,6 +2966,16 @@ public sealed partial class Plugin : IDalamudPlugin
         if (raiseDialogFirstSeenUtc == DateTime.MinValue &&
             raiseAcceptanceSubmittedUtc == DateTime.MinValue)
             return;
+        if (!CanActAfterRevival())
+            return;
+        if (current is not null && !killConfirmed &&
+            tagCycle.ObserveRevival(raiseAcceptanceSubmittedUtc, true, config.RetagAfterRaise))
+        {
+            ResetPendingTagDispatch();
+            ResetTagRecoveryTracking();
+            log.Information("Accepted Raise completed; one retag is eligible for {Mark} in pull {Pull}",
+                current.CreatureName, pullCycle);
+        }
         log.Information(
             "Raise recovery observed: player is conscious; prompt={Prompt}, attempts={Attempts}, elapsed={Elapsed:0.0}s",
             lastRaisePrompt, raiseAcceptanceAttempts,
@@ -4817,13 +4835,24 @@ public sealed partial class Plugin : IDalamudPlugin
         if (tagRequired)
         {
             BeginTagRequiredRecovery(mark, now,
-                $"Tag required for pull cycle {pullCycle}; parking is suspended until one ranged tag is confirmed");
+                $"Tag required for pull cycle {pullCycle}; parking is suspended until the current checkpoint is confirmed");
             return;
         }
 
         if (clearance < ActiveDistanceProfile.EmergencyDistance)
         {
             BeginGroundRetreat(mark);
+            return;
+        }
+
+        if (tagCycle.RetreatPending &&
+            clearance < ActiveDistanceProfile.WaitingDistance - ParkingPreferredClearanceTolerance)
+        {
+            if (now >= nextActionUtc)
+            {
+                BeginSafeParking(mark, fly: false);
+                nextActionUtc = now.AddSeconds(2);
+            }
             return;
         }
 
@@ -4871,7 +4900,7 @@ public sealed partial class Plugin : IDalamudPlugin
         LatchTagRequirement(mark, now);
         if (!tagRequired)
         {
-            if (tagAttempted)
+            if (tagCycle.RetreatPending)
             {
                 if (now >= nextActionUtc)
                     BeginGroundRetreat(mark, postTag: true);
@@ -4894,6 +4923,11 @@ public sealed partial class Plugin : IDalamudPlugin
 
         ReportTagRecoveryEscalation(mark);
 
+        if (pendingTagDispatch is { } dispatched &&
+            (dispatched.TargetId != mark.GameObjectId || !IsExactCheckpointMark(mark) ||
+             tagCycle.Pending != dispatched.Checkpoint))
+            ResetPendingTagDispatch();
+
         if (pendingTagDispatch is not null)
         {
             var pending = pendingTagDispatch;
@@ -4908,21 +4942,21 @@ public sealed partial class Plugin : IDalamudPlugin
                     pending.ActionId, pending.TargetId, pending.Sequence.Value);
             }
 
+            var firstTagOfPull = !pullCycleTagged;
             if (pending.Sequence is ushort sequence &&
-                ActionSequenceWasHandled(pending.BaselineSequence, sequence, actionState.LastHandledSequence))
+                ActionSequenceWasHandled(pending.BaselineSequence, sequence, actionState.LastHandledSequence) &&
+                tagCycle.ConfirmHandled(pending.Checkpoint, pending.CrossedOnSubmit,
+                    CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))
             {
-                tagAttempted = true;
-                pullCycleTagged = true;
-                ObserveHistoryTag(current, now);
-                tagRequired = false;
+                ObserveHistoryTag(current, now, firstTagOfPull);
                 pendingTagDispatch = null;
-                ResetTagRecoveryTracking(clearRequirement: false);
+                ResetTagRecoveryTracking();
                 nextActionUtc = now.AddSeconds(3);
                 status = $"Tag confirmed for {mark.Name.TextValue}, pull cycle {pullCycle} " +
-                         $"(action {activeTagActionId}, sequence {sequence}); attack cutoff is active";
+                         $"(action {activeTagActionId}, sequence {sequence}); retreating before the next checkpoint";
                 log.Information(
-                    "Tag confirmed by handled action sequence: {Mark}, pull cycle={PullCycle}, action={ActionId}, target={TargetId}, sequence={Sequence}",
-                    mark.Name.TextValue, pullCycle, activeTagActionId, mark.GameObjectId, sequence);
+                    "Tag confirmed by handled action sequence: {Mark}, pull={Pull}, checkpoint={Checkpoint}, consumed={Consumed}, action={ActionId}, target={TargetId}, sequence={Sequence}",
+                    mark.Name.TextValue, pullCycle, pending.Checkpoint.Label, tagCycle.Consumed, activeTagActionId, mark.GameObjectId, sequence);
                 return;
             }
 
@@ -4948,11 +4982,11 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!CombatController.IsMarkInCombat(mark) ||
-            CombatController.HpPercent(mark) > ActiveDistanceProfile.EngageHpPercent)
+        if (!tagCycle.CanDispatch(IsExactCheckpointMark(mark), !mark.IsDead && mark.CurrentHp > 0,
+                CombatController.IsMarkInCombat(mark), CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))
         {
             vnav.StopSafe();
-            status = $"Tag requirement remains latched for pull cycle {pullCycle}; waiting for the full-HP/out-of-combat reset confirmation";
+            status = $"Waiting for the exact active mark to meet the {tagCycle.Pending?.Label}";
             return;
         }
 
@@ -4975,8 +5009,12 @@ public sealed partial class Plugin : IDalamudPlugin
         if (clearance <= TagApproachClearance + 1f)
         {
             vnav.StopSafe();
-            if (now >= nextActionUtc)
+            if (now >= nextActionUtc && CanActAfterRevival() &&
+                tagCycle.Pending is { } checkpoint && tagCycle.CanDispatch(IsExactCheckpointMark(mark),
+                    !mark.IsDead && mark.CurrentHp > 0, CombatController.IsMarkInCombat(mark),
+                    CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))
             {
+                var crossed = TagCheckpointCycle.Crossed(CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent);
                 var attempt = combat.TrySingleTag(activeTagActionId, mark);
                 if (attempt.Submitted && attempt.ClientAccepted)
                 {
@@ -4986,9 +5024,9 @@ public sealed partial class Plugin : IDalamudPlugin
                         attempt.SequenceBefore,
                         attempt.SequenceAfter == attempt.SequenceBefore ? null : attempt.SequenceAfter,
                         attempt.DeferredForTarget,
-                        now);
+                        now, checkpoint, crossed);
                     nextActionUtc = now.AddSeconds(1);
-                    status = $"Ranged tag submitted to {mark.Name.TextValue}; waiting for server handling before closing the tag gate";
+                    status = $"Ranged tag submitted to {mark.Name.TextValue}; waiting for server handling before completing {checkpoint.Label}";
                     log.Information(
                         "Tag action submitted: {Mark}, pull cycle={PullCycle}, action={ActionId}, target={TargetId}, sequenceBefore={Before}, sequenceAfter={After}, deferredForTarget={Deferred}; awaiting handled sequence",
                         mark.Name.TextValue, pullCycle, activeTagActionId, mark.GameObjectId,
@@ -5084,7 +5122,7 @@ public sealed partial class Plugin : IDalamudPlugin
         if (!postTagRetreatActive && ClearanceFromMark(mark) >= ActiveDistanceProfile.WaitingDistance - 2f)
         {
             vnav.StopSafe();
-            SetState(SentinelState.SafeWait, tagAttempted ? "Confirmed tag completed; safe radius restored" : "Safe radius restored");
+            SetState(SentinelState.SafeWait, pullCycleTagged ? "Confirmed tag completed; safe radius restored" : "Safe radius restored");
             return;
         }
         if ((now - stateSinceUtc).TotalSeconds > 4 && !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
@@ -5740,7 +5778,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void BeginGroundRetreat(IBattleChara target, bool postTag = false)
     {
-        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        if (tagRequired)
         {
             BeginTagRequiredRecovery(target, DateTime.UtcNow,
                 "Tag remains required; ordinary retreat cannot replace the pending ranged tag");
@@ -6317,7 +6355,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private bool RegisterParkingRecoveryFailure(IBattleChara target, string reason, DateTime now)
     {
-        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        if (tagRequired)
         {
             BeginTagRequiredRecovery(target, now,
                 $"Parking/landing recovery failed while a tag is required: {reason}");
@@ -6326,7 +6364,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
         // Once credit is already secured, holding safely for the confirmed death is preferable
         // to abandoning a live hunt only because an optional retreat point was unavailable.
-        if (pullCycleTagged && tagAttempted)
+        if (pullCycleTagged)
             return false;
 
         if (parkingRecoveryStartedUtc == DateTime.MinValue)
@@ -6350,7 +6388,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private bool CheckParkingRecoveryBudget(IBattleChara target, DateTime now)
     {
         if (parkingRecoveryStartedUtc == DateTime.MinValue ||
-            pullCycleTagged && tagAttempted ||
+            pullCycleTagged ||
             (now - parkingRecoveryStartedUtc).TotalSeconds < ParkingRecoveryBudgetSeconds)
             return false;
 
@@ -6681,6 +6719,12 @@ public sealed partial class Plugin : IDalamudPlugin
             ssAlert = ssAlert with { MapX = location.MapX, MapY = location.MapY };
         if (ssAlert is not null && reportedSs is null && ssSpawnAnnounced)
             ssAlert = ssAlert with { HuntType = "ssrank" };
+        if (ssAlert is not null && !IsHuntDataCenterEnabled(ssAlert.World))
+        {
+            nextActionUtc = now;
+            SetState(SentinelState.ResetToUldah, $"{reason}; SS follow-up Data Center is disabled");
+            return;
+        }
         if (ssAlert is null)
         {
             log.Warning(
@@ -6901,12 +6945,11 @@ public sealed partial class Plugin : IDalamudPlugin
         crowdFallbackAnnounced = false;
         territoryAetheryteId = 0;
         killConfirmed = false;
-        tagAttempted = false;
         postTagRetreatActive = false;
         markEverIdentified = false;
         markCombatObserved = false;
         pullCycleCombatObserved = false;
-        pullCycleTagged = false;
+        tagCycle.ResetPull();
         ResetTagRecoveryTracking();
         identifiedMarkGameObjectId = 0;
         pullCycle = 1;
@@ -6974,20 +7017,38 @@ public sealed partial class Plugin : IDalamudPlugin
         }
     }
 
+    private bool IsExactCheckpointMark(IBattleChara target)
+    {
+        if (current is null || killConfirmed || !markEverIdentified || !target.IsTargetable ||
+            target.ObjectKind != ObjectKind.BattleNpc || target.GameObjectId != identifiedMarkGameObjectId ||
+            !((current.MarkDataId != 0 && target.BaseId == current.MarkDataId) ||
+              target.Name.TextValue.Equals(current.CreatureName, StringComparison.OrdinalIgnoreCase)) ||
+            HuntCatalog.IsAnyPrecursorName(target.Name.TextValue) || HuntCatalog.IsAnyPrecursorName(current.CreatureName) ||
+            clientState.TerritoryType != current.TerritoryId ||
+            !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return travel.TryReadLiveInstance(out var instance) && Math.Max(1, instance) == current.Instance;
+    }
+
+    private bool CanActAfterRevival() =>
+        !combat.IsPlayerDead && !travel.IsBusy && objects.LocalPlayer is { IsTargetable: true } &&
+        !condition[ConditionFlag.Occupied] && !condition[ConditionFlag.OccupiedInEvent] &&
+        !condition[ConditionFlag.OccupiedInQuestEvent] && !condition[ConditionFlag.OccupiedInCutSceneEvent];
+
     private void LatchTagRequirement(IBattleChara target, DateTime now)
     {
-        var hp = CombatController.HpPercent(target);
-        if (!HuntProgressPolicy.ShouldLatchTag(
-                !target.IsDead && target.CurrentHp > 0,
-                CombatController.IsMarkInCombat(target),
-                hp,
-                ActiveDistanceProfile.EngageHpPercent,
-                pullCycleTagged || tagAttempted))
-            return;
+        var exact = IsExactCheckpointMark(target);
+        if (exact && tagCycle.RetreatPending && state == SentinelState.SafeWait &&
+            ClearanceFromMark(target) >= ActiveDistanceProfile.WaitingDistance - ParkingPreferredClearanceTolerance)
+            tagCycle.CompleteRetreat();
 
-        if (!tagRequired)
+        var hp = CombatController.HpPercent(target);
+        var enabled = (config.TagAt75Percent ? TagMilestone.At75 : TagMilestone.None) |
+                      (config.TagAt50Percent ? TagMilestone.At50 : TagMilestone.None) |
+                      (config.TagAt25Percent ? TagMilestone.At25 : TagMilestone.None);
+        if (tagCycle.TryLatch(exact, !target.IsDead && target.CurrentHp > 0,
+                CombatController.IsMarkInCombat(target), hp, ActiveDistanceProfile.EngageHpPercent, enabled))
         {
-            tagRequired = true;
             tagRequiredSinceUtc = now;
             tagLastProgressUtc = now;
             tagLastProgressPosition = PlayerPosition();
@@ -6995,10 +7056,8 @@ public sealed partial class Plugin : IDalamudPlugin
             tagRecoveryFailures = 0;
             tagHpEscalationMask = 0;
             activeTagActionId = combat.ResolveTagActionId();
-            log.Warning(
-                "Tag requirement latched: {Mark}, pull cycle={PullCycle}, HP={Hp:0.0}%, mounted={Mounted}, flying={Flying}; parking/mounting cannot clear this obligation",
-                target.Name.TextValue, pullCycle, hp,
-                condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
+            log.Information("Tag checkpoint latched: {Checkpoint}, mark={Mark}, pull={Pull}, HP={Hp:0.0}%",
+                tagCycle.Pending!.Value.Label, target.Name.TextValue, pullCycle, hp);
         }
 
         ReportTagRecoveryEscalation(target);
@@ -7157,7 +7216,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ReportTagRecoveryEscalation(IBattleChara target)
     {
-        if (!tagRequired || pullCycleTagged || tagAttempted)
+        if (!tagRequired)
             return;
         var hp = CombatController.HpPercent(target);
         var bit = hp <= 25f ? 2 : hp <= 50f ? 1 : 0;
@@ -7165,14 +7224,12 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         tagHpEscalationMask |= bit;
         log.Warning(
-            "Tag still unconfirmed at {Hp:0.0}% HP for {Mark}; escalating landing/range recovery without issuing any extra attack after confirmation",
+            "Tag still unconfirmed at {Hp:0.0}% HP for {Mark}; escalating landing/range recovery without advancing the checkpoint",
             hp, target.Name.TextValue);
     }
 
-    private void ResetTagRecoveryTracking(bool clearRequirement = true)
+    private void ResetTagRecoveryTracking()
     {
-        if (clearRequirement)
-            tagRequired = false;
         tagRequiredSinceUtc = DateTime.MinValue;
         tagEntityMissingSinceUtc = DateTime.MinValue;
         tagLastProgressUtc = DateTime.MinValue;
@@ -7212,7 +7269,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private bool ObservePullCycleReset(IBattleChara target, DateTime now)
     {
         if (current is null || !markEverIdentified || !pullCycleCombatObserved ||
-            (!tagRequired && (!pullCycleTagged || !tagAttempted)) ||
+            (!tagRequired && !pullCycleTagged) ||
             killConfirmed || target.IsDead || target.CurrentHp == 0 ||
             clientState.TerritoryType != current.TerritoryId ||
             !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
@@ -7247,9 +7304,8 @@ public sealed partial class Plugin : IDalamudPlugin
         var completedCycleTagged = pullCycleTagged;
         var stableSeconds = (now - pullResetCandidateSinceUtc).TotalSeconds;
         pullCycle++;
-        tagAttempted = false;
         pullCycleCombatObserved = false;
-        pullCycleTagged = false;
+        tagCycle.ResetPull();
         ResetTagRecoveryTracking();
         activeTagActionId = 0;
         ResetPendingTagDispatch();
@@ -7408,6 +7464,8 @@ public sealed partial class Plugin : IDalamudPlugin
                 IsObservedSingleInstance(alert.World, alert.TerritoryId));
 
         var currentMatched = current is not null && Matches(current);
+        ObserveKnownHistoryDeaths(world, territory, instance, deathAtUtc,
+            name => HuntCatalog.NamesMatch(name, creature));
         var removed = pendingAlerts.Where(Matches).ToArray();
         var unresolvedRemoved = unresolvedFaloopAlerts.Where(pair => Matches(pair.Value.Alert)).Select(pair => pair.Key).ToArray();
         foreach (var key in unresolvedRemoved)
@@ -7459,7 +7517,7 @@ public sealed partial class Plugin : IDalamudPlugin
                     "Removed persisted Chernobog alert; U'Ghamaro Mines navigation is intentionally unsupported");
                 continue;
             }
-            if (IsAlertFresh(alert, now) && pendingAlerts.All(existing => existing.Key != alert.Key))
+            if (IsQueuedAlertFresh(alert, now) && pendingAlerts.All(existing => existing.Key != alert.Key))
                 pendingAlerts.Enqueue(alert);
         }
 
@@ -7482,7 +7540,7 @@ public sealed partial class Plugin : IDalamudPlugin
     {
         var now = DateTime.UtcNow;
         var queued = pendingAlerts.ToArray();
-        var valid = queued.Where(candidate => IsAlertFresh(candidate, now))
+        var valid = queued.Where(candidate => IsQueuedAlertFresh(candidate, now))
             .OrderByDescending(candidate => HuntCatalog.IsAnySsName(candidate.CreatureName))
             .ThenByDescending(candidate => ExpansionQueuePriority(HuntCatalog.GetExpansion(candidate.TerritoryId)))
             .ThenBy(candidate => candidate.ReceivedAtUtc)
@@ -7533,6 +7591,13 @@ public sealed partial class Plugin : IDalamudPlugin
         _ => 0,
     };
 
+    private bool IsHuntDataCenterEnabled(string world) =>
+        config.HuntDataCenters == NorthAmericanDataCenters.All ||
+        DataCenterHunting.Allows(travel.ResolveVisitWorld(world), config.HuntDataCenters);
+
+    private bool IsQueuedAlertFresh(HuntAlertSnapshot alert, DateTime now) =>
+        IsHuntDataCenterEnabled(alert.World) && IsAlertFresh(alert, now);
+
     private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>
         IsWithinFreshnessWindow(alert.ReceivedAtUtc, now) &&
         (!IsReservedSsWatch(alert) ||
@@ -7575,7 +7640,8 @@ public sealed partial class Plugin : IDalamudPlugin
         var now = DateTime.UtcNow;
         var expiredKeys = unresolvedFaloopAlerts
             .Where(pair => !IsWithinFreshnessWindow(pair.Value.Alert.ReceivedAtUtc, now) ||
-                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)))
+                           !config.IsExpansionEnabled(HuntCatalog.GetExpansion(pair.Value.Alert.TerritoryId)) ||
+                           !IsHuntDataCenterEnabled(pair.Value.Alert.World))
             .Select(pair => pair.Key)
             .ToArray();
         foreach (var key in expiredKeys)
@@ -7597,8 +7663,10 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void RemoveDisabledQueuedAlerts()
     {
+        PruneUnresolvedFaloopAlerts();
         var survivors = pendingAlerts
-            .Where(alert => config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)))
+            .Where(alert => config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId)) &&
+                            IsHuntDataCenterEnabled(alert.World))
             .ToArray();
         if (survivors.Length == pendingAlerts.Count)
             return;
@@ -7611,7 +7679,7 @@ public sealed partial class Plugin : IDalamudPlugin
         foreach (var alert in survivors)
             pendingAlerts.Enqueue(alert);
         PersistQueue();
-        status = $"Removed {removed} queued hunt(s) from disabled expansions";
+        status = $"Removed {removed} queued hunt(s) from disabled expansions or Data Centers";
     }
 
     private HuntDistanceProfile ActiveDistanceProfile => config.GetDistanceProfile(
@@ -8047,7 +8115,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 active.CreatureName);
         }
 
-        if (tagRequired && !pullCycleTagged && !tagAttempted)
+        if (tagRequired)
         {
             // A tag budget may itself have requested the blocked exit. Rebase only the recovery
             // budget; never clear the pull-cycle obligation or submit an additional attack.
@@ -8243,7 +8311,9 @@ internal sealed record TagDispatch(
     ushort BaselineSequence,
     ushort? Sequence,
     bool DeferredForTarget,
-    DateTime SubmittedAtUtc);
+    DateTime SubmittedAtUtc,
+    TagCheckpoint Checkpoint,
+    TagMilestone CrossedOnSubmit);
 
 internal sealed record TerritoryAetheryteOverride(
     uint AetheryteId,

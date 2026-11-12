@@ -8,7 +8,7 @@ public sealed partial class Plugin
 {
     private HuntHistoryJournal? historyJournal;
     private string[]? historyCurrencyNames;
-    private HuntHistoryJournal History => historyJournal ??= new(config);
+    private HuntHistoryJournal History => historyJournal ??= new(config, IsHuntDataCenterEnabled);
 
     private void ObserveHistorySpawn(string? huntType, string? world, string? creature, uint territory,
         int instance, string source, DateTime? occurredAtUtc)
@@ -23,7 +23,8 @@ public sealed partial class Plugin
                 return false;
             var resolvedWorld = string.IsNullOrWhiteSpace(world) ? travel.CurrentWorld : world.Trim();
             var reported = occurredAtUtc ?? DateTime.UtcNow;
-            if (!travel.IsWorldVisitCompatible(resolvedWorld) || !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
+            if (!travel.IsWorldVisitCompatible(resolvedWorld) || !IsHuntDataCenterEnabled(resolvedWorld) ||
+                !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
                 return false;
             return History.Spawn(CanonicalizeObservedInstance(new(ss ? "ssrank" : "srank", resolvedWorld, definition.Name,
                 territory, definition.DataId, definition.PreferredAetheryteId, Math.Max(1, instance),
@@ -31,8 +32,22 @@ public sealed partial class Plugin
         });
     }
 
-    private void ObserveHistoryTag(HuntAlertSnapshot? alert, DateTime now) =>
-        ObserveHistory(() => alert is not null && History.Tag(alert, now));
+    private void ObserveKnownHistoryDeaths(string world, uint territory, int instance, DateTime when,
+        Func<string, bool> matchesName, bool requireContextForMissing = false)
+    {
+        if (string.IsNullOrWhiteSpace(world) || !IsWithinFreshnessWindow(when, DateTime.UtcNow))
+            return;
+        // Active kills go through ConfirmKill and its visible-live-entity veto.
+        ObserveHistory(() => History.MarkKnownDeaths(world, territory, instance, when, matchesName,
+            entry => IsObservedSingleInstance(entry.World, entry.TerritoryId), current?.Key,
+            entry => !requireContextForMissing || (territory != 0 && instance > 0) ||
+                (clientState.TerritoryType == entry.TerritoryId &&
+                 travel.CurrentWorld.Equals(entry.World, StringComparison.OrdinalIgnoreCase) &&
+                 (travel.CurrentInstance <= 0 || travel.CurrentInstance == entry.Instance))));
+    }
+
+    private void ObserveHistoryTag(HuntAlertSnapshot? alert, DateTime now, bool firstTagOfPull) =>
+        ObserveHistory(() => alert is not null && History.Tag(alert, now, firstTagOfPull));
 
     private void ObserveHistoryKill(HuntAlertSnapshot alert, bool taggedFinalPull, DateTime now) =>
         ObserveHistory(() => History.Kill(alert, taggedFinalPull, now));
