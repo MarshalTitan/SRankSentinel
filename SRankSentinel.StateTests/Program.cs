@@ -35,6 +35,7 @@ var tests = new (string Name, Action Run)[]
     ("late arrival at 70 percent consumes 95 and 75", () => LateCheckpoint(70f, 50f)),
     ("late arrival at 48 percent consumes 95, 75 and 50", () => LateCheckpoint(48f, 25f)),
     ("late arrival below 25 percent consumes all passed checkpoints", () => LateCheckpoint(18f, null)),
+    ("late checkpoints remain consumed if the mark heals before dispatch", LateCheckpointHealing),
     ("fixed checkpoints still honor the initial threshold and enabled switches", CheckpointSettings),
     ("a completed Raise at 61 percent retags once then waits for 50", () => RaiseRetag(61f, 50f)),
     ("a completed Raise at 42 percent retags once then waits for 25", () => RaiseRetag(42f, 25f)),
@@ -788,6 +789,17 @@ static void LateCheckpoint(float hp, float? next)
     }
     else
         False(Latch(pull, 1f));
+}
+
+static void LateCheckpointHealing()
+{
+    var pull = new TagCheckpointCycle();
+    True(Latch(pull, 48f));
+    Confirm(pull, 61f);
+    pull.CompleteRetreat();
+    False(Latch(pull, 49f));
+    True(Latch(pull, 25f));
+    Equal(TagMilestone.At25, pull.Pending!.Value.Kind);
 }
 
 static void CheckpointSettings()

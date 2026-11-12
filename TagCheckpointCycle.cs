@@ -3,7 +3,7 @@ namespace SRankSentinel;
 [Flags]
 internal enum TagMilestone { None = 0, Initial = 1, At75 = 2, At50 = 4, At25 = 8, Raise = 16 }
 
-internal readonly record struct TagCheckpoint(TagMilestone Kind, float Hp)
+internal readonly record struct TagCheckpoint(TagMilestone Kind, float Hp, TagMilestone CrossedOnLatch)
 {
     internal string Label => Kind == TagMilestone.Raise ? "Raise retag" : $"{Hp:0.#}% checkpoint";
 }
@@ -36,12 +36,13 @@ internal sealed class TagCheckpointCycle
     {
         if (Pending is not null || RetreatPending || !Eligible(exact, alive, inCombat, hp, initial))
             return false;
-        var due = Crossed(hp, initial) & (enabled | TagMilestone.Initial) & ~Consumed;
-        Pending = RaisePending ? new(TagMilestone.Raise, initial) :
-            (due & TagMilestone.Initial) != 0 ? new(TagMilestone.Initial, initial) :
-            (due & TagMilestone.At75) != 0 ? new(TagMilestone.At75, 75f) :
-            (due & TagMilestone.At50) != 0 ? new(TagMilestone.At50, 50f) :
-            (due & TagMilestone.At25) != 0 ? new(TagMilestone.At25, 25f) : null;
+        var crossed = Crossed(hp, initial);
+        var due = crossed & (enabled | TagMilestone.Initial) & ~Consumed;
+        Pending = RaisePending ? new(TagMilestone.Raise, initial, crossed) :
+            (due & TagMilestone.Initial) != 0 ? new(TagMilestone.Initial, initial, crossed) :
+            (due & TagMilestone.At75) != 0 ? new(TagMilestone.At75, 75f, crossed) :
+            (due & TagMilestone.At50) != 0 ? new(TagMilestone.At50, 50f, crossed) :
+            (due & TagMilestone.At25) != 0 ? new(TagMilestone.At25, 25f, crossed) : null;
         return Pending is not null;
     }
 
@@ -65,7 +66,7 @@ internal sealed class TagCheckpointCycle
     {
         if (Pending != checkpoint)
             return false;
-        Consumed |= (checkpoint.Kind & ~TagMilestone.Raise) | crossedOnSubmit | Crossed(hp, initial);
+        Consumed |= (checkpoint.Kind & ~TagMilestone.Raise) | checkpoint.CrossedOnLatch | crossedOnSubmit | Crossed(hp, initial);
         if (checkpoint.Kind == TagMilestone.Raise)
             RaisePending = false;
         HasConfirmedTag = true;
