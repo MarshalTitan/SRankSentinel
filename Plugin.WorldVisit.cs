@@ -23,6 +23,12 @@ public sealed partial class Plugin
         var provider = lifestream.ReadReadiness();
         var previous = previousLifestreamReadiness;
         previousLifestreamReadiness = provider;
+        if (state == SentinelState.WorldVisit && worldTravel?.DeathCancellation is not null)
+        {
+            TickLifestreamWorldVisit(now, provider);
+            return false;
+        }
+
         if (provider == LifestreamReadiness.Unavailable)
         {
             if (previous != provider)
@@ -88,6 +94,11 @@ public sealed partial class Plugin
         var atHub = travel.IsInUldah(clientState.TerritoryType);
         var target = transfer.Destination;
         var actualWorld = travel.CurrentWorld;
+        if (transfer.DeathCancellation is { } cancellation)
+        {
+            TickWorldVisitDeathCancellation(now, transfer, cancellation, provider, actualWorldId, interactable, atHub);
+            return;
+        }
         if (provider == LifestreamReadiness.Idle && !gameBusy && !IsAlertFresh(current, now))
         {
             worldTravel = null;

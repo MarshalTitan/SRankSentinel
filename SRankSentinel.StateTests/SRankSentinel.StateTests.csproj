@@ -13,6 +13,7 @@
     <Compile Include="..\TagCheckpointCycle.cs" Link="TagCheckpointCycle.cs" />
     <Compile Include="..\DataCenterHunting.cs" Link="DataCenterHunting.cs" />
     <Compile Include="..\LifestreamTravel.cs" Link="LifestreamTravel.cs" />
+    <Compile Include="..\WorldVisitDeathCancellation.cs" Link="WorldVisitDeathCancellation.cs" />
     <Compile Include="..\HuntAlertSnapshot.cs" Link="HuntAlertSnapshot.cs" />
   </ItemGroup>
 </Project>

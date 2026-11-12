@@ -52,6 +52,7 @@ internal static partial class Program
             Test("Plugins list includes all companions and handles disabled, missing, and loaded states", TestCompanionPlugins);
             Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
+            Test("killed World Visit destination remains in History without a tag or credit", TestWorldVisitDeathHistory);
             Test("personal credit requires a tagged final pull, kill, and contextual reward in either order", TestHistoryCredit);
             Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
             Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);
@@ -67,7 +68,7 @@ internal static partial class Program
             Test("Core minimum audit and narrower saved sizes preserve window identity", TestNarrowWindowPlacement);
             Test("Classic controls reflow and remain scrollable at narrower widths/scales", TestNarrowClassic);
             Test("History reports grow with the viewport and Clear remains bottom-anchored", TestHistoryViewport);
-            Console.WriteLine($"{passed}/35 UI, migration, companion, and history tests passed.");
+            Console.WriteLine($"{passed} UI, migration, companion, and history tests passed.");
             return 0;
         }
         catch (Exception exception)

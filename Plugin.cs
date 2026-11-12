@@ -6854,6 +6854,8 @@ public sealed partial class Plugin : IDalamudPlugin
         ObserveHistoryKill(current, pullCycleTagged, now);
         log.Information("Hunt cleared/completed with positive evidence: {Mark} on {World}; reason={Reason}",
             current.CreatureName, current.World, reason);
+        if (BeginWorldVisitDeathCancellation(current, now))
+            return;
         if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName))
             activeSsProfile = HuntCatalog.GetSsProfileForTerritory(current.TerritoryId);
         var normalSInCurrentContext =

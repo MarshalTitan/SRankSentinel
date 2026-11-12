@@ -2,6 +2,13 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("death before Lifestream submission discards the target without aborting unrelated tasks", WorldVisitDeathBeforeRequest),
+    ("death before native submission aborts Sentinel's accepted Lifestream request", WorldVisitDeathBeforeServerQueue),
+    ("confirmed destination death in the server queue aborts then cancels once and waits for both owners", WorldVisitDeathInQueue),
+    ("wrong-World and unrelated queued deaths leave the active World Visit alone", WorldVisitDeathIdentity),
+    ("death after zoning skips the dead territory and settles on the arrival World", WorldVisitDeathDuringZoning),
+    ("missing Cancel recovers when available and a failed dispatch is bounded", WorldVisitCancelButtonRetry),
+    ("mismatched queue controls and unconfirmed cancellation cannot release travel", WorldVisitCancelTimeout),
     ("Lifestream owns Zalera to Balmung on Crystal", () => LifestreamRoute("Zalera", "Balmung")),
     ("Lifestream owns Zalera to Midgardsormr across Crystal and Aether", () => LifestreamRoute("Zalera", "Midgardsormr")),
     ("Lifestream owns Midgardsormr to Seraph without returning Home", () => LifestreamRoute("Midgardsormr", "Seraph")),
@@ -537,6 +544,150 @@ static void KeepRealInstanceChange()
 }
 
 static DateTime TravelStart() => new(2026, 11, 12, 15, 0, 0, DateTimeKind.Utc);
+
+static WorldVisitCancellationObservation ClearVisit(uint world) =>
+    new(LifestreamReadiness.Idle, world, true, true, false, false, false, default);
+
+static WorldVisitCancellationObservation QueuedVisit() =>
+    ClearVisit(World("Leviathan").Id) with
+    {
+        Provider = LifestreamReadiness.Busy,
+        Waiting = true,
+        Interactable = false,
+        Queue = new(true, true, true, "Leviathan", "Seraph"),
+    };
+
+static LifestreamTravel DeadVisit(DateTime now, bool accepted = true)
+{
+    var source = World("Leviathan").Id;
+    var session = new LifestreamTravel(World("Seraph"), now, TimeSpan.FromSeconds(90));
+    if (accepted)
+        Equal(LifestreamTravelStep.RequestAccepted,
+            session.Tick(now, LifestreamReadiness.Idle, source, true, false, true, _ => true));
+    session.BeginDeathCancellation(source, now);
+    return session;
+}
+
+static bool UnexpectedTravelAction() => throw new InvalidOperationException("unexpected travel action");
+
+static void WorldVisitDeathBeforeRequest()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now, accepted: false).DeathCancellation!;
+    var clear = ClearVisit(World("Leviathan").Id);
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now, clear with { Provider = LifestreamReadiness.Busy },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(1), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.SettledAtSource, cancel.Tick(now.AddSeconds(2), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+}
+
+static void WorldVisitDeathBeforeServerQueue()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now).DeathCancellation!;
+    var clear = ClearVisit(World("Leviathan").Id);
+    Equal(WorldVisitDeathStep.AbortAttempted, cancel.Tick(now, clear with { Provider = LifestreamReadiness.Busy },
+        () => true, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(1), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.SettledAtSource, cancel.Tick(now.AddSeconds(2), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+}
+
+static void WorldVisitDeathInQueue()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now).DeathCancellation!;
+    var queue = QueuedVisit();
+    Equal(WorldVisitDeathStep.AbortAttempted, cancel.Tick(now, queue, () => true, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(1), queue, UnexpectedTravelAction, UnexpectedTravelAction));
+    queue = queue with { Provider = LifestreamReadiness.Idle };
+    Equal(WorldVisitDeathStep.CancelAttempted, cancel.Tick(now.AddSeconds(2), queue, UnexpectedTravelAction, () => true));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(4), queue, UnexpectedTravelAction, UnexpectedTravelAction));
+
+    var clear = ClearVisit(queue.WorldId);
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(5), clear with { Queue = queue.Queue },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Zoning, cancel.Tick(now.AddSeconds(6), clear with { Readying = true, Waiting = true },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(7), clear with { Provider = LifestreamReadiness.Busy },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(8), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.SettledAtSource, cancel.Tick(now.AddSeconds(9), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+
+    var source = World("Leviathan");
+    var same = new LifestreamTravel(source, now, TimeSpan.FromSeconds(90));
+    Equal(LifestreamTravelStep.Arrived, same.Tick(now.AddSeconds(9), LifestreamReadiness.Idle,
+        source.Id, true, false, true, _ => UnexpectedTravelAction()));
+    var replacement = new LifestreamTravel(World("Balmung"), now, TimeSpan.FromSeconds(90));
+    Equal(LifestreamTravelStep.RequestAccepted, replacement.Tick(now.AddSeconds(9), LifestreamReadiness.Idle,
+        source.Id, true, false, true, name => name == "Balmung"));
+}
+
+static void WorldVisitDeathIdentity()
+{
+    var active = VisitAlert("Seraph", 2);
+    var queued = VisitAlert("Balmung", 2);
+    bool Matches(HuntAlertSnapshot candidate, HuntAlertSnapshot notice) =>
+        WorldVisitPolicy.MatchesDeath(candidate, notice.World, notice.TerritoryId, notice.Instance,
+            active.ReceivedAtUtc.AddSeconds(1), notice.CreatureName == candidate.CreatureName, false);
+
+    False(Matches(active, queued));
+    True(Matches(queued, queued));
+    False(Matches(active, active with { TerritoryId = active.TerritoryId + 1 }));
+    False(Matches(active, active with { Instance = 1 }));
+    False(Matches(active, active with { CreatureName = "Different mark" }));
+    True(Matches(active, active));
+}
+
+static void WorldVisitDeathDuringZoning()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now).DeathCancellation!;
+    var queue = QueuedVisit();
+    Equal(WorldVisitDeathStep.Zoning, cancel.Tick(now, queue with { BetweenAreas = true },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Zoning, cancel.Tick(now.AddSeconds(1), queue with
+        { Waiting = false, Readying = true, Queue = default }, UnexpectedTravelAction, UnexpectedTravelAction));
+    var arrived = ClearVisit(World("Seraph").Id);
+    Equal(WorldVisitDeathStep.Zoning, cancel.Tick(now.AddSeconds(2), arrived with { Interactable = false },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(3), arrived, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.SettledAtDestination, cancel.Tick(now.AddSeconds(4), arrived,
+        UnexpectedTravelAction, UnexpectedTravelAction));
+}
+
+static void WorldVisitCancelButtonRetry()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now).DeathCancellation!;
+    var queue = QueuedVisit();
+    var missing = queue with { Queue = queue.Queue with { CancelEnabled = false } };
+    Equal(WorldVisitDeathStep.AbortAttempted, cancel.Tick(now, missing, () => true, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(1), missing with { Provider = LifestreamReadiness.Idle },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    queue = queue with { Provider = LifestreamReadiness.Idle };
+    Equal(WorldVisitDeathStep.CancelAttempted, cancel.Tick(now.AddSeconds(2), queue, UnexpectedTravelAction, () => false));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(3), queue, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.CancelAttempted, cancel.Tick(now.AddSeconds(4), queue, UnexpectedTravelAction, () => false));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(6), queue, UnexpectedTravelAction, UnexpectedTravelAction));
+    False(cancel.CancelSent);
+}
+
+static void WorldVisitCancelTimeout()
+{
+    var now = TravelStart();
+    var cancel = DeadVisit(now).DeathCancellation!;
+    var queue = QueuedVisit();
+    var wrongRoute = queue with { Queue = queue.Queue with { RouteMatches = false } };
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now, wrongRoute, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.TimedOut, cancel.Tick(now + WorldVisitDeathCancellation.ActionWindow, queue,
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    var clear = ClearVisit(queue.WorldId);
+    Equal(WorldVisitDeathStep.TimedOut, cancel.Tick(now.AddSeconds(16), clear with { AtHub = false },
+        UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.Waiting, cancel.Tick(now.AddSeconds(17), clear, UnexpectedTravelAction, UnexpectedTravelAction));
+    Equal(WorldVisitDeathStep.SettledAtSource, cancel.Tick(now.AddSeconds(18), clear,
+        UnexpectedTravelAction, UnexpectedTravelAction));
+}
 
 static void LifestreamRoute(string from, string to)
 {

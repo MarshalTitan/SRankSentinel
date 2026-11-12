@@ -331,6 +331,46 @@ const reviewedLifestreamPatches = {
     ]
   ]
 };
+// Reverse the reviewed World Visit death handoff before checking the unchanged hunt baseline.
+const reviewedWorldVisitDeathPatches = {
+  "LifestreamIpc.cs": [
+    [
+      "    private readonly ICallGateSubscriber<object> abort = pi.GetIpcSubscriber<object>(\"Lifestream.Abort\");\n\n    public bool HasRequiredIpc",
+      "    public bool HasRequiredIpc"
+    ],
+    [
+      "    public bool TryAbort()\n    {\n        if (!abort.HasAction)\n            return false;\n        try\n        {\n            abort.InvokeAction();\n            return true;\n        }\n        catch (Exception ex)\n        {\n            log.Warning(ex, \"Lifestream.Abort IPC failed\");\n            return false;\n        }\n    }\n\n    public bool TryChangeWorld",
+      "    public bool TryChangeWorld"
+    ]
+  ],
+  "LifestreamTravel.cs": [
+    [
+      "    internal bool AwaitingArrival { get; private set; }\n    internal uint AcceptedSourceId { get; private set; }\n    internal WorldVisitDeathCancellation? DeathCancellation { get; private set; }\n\n    internal void BeginDeathCancellation(uint actualWorldId, DateTime now) =>\n        DeathCancellation ??= new(AwaitingArrival ? AcceptedSourceId : actualWorldId,\n            Destination.Id, AwaitingArrival, now);",
+      "    internal bool AwaitingArrival { get; private set; }"
+    ],
+    [
+      "            AwaitingArrival = true;\n            AcceptedSourceId = actualWorldId;",
+      "            AwaitingArrival = true;"
+    ]
+  ],
+  "Plugin.cs": [
+    [
+      "            current.CreatureName, current.World, reason);\n        if (BeginWorldVisitDeathCancellation(current, now))\n            return;\n        if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName))",
+      "            current.CreatureName, current.World, reason);\n        if (HuntCatalog.IsSupportedNormalS(current.TerritoryId, current.CreatureName))"
+    ]
+  ],
+  "Plugin.WorldVisit.cs": [
+    [
+      "        if (state == SentinelState.WorldVisit && worldTravel?.DeathCancellation is not null)\n        {\n            TickLifestreamWorldVisit(now, provider);\n            return false;\n        }\n\n        if (provider == LifestreamReadiness.Unavailable)\n",
+      "        if (provider == LifestreamReadiness.Unavailable)\n"
+    ],
+    [
+      "        if (transfer.DeathCancellation is { } cancellation)\n        {\n            TickWorldVisitDeathCancellation(now, transfer, cancellation, provider, actualWorldId, interactable, atHub);\n            return;\n        }\n        if (provider == LifestreamReadiness.Idle && !gameBusy && !IsAlertFresh(current, now))",
+      "        if (provider == LifestreamReadiness.Idle && !gameBusy && !IsAlertFresh(current, now))"
+    ]
+  ]
+};
+
 // Reverse the reviewed DC intake and checkpoint migration before the unchanged hunt baseline.
 const reviewedCheckpointPatches = {
   "Plugin.cs": [
@@ -549,6 +589,10 @@ const reviewedCheckpointPatches = {
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedWorldVisitDeathPatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated World Visit death cancellation edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedCheckpointPatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated DC or checkpoint edit: ${path}`);
     source = source.replace(change, original);
