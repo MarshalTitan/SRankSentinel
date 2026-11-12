@@ -61,6 +61,8 @@ internal static partial class Program
     {
         Check(CompanionPlugins.All.Select(x => x.Name).SequenceEqual(new[] { "vnavmesh", "Lifestream", "HuntAlerts", "Sonar" }),
             "A requested companion is missing.");
+        Check(CompanionPlugins.All.Where(x => x.Required).Select(x => x.Name).SequenceEqual(new[] { "vnavmesh", "Lifestream" }),
+            "Movement and World travel must be required, while alert providers remain alternatives.");
         Check(!CompanionPlugins.IsSupported("SRankSentinel") && !CompanionPlugins.IsSupported("arbitrary-plugin"),
             "Activation allowlist permits unrelated plugins.");
         var installed = CompanionPlugins.All.Select((companion, index) =>

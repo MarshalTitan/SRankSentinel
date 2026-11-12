@@ -1,11 +1,14 @@
-# Patch 7.58 regional World Visit
+# Regional World travel
 
-[Square Enix's rollout notice](https://na.finalfantasyxiv.com/lodestone/topics/detail/5c3b0f9e2fa2295dfc32c19e02e57e4e0614a09c) describes the logical data center selector at the three starter-city aetherytes and travel without a Home World detour. Sentinel uses the Ul'dah aetheryte throughout. NA hunts can use Aether, Crystal, Dynamis and Primal. A destination must be a public World in the current and Home World's physical region.
+S Rank Sentinel requires [Lifestream](https://github.com/NightmareXIV/Lifestream) for automated hunts. Install or enable a current build with Patch 7.58 World Visit support. The Plugins page checks for both required IPC functions. If either is missing, Sentinel pauses automation and keeps eligible alerts queued. A same-World hunt still requires Lifestream to be available but does not submit a World change.
 
-- In the [World sheet](https://github.com/xivapi/ffxiv-datamining/blob/master/csv/en/World.csv), `LogicalDataCenter` (API 15 Lumina `World.Unknown0`) identifies the real logical DC. The older `DataCenter` column can identify the combined matchmaking group. `WorldDCGroupType.Region` gives the physical region.
-- The installed Patch 7.58 `ui/uld/worldtranslate.uld` (`ffxivgame.ver` `2026.11.03.0000.0000`) puts the regional panel at resource node 2. Its header node 3 owns the actual dropdown at node 4 (component 1010); the panel owns the World list at node 7 (component 1019). The dropdown owns its own item list. The legacy list is node 20. Casting node 2 to a dropdown rejected the valid live Crystal page in 0.7.65.0.
-- The installed [Lifestream 2.6.0.13](https://github.com/NightmareXIV/Lifestream/releases/tag/2.6.0.13) binary confirms the Patch 7.58 addon callbacks: DC `(1, dcSlot)` and World `(0, worldSlot + 2)`. Slots come from the native `WorldTranslate` string array: DC labels start at 0 and World labels start at the number of regional DCs plus 2. Sentinel verifies the actual selected dropdown, exact slot order and rendered World list before input. Lifestream is not a dependency.
-- The live public instance state is checked after zoning settles. In a single-instance zone such as Heritage Found in 7.58, a stale report for instance 2 is treated as instance 1. A zone with live numbered instances still uses the existing Aetheryte instance-change recovery.
+[Square Enix's Patch 7.58 rollout](https://na.finalfantasyxiv.com/lodestone/topics/detail/5c3b0f9e2fa2295dfc32c19e02e57e4a09c) allows World Visit within the region without a Home World detour. The installed game data groups Aether, Crystal, Dynamis, and Primal in the same North American World Visit group while preserving separate logical DC IDs. Sentinel uses the physical region for alert eligibility.
+
+Sentinel starts World travel only after its existing reset to Ul'dah. It stops its movement and submits the exact World via `Lifestream.ChangeWorld`, without requiring the Lifestream overlay. The installed Lifestream 2.6.0.13 handles destinations in the shared World Visit group through its World Visit route. Sentinel leaves movement to Lifestream while the provider is busy. An accepted request starts an arrival watch; Sentinel hands off to its own territory teleport only when the game reports the requested World and an interactable character, the game is settled, and Lifestream is idle. Sentinel then handles the entire local hunt and returns to Ul'dah on the visited World.
+
+There are at most two World travel requests per hunt. After a rejected request or a timeout without arrival, Sentinel can retry once when travel is idle. If Lifestream or the game is still traveling, Sentinel waits without aborting or sending competing travel commands. A final failure is recorded as unresolved and the remaining queue can continue. World travel logs record destination World and logical DC, current World, readiness, requests, and arrival or unresolved recovery.
+
+The live public instance state is still checked after territory zoning. In a single-instance zone such as Heritage Found in 7.58, a stale report for instance 2 is treated as instance 1. Numbered instances use the existing Aetheryte recovery.
 
 ## Alert providers
 
@@ -18,6 +21,6 @@ Logs beginning with `Provider regional observation` show each parsed report's pr
 
 ## In-game acceptance
 
-First reproduce the reported route: start in Ul'dah on Zalera (Crystal) and use an eligible Midgardsormr (Aether) alert. Watch for the selector changing to Aether, the Aether rows refreshing, exact Midgardsormr selection, the normal confirmation, and arrival on Midgardsormr before territory teleport. With an eligible cross-DC alert, look for the attempt, logical DC selection, exact World row, and confirmed World arrival in the log. After the hunt, verify that the next visit starts from Ul'dah on the visited World. Repeat with a World on a different logical DC and with a same-World alert. Check that an unavailable destination exhausts the retry budget without removing other queued hunts, and that a stale Heritage Found instance report does not open the instance menu.
-
-If the menu is not understood or refreshed, the `World Visit UI before close` warning includes the observed node types, parents, counts, selected DC index, labels, event ownership, and bounded `WorldTranslate` slots. This is a UI read or refresh failure, separate from a native visit rejection.
+1. On Zalera in Ul'dah, receive an eligible Balmung alert, then return to Zalera for a Midgardsormr alert. Confirm the `Lifestream.ChangeWorld accepted` and `World arrival confirmed from game state` logs, then verify Sentinel begins its normal territory teleport.
+2. From the visited World, continue the queue through Midgardsormr → Seraph → Leviathan → Zalera. Confirm that each request names the exact destination and that Sentinel returns to Ul'dah on the current World after each hunt.
+3. Check that a same-World hunt submits no World change, disabling Lifestream pauses automation, and an unavailable destination does not remove the other queued hunts.

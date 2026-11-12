@@ -1,217 +1,158 @@
+using Dalamud.Game.ClientState.Conditions;
+
 namespace SRankSentinel;
 
 public sealed partial class Plugin
 {
-    private int worldVisitAttempts;
-    private DateTime worldVisitSetupDeadlineUtc;
-    private DateTime? worldVisitLastBusyUtc;
-    private VisitMenuAction lastWorldVisitMenuAction;
-    private string ownedWorldVisitDestination = string.Empty;
+    private const string LifestreamRequiredMessage =
+        "Lifestream is required for SRankSentinel World travel. Install or enable Lifestream to continue.";
+    private const string LifestreamBusyMessage = "Waiting for Lifestream to finish its current travel";
+    private LifestreamTravel? worldTravel;
+    private LifestreamReadiness? previousLifestreamReadiness;
+    private bool worldTravelBusyTimeoutLogged;
     private int playerReadyInstance = -1;
     private readonly HashSet<(string World, uint Territory)> observedSingleInstances = new();
 
-    private static bool IsWorldVisitState(SentinelState value) => value is
-        SentinelState.WorldVisit or SentinelState.SelectLogicalDataCenter or SentinelState.SelectWorld or
-        SentinelState.ConfirmWorldVisit or SentinelState.WaitForWorld;
+    // vnavmesh's Stop IPC is global, so even a manual skip, a kill notice or
+    // unloading Sentinel must not stop a path that Lifestream now owns.
+    private bool CanStopSentinelMovement() =>
+        worldTravel?.AwaitingArrival != true && lifestream.ReadReadiness() != LifestreamReadiness.Busy;
 
-    private void BeginRegionalWorldVisit(DateTime now)
+    private bool CanRunHuntTick(DateTime now)
     {
-        worldVisitAttempts = 1;
-        ownedWorldVisitDestination = current?.World ?? string.Empty;
-        BeginWorldVisitAttempt(now);
-    }
-
-    private void BeginWorldVisitAttempt(DateTime earliestAction)
-    {
-        worldVisitLastBusyUtc = null;
-        lastWorldVisitMenuAction = VisitMenuAction.WaitForSelector;
-        worldVisitSetupDeadlineUtc = earliestAction.AddSeconds(Math.Clamp(config.TravelTimeoutSeconds, 15, 30));
-        nextActionUtc = earliestAction;
-        var origin = travel.CurrentVisitWorld;
-        var destination = travel.ResolveVisitWorld(ownedWorldVisitDestination);
-        log.Information("World Visit attempt {Attempt}/{Limit}: {CurrentWorld} ({CurrentDC}) -> {TargetWorld} ({TargetDC}); Ul'dah hub",
-            worldVisitAttempts, WorldVisitPolicy.MaximumAttempts, origin?.Name ?? "unknown", origin?.LogicalDc ?? "unknown",
-            ownedWorldVisitDestination, destination?.LogicalDc ?? "unknown");
-        SetState(SentinelState.WorldVisit, $"Opening World Visit for {ownedWorldVisitDestination} ({destination?.LogicalDc})");
-    }
-
-    private void ReleaseWorldVisitMenus()
-    {
-        if (ownedWorldVisitDestination.Length != 0)
-            travel.CloseWorldVisitMenus(ownedWorldVisitDestination);
-        ownedWorldVisitDestination = string.Empty;
-    }
-
-    private bool CompleteWorldVisitIfArrived(string destination)
-    {
-        if (travel.IsBusy || !travel.IsInUldah(clientState.TerritoryType) ||
-            string.IsNullOrWhiteSpace(destination) ||
-            !travel.CurrentWorld.Equals(destination, StringComparison.OrdinalIgnoreCase))
+        var provider = lifestream.ReadReadiness();
+        var previous = previousLifestreamReadiness;
+        previousLifestreamReadiness = provider;
+        if (provider == LifestreamReadiness.Unavailable)
+        {
+            if (previous != provider)
+            {
+                vnav.StopOwnedMovementSafe("Lifestream became unavailable");
+                log.Warning(LifestreamRequiredMessage);
+            }
+            status = LifestreamRequiredMessage;
             return false;
-        CompleteWorldVisit(destination);
+        }
+
+        if (state == SentinelState.WorldVisit)
+        {
+            if (previous != provider && worldTravel is { } transfer)
+                log.Information("Lifestream readiness {Provider}: target={Target} ({DC}), current={Current}, requests={Attempts}",
+                    provider, transfer.Destination.Name, transfer.Destination.LogicalDc, travel.CurrentWorld, transfer.Attempts);
+            TickLifestreamWorldVisit(now, provider);
+            return false;
+        }
+        if (provider == LifestreamReadiness.Busy)
+        {
+            status = LifestreamBusyMessage;
+            return false;
+        }
+
+        if (status is LifestreamRequiredMessage or LifestreamBusyMessage)
+            status = "Lifestream is ready";
         return true;
     }
 
-    private void WorldVisitAttemptFailed(DateTime now, string reason, bool retryable = true)
+    private void BeginLifestreamWorldVisit(DateTime now)
     {
-        vnav.StopSafe();
-        travel.CloseWorldVisitMenus(ownedWorldVisitDestination);
-        log.Warning("World Visit attempt {Attempt}/{Limit} to {World} failed: {Reason}",
-            worldVisitAttempts, WorldVisitPolicy.MaximumAttempts, ownedWorldVisitDestination, reason);
-        if (retryable && WorldVisitPolicy.AfterFailedAttempt(worldVisitAttempts, travel.IsBusy) == VisitFailureAction.Retry)
+        if (current is null || !travel.IsWorldVisitCompatible(current.World) ||
+            travel.ResolveVisitWorld(current.World) is not { } target)
         {
-            worldVisitAttempts++;
-            BeginWorldVisitAttempt(now.AddSeconds(3));
+            FailWorldVisit("World Visit target is outside the current region");
             return;
         }
-        FailWorldVisit($"World Visit to {ownedWorldVisitDestination} unresolved: {reason}");
+
+        if (worldTravel?.Destination.Id != target.Id)
+        {
+            worldTravel = new(target, now, TimeSpan.FromSeconds(Math.Max(15, config.TravelTimeoutSeconds)));
+            worldTravelBusyTimeoutLogged = false;
+        }
+        else
+            worldTravel.ResumeFromHub(now);
+
+        SetState(SentinelState.WorldVisit, $"Preparing Lifestream World travel to {target.Name} ({target.LogicalDc})");
     }
 
-    private void TickWorldVisit(DateTime now)
+    private void TickLifestreamWorldVisit(DateTime now, LifestreamReadiness provider)
     {
-        var destination = ownedWorldVisitDestination;
-        if (CompleteWorldVisitIfArrived(destination))
-            return;
-        if (!travel.IsWorldVisitCompatible(destination))
-        {
-            WorldVisitAttemptFailed(now, "destination is outside the current World Visit region", false);
-            return;
-        }
-        if (now >= worldVisitSetupDeadlineUtc)
-        {
-            WorldVisitAttemptFailed(now, "native World Visit window did not open");
-            return;
-        }
-        if (now < nextActionUtc || travel.IsBusy)
+        if (current is null || worldTravel is not { } transfer)
             return;
 
-        if (travel.WorldSelectionIsOpen() || travel.SelectWorldVisitMenu())
+        var player = objects.LocalPlayer;
+        var actualWorldId = player?.CurrentWorld.RowId ?? 0;
+        var gameBusy = travel.IsBusy || !clientState.IsLoggedIn;
+        var interactable = !gameBusy && player is { IsTargetable: true } && !combat.IsPlayerDead &&
+            !condition[ConditionFlag.Occupied] && !condition[ConditionFlag.OccupiedInEvent] &&
+            !condition[ConditionFlag.OccupiedInQuestEvent] && !condition[ConditionFlag.OccupiedInCutSceneEvent] &&
+            !condition[ConditionFlag.InCombat];
+        var atHub = travel.IsInUldah(clientState.TerritoryType);
+        var target = transfer.Destination;
+        var actualWorld = travel.CurrentWorld;
+        if (provider == LifestreamReadiness.Idle && !gameBusy && !IsAlertFresh(current, now))
         {
-            vnav.StopSafe();
-            nextActionUtc = now.AddMilliseconds(250);
-            SetState(SentinelState.SelectLogicalDataCenter,
-                $"Opening logical DC selector for {destination}");
+            worldTravel = null;
+            FailWorldVisit($"Hunt on {target.Name} expired or was invalidated during Lifestream World travel");
             return;
         }
+        var result = transfer.Tick(now, provider, actualWorldId, interactable, gameBusy, atHub, destination =>
+        {
+            vnav.StopOwnedMovementSafe("handing World travel to Lifestream");
+            return lifestream.TryChangeWorld(destination);
+        });
 
-        if (condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Mounted])
-            UseGeneralAction(23);
-        else if (!travel.InteractWithNearbyAetheryte() && vnav.IsReadySafe() &&
-                 !vnav.IsPathRunningSafe() && !vnav.IsPathfindInProgressSafe())
+        switch (result)
         {
-            vnav.MoveToSafe(NativeTravel.UldahAetherytePosition, false);
-            status = "Walking normally to the Ul'dah World Visit aetheryte";
-        }
-        nextActionUtc = now.AddSeconds(2);
-    }
-
-    private void TickSelectLogicalDataCenter(DateTime now) => TickWorldVisitMenu(now, false);
-    private void TickSelectWorld(DateTime now) => TickWorldVisitMenu(now, true);
-
-    private void TickWorldVisitMenu(DateTime now, bool submitWorld)
-    {
-        var destination = ownedWorldVisitDestination;
-        if (CompleteWorldVisitIfArrived(destination))
-            return;
-        if (now >= worldVisitSetupDeadlineUtc)
-        {
-            LogWorldVisitMenuLayout(destination);
-            if (lastWorldVisitMenuAction == VisitMenuAction.WaitForRegionalLayout)
-                WorldVisitAttemptFailed(now, $"native World Visit UI layout could not be read: {status}", false);
-            else if (lastWorldVisitMenuAction is VisitMenuAction.SelectLogicalDataCenter or VisitMenuAction.WaitForWorldList)
-                WorldVisitAttemptFailed(now, $"native World Visit UI did not refresh: {status}");
-            else
-                WorldVisitAttemptFailed(now, status);
-            return;
-        }
-        if (now < nextActionUtc || travel.IsBusy)
-            return;
-        nextActionUtc = now.AddMilliseconds(500);
-        (VisitMenuAction Action, string Detail) step;
-        try { step = travel.StepWorldVisitMenu(destination, submitWorld); }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "Native World Visit menu could not be read safely");
-            LogWorldVisitMenuLayout(destination);
-            WorldVisitAttemptFailed(now, "native World Visit UI layout could not be read", false);
-            return;
-        }
-        lastWorldVisitMenuAction = step.Action;
-        status = step.Detail;
-        switch (step.Action)
-        {
-            case VisitMenuAction.AlreadyCurrent:
-                CompleteWorldVisitIfArrived(destination);
+            case LifestreamTravelStep.DependencyUnavailable:
+                status = LifestreamRequiredMessage;
                 return;
-            case VisitMenuAction.Ineligible:
-                WorldVisitAttemptFailed(now, step.Detail, false);
-                return;
-            case VisitMenuAction.SelectLogicalDataCenter:
-                if (submitWorld)
-                    SetState(SentinelState.SelectLogicalDataCenter, step.Detail);
-                else
+            case LifestreamTravelStep.WaitForTravel:
+            case LifestreamTravelStep.TravelStillBusyAfterTimeout:
+                status = $"Waiting for {(provider == LifestreamReadiness.Busy ? "Lifestream" : "the game")} to finish World travel to {target.Name}";
+                if (result == LifestreamTravelStep.TravelStillBusyAfterTimeout && !worldTravelBusyTimeoutLogged)
                 {
-                    log.Information("World Visit selector: {Detail}", step.Detail);
-                    nextActionUtc = now.AddSeconds(1.25);
+                    worldTravelBusyTimeoutLogged = true;
+                    log.Warning("World travel timeout for {Target} ({DC}) while still in progress; current={Current}, Lifestream={Provider}, gameBusy={GameBusy}, attempts={Attempts}; waiting without interruption",
+                        target.Name, target.LogicalDc, actualWorld, provider, gameBusy, transfer.Attempts);
                 }
                 return;
-            case VisitMenuAction.SelectWorld:
-                SetState(SentinelState.SelectWorld, step.Detail);
+            case LifestreamTravelStep.WaitForArrival:
+                status = $"Waiting for game-confirmed arrival on {target.Name}";
                 return;
-            case VisitMenuAction.WorldSubmitted:
-                log.Information("World Visit row: {Detail}", step.Detail);
-                SetState(SentinelState.ConfirmWorldVisit, $"Confirming World Visit to {destination}");
+            case LifestreamTravelStep.WaitForPlayer:
+                status = $"Waiting for the player to be ready for World travel to {target.Name}";
+                return;
+            case LifestreamTravelStep.ReturnToHub:
+                ResetReturnRecoveryTracking();
+                SetState(SentinelState.ResetToUldah, $"Returning to Ul'dah on {actualWorld} before retrying {target.Name}");
+                return;
+            case LifestreamTravelStep.RequestAccepted:
+            case LifestreamTravelStep.RequestRejected:
+                var accepted = result == LifestreamTravelStep.RequestAccepted;
+                worldTravelBusyTimeoutLogged = false;
+                log.Information("Lifestream.ChangeWorld {Result}: target={Target} ({DC}), current={Current}, attempt={Attempt}/{Limit}, busyBeforeRequest={Provider}",
+                    accepted ? "accepted" : "rejected", target.Name, target.LogicalDc, actualWorld, transfer.Attempts,
+                    LifestreamTravel.MaximumAttempts, provider);
+                status = accepted ? $"Lifestream accepted World travel to {target.Name}; awaiting arrival" :
+                    $"Lifestream rejected World travel to {target.Name}; checking readiness before continuing";
+                return;
+            case LifestreamTravelStep.RetryScheduled:
+                log.Warning("Lifestream became idle without arrival on {Target} ({DC}); current={Current}, attempts={Attempts}; scheduling one retry",
+                    target.Name, target.LogicalDc, actualWorld, transfer.Attempts);
+                status = $"Retrying Lifestream World travel to {target.Name}";
+                return;
+            case LifestreamTravelStep.Arrived:
+                log.Information("World arrival confirmed from game state: {Target} ({DC}), current={Current}, Lifestream={Provider}, attempts={Attempts}",
+                    target.Name, target.LogicalDc, actualWorld, provider, transfer.Attempts);
+                worldTravel = null;
+                CompleteWorldVisit(target.Name);
+                return;
+            case LifestreamTravelStep.Unresolved:
+                log.Warning("Lifestream World travel unresolved: target={Target} ({DC}), current={Current}, Lifestream={Provider}, interactable={Interactable}, attempts={Attempts}/{Limit}",
+                    target.Name, target.LogicalDc, actualWorld, provider, interactable, transfer.Attempts, LifestreamTravel.MaximumAttempts);
+                worldTravel = null;
+                FailWorldVisit($"Lifestream World travel to {target.Name} unresolved after {transfer.Attempts} request(s)");
                 return;
         }
-    }
-
-    private void LogWorldVisitMenuLayout(string destination)
-    {
-        try { log.Warning("World Visit UI before close: {Layout}", travel.DescribeWorldVisitMenu(destination)); }
-        catch (Exception ex) { log.Warning(ex, "World Visit UI diagnostic read failed for {World}", destination); }
-    }
-
-    private void TickConfirmWorldVisit(DateTime now)
-    {
-        var destination = ownedWorldVisitDestination;
-        if (CompleteWorldVisitIfArrived(destination))
-            return;
-        if (travel.IsBusy)
-        {
-            worldVisitLastBusyUtc = now;
-            SetState(SentinelState.WaitForWorld, $"Native World Visit in progress; waiting for {destination}");
-            return;
-        }
-        if (now >= worldVisitSetupDeadlineUtc)
-        {
-            WorldVisitAttemptFailed(now, "the exact destination confirmation did not become available");
-            return;
-        }
-        if (travel.ConfirmWorldVisit(destination))
-        {
-            worldVisitLastBusyUtc = null;
-            SetState(SentinelState.WaitForWorld, $"World Visit requested; waiting for {destination}");
-        }
-    }
-
-    private void TickWaitForWorld(DateTime now)
-    {
-        var destination = ownedWorldVisitDestination;
-        var busy = travel.IsBusy;
-        if (busy)
-            worldVisitLastBusyUtc = now;
-        var result = WorldVisitPolicy.ObserveArrival(
-            travel.CurrentWorld.Equals(destination, StringComparison.OrdinalIgnoreCase),
-            travel.IsInUldah(clientState.TerritoryType), busy,
-            (now - stateSinceUtc).TotalSeconds,
-            worldVisitLastBusyUtc is { } lastBusy ? (now - lastBusy).TotalSeconds : null,
-            config.TravelTimeoutSeconds);
-        if (result == VisitArrivalAction.Arrived)
-            CompleteWorldVisit(destination);
-        else if (result == VisitArrivalAction.AttemptFailed)
-            WorldVisitAttemptFailed(now, busy
-                ? "native World Visit queue exceeded the travel timeout"
-                : "the game rejected or ended the visit without arrival");
     }
 
     private void LogProviderRegion(string source, string action, string world, bool eligible)

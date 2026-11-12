@@ -250,7 +250,8 @@ public sealed partial class Plugin
     private void DrawHuntStatus()
     {
         ImGui.TextUnformatted($"State: {state}");
-        ImGui.TextWrapped($"Status: {status}");
+        var huntStatus = config.Enabled && lifestream?.HasRequiredIpc != true ? LifestreamRequiredMessage : status;
+        ImGui.TextWrapped($"Status: {huntStatus}");
         if (current is not null)
             ImGui.TextWrapped($"Current: {current.CreatureName} | {current.World} | territory {current.TerritoryId} | instance {current.Instance}");
         if (pendingAlerts.Count > 0)

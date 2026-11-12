@@ -12,7 +12,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.66.0</Version>"],
+  [project, "<Version>0.7.67.0</Version>"],
   [plugin, "tagRequired = true"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until one ranged tag is confirmed"],
@@ -157,3 +157,17 @@ if (!instancePolicy.includes("MaximumFailures = 3") ||
     !instance.includes("vnav.MovePathSafe(path, false)"))
   throw new Error("Local instance recovery lost its retry/path/ground bounds");
 console.log("Local instance interaction recovery audit passed.");
+
+const worldTravel = readFileSync("Plugin.WorldVisit.cs", "utf8");
+const worldData = readFileSync("NativeTravel.WorldVisit.cs", "utf8");
+const nativeTravel = readFileSync("NativeTravel.cs", "utf8");
+const lifestream = readFileSync("LifestreamIpc.cs", "utf8");
+if (/WorldTravelSelect|SelectLogicalDataCenter|StepWorldVisitMenu|CloseWorldVisitMenus/.test(
+    plugin + worldTravel + worldData + nativeTravel))
+  throw new Error("Native World Visit menu parsing is still reachable.");
+if (!plugin.includes("!config.Enabled || !CanRunHuntTick(now)") ||
+    !worldTravel.includes("vnav.StopOwnedMovementSafe(") ||
+    !worldTravel.includes("CompleteWorldVisit(target.Name)") ||
+    !lifestream.includes('"Lifestream.ChangeWorld"') || !lifestream.includes('"Lifestream.IsBusy"'))
+  throw new Error("Required Lifestream ownership or confirmed-arrival handoff is missing.");
+console.log("Lifestream owns World travel; the native World Visit parser is removed.");

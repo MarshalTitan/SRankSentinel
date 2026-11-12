@@ -2,26 +2,18 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
-    ("7.58 selector uses the nested dropdown below the Crystal page panel", RegionalMenuNestedDropdown),
-    ("7.58 same DC Crystal to Balmung uses the verified native World slot", () => RegionalMenuRoute("Zalera", "Balmung")),
-    ("7.58 Crystal to Midgardsormr selects Aether then confirms exact arrival", () => RegionalMenuRoute("Zalera", "Midgardsormr")),
-    ("7.58 visited Aether to Dynamis uses its native page with no Home World detour", () => RegionalMenuRoute("Midgardsormr", "Seraph")),
-    ("7.58 visited Dynamis to Primal uses its native page with no Home World detour", () => RegionalMenuRoute("Seraph", "Leviathan")),
-    ("7.58 visited Primal to Crystal uses its native page with no Home World detour", () => RegionalMenuRoute("Leviathan", "Balmung")),
-    ("7.58 selector initialization never submits a stale World row", RegionalSelectorInitialization),
-    ("7.58 selected DC waits for native slots and rendered rows to agree in order", RegionalRenderedRefresh),
-    ("7.58 genuinely absent destination is distinct from UI initialization", RegionalDestinationUnavailable),
-    ("Crystal to Crystal World selects the exact World on the current DC", () => VisitRoute("Zalera", "Balmung")),
-    ("Crystal to Aether World selects Aether first", () => VisitRoute("Zalera", "Sargatanas")),
-    ("Aether to Dynamis World does not return to the Crystal Home World", () => VisitRoute("Sargatanas", "Seraph")),
-    ("Dynamis to Primal World does not return to the Crystal Home World", () => VisitRoute("Seraph", "Leviathan")),
-    ("Primal to Crystal World selects the destination rather than the Home World", () => VisitRoute("Leviathan", "Balmung")),
-    ("target World already current skips the World Visit menu", CurrentWorldSkipsVisit),
-    ("logical DC selected waits for the rendered World list to refresh", WaitForWorldListRefresh),
-    ("World Visit confirms only the exact named destination", ExactWorldConfirmation),
-    ("rejected World Visit retries once and recovers unresolved", BoundedWorldVisitRejection),
-    ("congested native queue waits and requires settled arrival", WorldVisitCongestionAndArrival),
-    ("queue keeps hunts on multiple logical DCs across visits", KeepRegionalQueue),
+    ("Lifestream owns Zalera to Balmung on Crystal", () => LifestreamRoute("Zalera", "Balmung")),
+    ("Lifestream owns Zalera to Midgardsormr across Crystal and Aether", () => LifestreamRoute("Zalera", "Midgardsormr")),
+    ("Lifestream owns Midgardsormr to Seraph without returning Home", () => LifestreamRoute("Midgardsormr", "Seraph")),
+    ("Lifestream owns Seraph to Leviathan without returning Home", () => LifestreamRoute("Seraph", "Leviathan")),
+    ("Lifestream owns Leviathan to Zalera", () => LifestreamRoute("Leviathan", "Zalera")),
+    ("same-World hunt never submits a Lifestream travel request", SameWorldSkipsRequest),
+    ("Lifestream dependency absence blocks travel even for a same-World hunt", RequiredLifestreamUnavailable),
+    ("temporarily busy Lifestream owns movement and is not interrupted", LifestreamBusyWait),
+    ("a rejected request waits for idle and retries at most once", LifestreamRejectionBounded),
+    ("accepted requests without arrival retry once and become unresolved", LifestreamMissingArrivalBounded),
+    ("an accepted visit can return to the current World's hub before retrying", LifestreamRetryThroughHub),
+    ("queued NA hunts use Lifestream in order without a Home World detour", KeepRegionalQueue),
     ("cross-DC death removes only the matching World, territory, instance and mark", MatchRegionalDeath),
     ("a non-NA World is ineligible for NA hunts", RejectOutsideRegion),
     ("Heritage Found stale instance 2 normalizes to the live single zone", NormalizeHeritageFound),
@@ -491,7 +483,7 @@ static void InstanceCandidateBounds()
 
 static VisitWorld World(string name) => name switch
 {
-    "Zalera" => new(90, name, 8, "Crystal", 2),
+    "Zalera" => new(41, name, 8, "Crystal", 2),
     "Balmung" => new(91, name, 8, "Crystal", 2),
     "Midgardsormr" => new(65, name, 4, "Aether", 2),
     "Sargatanas" => new(99, name, 4, "Aether", 2),
@@ -503,89 +495,9 @@ static VisitWorld World(string name) => name switch
     _ => throw new ArgumentOutOfRangeException(nameof(name)),
 };
 
-static void VisitRoute(string from, string to)
-{
-    var source = World(from);
-    var target = World(to);
-    var home = World("Zalera");
-    True(WorldVisitPolicy.CanVisit(source, home, target));
-    if (source.LogicalDcId != target.LogicalDcId)
-    {
-        Equal(VisitMenuAction.SelectLogicalDataCenter,
-            WorldVisitPolicy.ChooseMenu(source, home, target, true, source.LogicalDc, [source]));
-        Equal(VisitMenuAction.WaitForSelector,
-            WorldVisitPolicy.ChooseMenu(source, home, target, false, null, [source]));
-    }
-    Equal(VisitMenuAction.SelectWorld,
-        WorldVisitPolicy.ChooseMenu(source, home, target, true, target.LogicalDc, [target]));
-    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 12, 3, 90));
-}
-
-static void CurrentWorldSkipsVisit()
-{
-    var current = World("Seraph");
-    Equal(VisitMenuAction.AlreadyCurrent,
-        WorldVisitPolicy.ChooseMenu(current, World("Zalera"), current, false, null, []));
-}
-
-static void WaitForWorldListRefresh()
-{
-    var source = World("Zalera");
-    var target = World("Sargatanas");
-    VisitMenuAction Select(params VisitWorld?[] rows) =>
-        WorldVisitPolicy.ChooseMenu(source, source, target, true, "Aether", rows);
-    Equal(VisitMenuAction.WaitForWorldList, Select());
-    Equal(VisitMenuAction.WaitForWorldList, Select(source, World("Balmung")));
-    Equal(VisitMenuAction.WaitForWorldList, Select(target, source));
-    Equal(VisitMenuAction.WaitForWorldList, Select(target, null));
-    Equal(VisitMenuAction.WaitForWorldList, Select(target, target));
-    Equal(VisitMenuAction.WaitForWorldList, Select(World("Siren")));
-    Equal(VisitMenuAction.SelectWorld, Select(World("Siren"), target));
-}
-
-static void ExactWorldConfirmation()
-{
-    True(WorldVisitPolicy.IsConfirmationFor("Travel to Seraph?\nParty restrictions apply.", "Seraph"));
-    False(WorldVisitPolicy.IsConfirmationFor("Travel to Sargatanas?", "Seraph"));
-    False(WorldVisitPolicy.IsConfirmationFor("Return to Seraph?", "Seraph"));
-    False(WorldVisitPolicy.IsConfirmationFor("Cancel travel to Seraph?", "Seraph"));
-}
-
-static void BoundedWorldVisitRejection()
-{
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, false, 7, null, 90));
-    Equal(VisitArrivalAction.AttemptFailed, WorldVisitPolicy.ObserveArrival(false, true, false, 8, null, 90));
-    Equal(VisitFailureAction.Retry, WorldVisitPolicy.AfterFailedAttempt(1, false));
-    Equal(VisitFailureAction.RecoverUnresolved, WorldVisitPolicy.AfterFailedAttempt(2, false));
-}
-
-static void WorldVisitCongestionAndArrival()
-{
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, true, 65, 0, 90));
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, false, 67, 2, 90));
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(true, true, true, 69, 0, 90));
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(true, false, false, 69, 1, 90));
-    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 70, 1, 90));
-    Equal(VisitArrivalAction.AttemptFailed, WorldVisitPolicy.ObserveArrival(false, true, true, 90, 0, 90));
-    Equal(VisitFailureAction.RecoverUnresolved, WorldVisitPolicy.AfterFailedAttempt(1, true));
-}
-
 static HuntAlertSnapshot VisitAlert(string world, int instance) =>
     new("srank", world, "Atticus the Primogenitor", 1191, 13444, 0, instance, 16.7f, 9.5f,
         new DateTime(2026, 11, 10, 15, 0, 0, DateTimeKind.Utc));
-
-static void KeepRegionalQueue()
-{
-    var home = World("Zalera");
-    var queue = new[] { VisitAlert("Balmung", 1), VisitAlert("Sargatanas", 1), VisitAlert("Seraph", 1),
-        VisitAlert("Leviathan", 1), VisitAlert("Phoenix", 1) };
-    foreach (var origin in new[] { home, World("Sargatanas"), World("Seraph"), World("Leviathan") })
-    {
-        var eligible = queue.Where(alert => WorldVisitPolicy.CanVisit(origin, home, World(alert.World))).ToArray();
-        Equal(4, eligible.Length);
-        Equal(4, eligible.Select(alert => alert.Key).Distinct().Count());
-    }
-}
 
 static void MatchRegionalDeath()
 {
@@ -630,88 +542,164 @@ static void KeepRealInstanceChange()
     Equal(InstanceArrivalAction.ChangeInstance, WorldVisitPolicy.InstanceArrival(2, 1));
 }
 
-static string[] NaDcSlots() => ["Aether", "Crystal", "Dynamis", "Primal"];
+static DateTime TravelStart() => new(2026, 11, 12, 15, 0, 0, DateTimeKind.Utc);
 
-static void RegionalMenuNestedDropdown()
+static void LifestreamRoute(string from, string to)
 {
-    // Parent IDs in the installed 7.58 worldtranslate.uld; the old cast at #2
-    // interpreted a plain resource node as the dropdown.
-    var layout = new Dictionary<uint, (uint Parent, string Kind)>
-    {
-        [2] = (1, "Resource"), [3] = (2, "Resource"), [4] = (3, "Dropdown"), [7] = (2, "List"),
-    };
-    var panel = layout[WorldVisitPolicy.RegionalPanelId];
-    var header = layout[WorldVisitPolicy.RegionalHeaderId];
-    var control = layout[WorldVisitPolicy.RegionalDropdownId];
-    var list = layout[WorldVisitPolicy.RegionalWorldListId];
-    Equal("Resource", panel.Kind);
-    Equal("Dropdown", control.Kind);
-    Equal("List", list.Kind);
-    True(WorldVisitPolicy.IsRegionalLayout(header.Parent, control.Parent, list.Parent));
-    False(WorldVisitPolicy.IsRegionalLayout(header.Parent, panel.Parent, list.Parent));
-}
-
-static void RegionalMenuRoute(string from, string to)
-{
-    var home = World("Zalera");
     var source = World(from);
-    var target = World(to);
-    var dcSlots = NaDcSlots();
-    var selected = Array.IndexOf(dcSlots, source.LogicalDc);
-    var desired = Array.IndexOf(dcSlots, target.LogicalDc);
-    if (selected != desired)
+    var destination = World(to);
+    var now = TravelStart();
+    var requests = new List<string>();
+    var travel = new LifestreamTravel(destination, now, TimeSpan.FromSeconds(90));
+    True(WorldVisitPolicy.CanVisit(source, World("Zalera"), destination));
+    bool Request(string world) { requests.Add(world); return true; }
+
+    Equal(LifestreamTravelStep.ReturnToHub,
+        travel.Tick(now, LifestreamReadiness.Idle, source.Id, true, false, false, Request));
+    Equal(0, requests.Count);
+    Equal(LifestreamTravelStep.RequestAccepted,
+        travel.Tick(now.AddSeconds(1), LifestreamReadiness.Idle, source.Id, true, false, true, Request));
+    Equal(LifestreamTravelStep.WaitForArrival,
+        travel.Tick(now.AddSeconds(2), LifestreamReadiness.Idle, source.Id, true, false, true, Request));
+    Equal(LifestreamTravelStep.WaitForTravel,
+        travel.Tick(now.AddSeconds(3), LifestreamReadiness.Busy, destination.Id, true, false, true, Request));
+    Equal(LifestreamTravelStep.WaitForTravel,
+        travel.Tick(now.AddSeconds(4), LifestreamReadiness.Idle, destination.Id, true, true, true, Request));
+    Equal(LifestreamTravelStep.WaitForPlayer,
+        travel.Tick(now.AddSeconds(5), LifestreamReadiness.Idle, destination.Id, false, false, true, Request));
+    Equal(LifestreamTravelStep.Arrived,
+        travel.Tick(now.AddSeconds(6), LifestreamReadiness.Idle, destination.Id, true, false, true, Request));
+    False(travel.AwaitingArrival);
+    True(requests.SequenceEqual([to]));
+}
+
+static void SameWorldSkipsRequest()
+{
+    var now = TravelStart();
+    var world = World("Seraph");
+    var travel = new LifestreamTravel(world, now, TimeSpan.FromSeconds(90));
+    Equal(LifestreamTravelStep.Arrived, travel.Tick(now, LifestreamReadiness.Idle, world.Id,
+        true, false, true, _ => throw new InvalidOperationException("same-World travel requested")));
+    Equal(0, travel.Attempts);
+}
+
+static void RequiredLifestreamUnavailable()
+{
+    var now = TravelStart();
+    var source = World("Zalera");
+    foreach (var target in new[] { source, World("Midgardsormr") })
     {
-        Equal((VisitMenuAction.SelectLogicalDataCenter, desired),
-            WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, selected, [source], [source]));
-        Equal((VisitMenuAction.WaitForWorldList, -1),
-            WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, desired, [target], [source]));
+        var travel = new LifestreamTravel(target, now, TimeSpan.FromSeconds(90));
+        Equal(LifestreamTravelStep.DependencyUnavailable,
+            travel.Tick(now, LifestreamReadiness.Unavailable, source.Id, true, false, true,
+                _ => throw new InvalidOperationException("unavailable provider was called")));
+        Equal(0, travel.Attempts);
     }
-    VisitWorld?[] rows = target.LogicalDc == "Aether" ? [World("Siren"), target] : [target];
-    Equal((VisitMenuAction.SelectWorld, rows.Length - 1),
-        WorldVisitPolicy.ChooseRegionalMenu(source, home, target, dcSlots, dcSlots, desired, rows, rows));
-    True(WorldVisitPolicy.IsConfirmationFor($"Travel to {to}?", to));
-    Equal(VisitArrivalAction.Wait, WorldVisitPolicy.ObserveArrival(false, true, true, 12, 0, 90));
-    Equal(VisitArrivalAction.Arrived, WorldVisitPolicy.ObserveArrival(true, true, false, 14, 2, 90));
 }
 
-static void RegionalSelectorInitialization()
+static void LifestreamBusyWait()
 {
-    var home = World("Zalera");
+    var now = TravelStart();
+    var source = World("Zalera");
     var target = World("Midgardsormr");
-    var dcs = NaDcSlots();
-    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, [], -1, [target], [target]));
-    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, -1, [target], [target]));
-    Equal((VisitMenuAction.WaitForRegionalLayout, -1),
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, ["Aether", "", "Dynamis", "Primal"], 0, [target], [target]));
-    // Callback order comes from the live string slots, not the alphabetical sheet.
-    Equal((VisitMenuAction.SelectLogicalDataCenter, 2),
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, ["Crystal", "Primal", "Aether", "Dynamis"], 0, [], []));
+    var travel = new LifestreamTravel(target, now, TimeSpan.FromSeconds(90));
+    var calls = 0;
+    bool Request(string _) { calls++; return true; }
+    Equal(LifestreamTravelStep.WaitForTravel,
+        travel.Tick(now, LifestreamReadiness.Busy, source.Id, true, false, true, Request));
+    Equal(0, calls);
+    Equal(LifestreamTravelStep.RequestAccepted,
+        travel.Tick(now.AddSeconds(10), LifestreamReadiness.Idle, source.Id, true, false, true, Request));
+    Equal(LifestreamTravelStep.TravelStillBusyAfterTimeout,
+        travel.Tick(now.AddSeconds(130), LifestreamReadiness.Busy, source.Id, false, true, true, Request));
+    Equal(LifestreamTravelStep.Arrived,
+        travel.Tick(now.AddSeconds(132), LifestreamReadiness.Idle, target.Id, true, false, true, Request));
+    Equal(1, calls);
 }
 
-static void RegionalRenderedRefresh()
+static void LifestreamRejectionBounded()
 {
-    var home = World("Zalera");
+    var now = TravelStart();
+    var source = World("Zalera");
     var target = World("Midgardsormr");
-    var siren = World("Siren");
-    var dcs = NaDcSlots();
-    VisitMenuAction Choose(VisitWorld?[] slots, VisitWorld?[] rendered) =>
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, 0, slots, rendered).Action;
-    Equal(VisitMenuAction.WaitForWorldList, Choose([home, World("Balmung")], [home, World("Balmung")]));
-    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [target, home]));
-    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [siren, target]));
-    Equal(VisitMenuAction.WaitForWorldList, Choose([target, siren], [target, null]));
-    Equal(VisitMenuAction.WaitForWorldList, Choose([target, target], [target, target]));
-    Equal(VisitMenuAction.SelectWorld, Choose([target, siren], [target, siren]));
+    var travel = new LifestreamTravel(target, now, TimeSpan.FromSeconds(90));
+    var requests = 0;
+    bool Reject(string _) { requests++; return false; }
+    LifestreamTravelStep At(int seconds, LifestreamReadiness provider) =>
+        travel.Tick(now.AddSeconds(seconds), provider, source.Id, true, false, true, Reject);
+
+    Equal(LifestreamTravelStep.RequestRejected, At(0, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.WaitForTravel, At(1, LifestreamReadiness.Busy));
+    Equal(LifestreamTravelStep.WaitForPlayer, At(2, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.RequestRejected, At(3, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.WaitForTravel, At(6, LifestreamReadiness.Busy));
+    Equal(LifestreamTravelStep.Unresolved, At(7, LifestreamReadiness.Idle));
+    Equal(2, requests);
 }
 
-static void RegionalDestinationUnavailable()
+static void LifestreamMissingArrivalBounded()
+{
+    var now = TravelStart();
+    var target = World("Midgardsormr");
+    var wrong = World("Balmung");
+    var travel = new LifestreamTravel(target, now, TimeSpan.FromSeconds(90));
+    var requests = 0;
+    bool Request(string _) { requests++; return true; }
+    LifestreamTravelStep At(int seconds, LifestreamReadiness provider) =>
+        travel.Tick(now.AddSeconds(seconds), provider, wrong.Id, true, false, true, Request);
+
+    Equal(LifestreamTravelStep.RequestAccepted, At(0, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.TravelStillBusyAfterTimeout, At(91, LifestreamReadiness.Busy));
+    Equal(LifestreamTravelStep.RetryScheduled, At(92, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.WaitForPlayer, At(94, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.RequestAccepted, At(95, LifestreamReadiness.Idle));
+    Equal(LifestreamTravelStep.Unresolved, At(186, LifestreamReadiness.Idle));
+    Equal(2, requests);
+}
+
+static void LifestreamRetryThroughHub()
+{
+    var now = TravelStart();
+    var source = World("Zalera");
+    var travel = new LifestreamTravel(World("Midgardsormr"), now, TimeSpan.FromSeconds(90));
+    var requests = 0;
+    bool Request(string _) { requests++; return true; }
+    LifestreamTravelStep At(int seconds, bool hub) =>
+        travel.Tick(now.AddSeconds(seconds), LifestreamReadiness.Idle, source.Id, true, false, hub, Request);
+    Equal(LifestreamTravelStep.RequestAccepted, At(0, true));
+    Equal(LifestreamTravelStep.RetryScheduled, At(91, false));
+    Equal(LifestreamTravelStep.ReturnToHub, At(94, false));
+    travel.ResumeFromHub(now.AddSeconds(120));
+    Equal(LifestreamTravelStep.RequestAccepted, At(123, true));
+    Equal(2, requests);
+}
+
+static void KeepRegionalQueue()
 {
     var home = World("Zalera");
-    var target = World("Midgardsormr");
-    var siren = World("Siren");
-    var dcs = NaDcSlots();
-    Equal((VisitMenuAction.DestinationUnavailable, -1),
-        WorldVisitPolicy.ChooseRegionalMenu(home, home, target, dcs, dcs, 0, [siren], [siren]));
+    var current = home;
+    var queue = new Queue<HuntAlertSnapshot>(new[] { VisitAlert("Balmung", 1), VisitAlert("Midgardsormr", 1),
+        VisitAlert("Seraph", 1), VisitAlert("Leviathan", 1), VisitAlert("Zalera", 1), VisitAlert("Phoenix", 1) });
+    var requests = new List<string>();
+    var handoffs = new List<string>();
+    bool Request(string world) { requests.Add(world); return true; }
+    var now = TravelStart();
+    while (queue.TryDequeue(out var alert))
+    {
+        var target = World(alert.World);
+        if (!WorldVisitPolicy.CanVisit(current, home, target))
+            continue;
+        var pending = queue.ToArray();
+        var transfer = new LifestreamTravel(target, now, TimeSpan.FromSeconds(90));
+        Equal(LifestreamTravelStep.RequestAccepted,
+            transfer.Tick(now, LifestreamReadiness.Idle, current.Id, true, false, true, Request));
+        var step = transfer.Tick(now.AddSeconds(10), LifestreamReadiness.Idle, target.Id, true, false, true, Request);
+        Equal(LifestreamTravelStep.Arrived, step);
+        handoffs.Add(target.Name);
+        current = target;
+        True(pending.SequenceEqual(queue));
+    }
+    string[] route = ["Balmung", "Midgardsormr", "Seraph", "Leviathan", "Zalera"];
+    True(requests.SequenceEqual(route));
+    True(handoffs.SequenceEqual(route));
 }

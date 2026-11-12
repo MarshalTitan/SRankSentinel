@@ -23,12 +23,15 @@ internal sealed class VNavmeshIpc
     private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> pointOnFloor;
     private readonly ICallGateSubscriber<object> stop;
     private readonly IPluginLog log;
+    private readonly Func<bool> canStopMovement;
+    private bool issuedMovement;
     private string lastStopDiagnostic = string.Empty;
     private DateTime lastStopDiagnosticUtc = DateTime.MinValue;
 
-    public VNavmeshIpc(IDalamudPluginInterface pi, IPluginLog log)
+    public VNavmeshIpc(IDalamudPluginInterface pi, IPluginLog log, Func<bool> canStopMovement)
     {
         this.log = log;
+        this.canStopMovement = canStopMovement;
         navReady = pi.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
         moveCloseTo = pi.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
         moveTo = pi.GetIpcSubscriber<Vector3, bool, bool>("vnavmesh.SimpleMove.PathfindAndMoveTo");
@@ -53,13 +56,23 @@ internal sealed class VNavmeshIpc
 
     public bool MoveCloseToSafe(Vector3 destination, bool fly, float range)
     {
-        try { return moveCloseTo.InvokeFunc(destination, fly, range); }
+        try
+        {
+            var accepted = moveCloseTo.InvokeFunc(destination, fly, range);
+            issuedMovement |= accepted;
+            return accepted;
+        }
         catch { return false; }
     }
 
     public bool MoveToSafe(Vector3 destination, bool fly)
     {
-        try { return moveTo.InvokeFunc(destination, fly); }
+        try
+        {
+            var accepted = moveTo.InvokeFunc(destination, fly);
+            issuedMovement |= accepted;
+            return accepted;
+        }
         catch { return false; }
     }
 
@@ -91,6 +104,7 @@ internal sealed class VNavmeshIpc
         try
         {
             movePath.InvokeAction(waypoints, fly);
+            issuedMovement = true;
             return true;
         }
         catch
@@ -141,10 +155,18 @@ internal sealed class VNavmeshIpc
         catch { return null; }
     }
 
+    public void StopOwnedMovementSafe(string reason)
+    {
+        if (issuedMovement)
+            StopSafe(reason);
+    }
+
     public void StopSafe(string reason = "unspecified", [CallerMemberName] string caller = "unknown")
     {
         try
         {
+            if (!canStopMovement())
+                return;
             var diagnostic = $"{caller}:{reason}";
             var now = DateTime.UtcNow;
             if (!string.Equals(lastStopDiagnostic, diagnostic, StringComparison.Ordinal) ||
@@ -155,6 +177,7 @@ internal sealed class VNavmeshIpc
                 lastStopDiagnosticUtc = now;
             }
             stop.InvokeAction();
+            issuedMovement = false;
         }
         catch { }
     }

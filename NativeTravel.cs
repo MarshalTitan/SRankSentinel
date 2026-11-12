@@ -19,7 +19,6 @@ internal sealed partial class NativeTravel(
     IDataManager data)
 {
     public const uint UldahAetheryteId = 9;
-    public static readonly Vector3 UldahAetherytePosition = new(-144.52f, -1.36f, -169.67f);
     public bool IsBetweenAreas =>
         condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51];
 
@@ -152,9 +151,6 @@ internal sealed partial class NativeTravel(
         return false;
     }
 
-    public unsafe bool SelectWorldVisitMenu() =>
-        TrySelectStringEntry(text => text.Contains("Visit Another World", StringComparison.OrdinalIgnoreCase));
-
     public unsafe bool SelectInstanceTravelMenu() =>
         TrySelectStringEntry(text =>
             text.Contains("Travel to Instanced Area", StringComparison.OrdinalIgnoreCase) ||
@@ -205,7 +201,7 @@ internal sealed partial class NativeTravel(
         return true;
     }
 
-    public unsafe bool WorldSelectionIsOpen() => IsReady(gameGui.GetAddonByName<AtkUnitBase>("WorldTravelSelect"));
+    // World travel is owned by Lifestream; only local interaction menus are handled here.
 
     private unsafe bool TrySelectStringEntry(Func<string, bool> predicate)
     {

@@ -228,9 +228,116 @@ const reviewedWorldVisitPatches = {
     ]
   ]
 };
+// Reverse only the reviewed Lifestream handoff and ownership changes before checking the hunt baseline.
+const reviewedLifestreamPatches = {
+  "Plugin.cs": [
+    [
+      "        WorldVisit,\n        TeleportToTerritory,",
+      "        WorldVisit,\n        SelectLogicalDataCenter,\n        SelectWorld,\n        ConfirmWorldVisit,\n        WaitForWorld,\n        TeleportToTerritory,"
+    ],
+    [
+      "        state = next;",
+      "        if (IsWorldVisitState(previous) && !IsWorldVisitState(next))\n            ReleaseWorldVisitMenus();\n        state = next;"
+    ],
+    [
+      "                BeginLifestreamWorldVisit(now);\n                return;\n            }\n\n            worldTravel = null;\n            log.Information(\"Travel state entered for {Mark}: {World} -> territory",
+      "                BeginRegionalWorldVisit(now);\n                return;\n            }\n\n            log.Information(\"Travel state entered for {Mark}: {World} -> territory"
+    ],
+    [
+      "            case SentinelState.TeleportToTerritory:",
+      "            case SentinelState.WorldVisit:\n                TickWorldVisit(now);\n                return;\n            case SentinelState.SelectLogicalDataCenter:\n                TickSelectLogicalDataCenter(now);\n                return;\n            case SentinelState.SelectWorld:\n                TickSelectWorld(now);\n                return;\n            case SentinelState.ConfirmWorldVisit:\n                TickConfirmWorldVisit(now);\n                return;\n            case SentinelState.WaitForWorld:\n                TickWaitForWorld(now);\n                return;\n            case SentinelState.TeleportToTerritory:"
+    ],
+    [
+      "    private void ClearCurrent()\n    {\n        worldTravel = null;\n        ResetInstanceRangeRecovery();",
+      "    private void ClearCurrent()\n    {\n        ResetInstanceRangeRecovery();"
+    ],
+    [
+      "    private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n        worldTravel = null;\n        if",
+      "    private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n        if"
+    ],
+    [
+      "        var readiness = lifestream.ReadReadiness();\n        if (current is not null || state != SentinelState.Idle || pendingAlerts.Count > 0 ||\n            readiness != LifestreamReadiness.Idle)\n        {\n            EnqueuePersistent(incoming);\n            status = readiness == LifestreamReadiness.Unavailable ? LifestreamRequiredMessage :\n                $\"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting\";",
+      "        if (current is not null || state != SentinelState.Idle)\n        {\n            EnqueuePersistent(incoming);\n            status = $\"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting\";"
+    ],
+    [
+      "            RestorePersistentQueue();\n            log.Information(",
+      "            RestorePersistentQueue();\n            if (current is null && TryDequeueNextValid(out var restored))\n                StartAlert(restored, \"restored persistent queue on the main framework thread\");\n            log.Information("
+    ],
+    [
+      "            if (current is null && state == SentinelState.Idle)\n            {\n                if (pendingAlerts.Count != 0 && TryDequeueNextValid(out var pending))\n                    StartAlert(pending, \"next eligible queued alert\");\n                return;\n            }\n            Tick(now);",
+      "            if (current is null && state == SentinelState.Idle)\n                return;\n            Tick(now);"
+    ],
+    [
+      "            if (!config.Enabled || !CanRunHuntTick(now))\n                return;\n            travel.RefreshCurrentDataCenter();",
+      "            if (!config.Enabled)\n                return;\n            travel.RefreshCurrentDataCenter();"
+    ],
+    [
+      "    private readonly LifestreamIpc lifestream;\n    private readonly VNavmeshIpc vnav;",
+      "    private readonly VNavmeshIpc vnav;"
+    ],
+    [
+      "        lifestream = new LifestreamIpc(pi, pluginLog);\n        vnav = new VNavmeshIpc(pi, pluginLog, CanStopSentinelMovement);",
+      "        vnav = new VNavmeshIpc(pi, pluginLog);"
+    ]
+  ],
+  "NativeTravel.cs": [
+    [
+      "    // World travel is owned by Lifestream; only local interaction menus are handled here.",
+      "    public unsafe bool WorldSelectionIsOpen() => IsReady(gameGui.GetAddonByName<AtkUnitBase>(\"WorldTravelSelect\"));"
+    ],
+    [
+      "    public unsafe bool SelectInstanceTravelMenu() =>",
+      "    public unsafe bool SelectWorldVisitMenu() =>\n        TrySelectStringEntry(text => text.Contains(\"Visit Another World\", StringComparison.OrdinalIgnoreCase));\n\n    public unsafe bool SelectInstanceTravelMenu() =>"
+    ],
+    [
+      "    public const uint UldahAetheryteId = 9;\n    public bool IsBetweenAreas =>",
+      "    public const uint UldahAetheryteId = 9;\n    public static readonly Vector3 UldahAetherytePosition = new(-144.52f, -1.36f, -169.67f);\n    public bool IsBetweenAreas =>"
+    ]
+  ],
+  "VNavmeshIpc.cs": [
+    [
+      "            stop.InvokeAction();\n            issuedMovement = false;\n        }",
+      "            stop.InvokeAction();\n        }"
+    ],
+    [
+      "    public void StopOwnedMovementSafe(string reason)\n    {\n        if (issuedMovement)\n            StopSafe(reason);\n    }\n\n    public void StopSafe(string reason = \"unspecified\", [CallerMemberName] string caller = \"unknown\")\n    {\n        try\n        {\n            if (!canStopMovement())\n                return;\n            var diagnostic",
+      "    public void StopSafe(string reason = \"unspecified\", [CallerMemberName] string caller = \"unknown\")\n    {\n        try\n        {\n            var diagnostic"
+    ],
+    [
+      "            movePath.InvokeAction(waypoints, fly);\n            issuedMovement = true;\n            return true;",
+      "            movePath.InvokeAction(waypoints, fly);\n            return true;"
+    ],
+    [
+      "        try\n        {\n            var accepted = moveTo.InvokeFunc(destination, fly);\n            issuedMovement |= accepted;\n            return accepted;\n        }",
+      "        try { return moveTo.InvokeFunc(destination, fly); }"
+    ],
+    [
+      "        try\n        {\n            var accepted = moveCloseTo.InvokeFunc(destination, fly, range);\n            issuedMovement |= accepted;\n            return accepted;\n        }",
+      "        try { return moveCloseTo.InvokeFunc(destination, fly, range); }"
+    ],
+    [
+      "    public VNavmeshIpc(IDalamudPluginInterface pi, IPluginLog log, Func<bool> canStopMovement)\n    {\n        this.log = log;\n        this.canStopMovement = canStopMovement;",
+      "    public VNavmeshIpc(IDalamudPluginInterface pi, IPluginLog log)\n    {\n        this.log = log;"
+    ],
+    [
+      "    private readonly IPluginLog log;\n    private readonly Func<bool> canStopMovement;\n    private bool issuedMovement;\n    private string lastStopDiagnostic",
+      "    private readonly IPluginLog log;\n    private string lastStopDiagnostic"
+    ]
+  ],
+  "LifestreamIpc.cs": [
+    [
+      "using Dalamud.Plugin;\nusing Dalamud.Plugin.Ipc;\nusing Dalamud.Plugin.Services;\n\nnamespace SRankSentinel;\n\ninternal sealed class LifestreamIpc(IDalamudPluginInterface pi, IPluginLog log)\n{\n    private readonly ICallGateSubscriber<bool> isBusy = pi.GetIpcSubscriber<bool>(\"Lifestream.IsBusy\");\n    private readonly ICallGateSubscriber<string, bool> changeWorld =\n        pi.GetIpcSubscriber<string, bool>(\"Lifestream.ChangeWorld\");\n\n    public bool HasRequiredIpc => isBusy.HasFunction && changeWorld.HasFunction;\n\n    public LifestreamReadiness ReadReadiness()\n    {\n        if (!HasRequiredIpc)\n            return LifestreamReadiness.Unavailable;\n        try { return isBusy.InvokeFunc() ? LifestreamReadiness.Busy : LifestreamReadiness.Idle; }\n        catch { return LifestreamReadiness.Unavailable; }\n    }\n\n    public bool TryChangeWorld(string world)\n    {\n        try { return changeWorld.InvokeFunc(world); }\n        catch (Exception ex)\n        {\n            log.Warning(ex, \"Lifestream.ChangeWorld IPC failed for {World}\", world);\n            return false;\n        }\n    }\n}\n",
+      "using Dalamud.Plugin;\nusing Dalamud.Plugin.Ipc;\n\nnamespace SRankSentinel;\n\ninternal sealed class LifestreamIpc\n{\n    private const uint UldahAetheryteId = 9;\n\n    private readonly ICallGateSubscriber<bool> isBusy;\n    private readonly ICallGateSubscriber<string, bool> changeWorld;\n    private readonly ICallGateSubscriber<uint, byte, bool> teleport;\n\n    public LifestreamIpc(IDalamudPluginInterface pi)\n    {\n        isBusy = pi.GetIpcSubscriber<bool>(\"Lifestream.IsBusy\");\n        changeWorld = pi.GetIpcSubscriber<string, bool>(\"Lifestream.ChangeWorld\");\n        teleport = pi.GetIpcSubscriber<uint, byte, bool>(\"Lifestream.Teleport\");\n    }\n\n    public bool IsBusySafe()\n    {\n        try { return isBusy.InvokeFunc(); }\n        catch { return false; }\n    }\n\n    public bool TeleportToUldahSafe()\n        => TeleportSafe(UldahAetheryteId);\n\n    public bool ChangeWorldSafe(string world)\n    {\n        try { return changeWorld.InvokeFunc(world); }\n        catch { return false; }\n    }\n\n    public bool TeleportSafe(uint aetheryteId)\n    {\n        try { return teleport.InvokeFunc(aetheryteId, 0); }\n        catch { return false; }\n    }\n}\n"
+    ]
+  ]
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedLifestreamPatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated Lifestream handoff edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedWorldVisitPatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated regional travel edit: ${path}`);
     source = source.replace(change, original);
