@@ -3,16 +3,16 @@ using Dalamud.Plugin;
 
 namespace SRankSentinel;
 
-internal sealed record CompanionPlugin(string Name, string[] InternalNames, string Role, string Setup);
+internal sealed record CompanionPlugin(string Name, string[] InternalNames, string Role, string Setup, bool Required = false);
 
 internal static class CompanionPlugins
 {
     internal static readonly CompanionPlugin[] All =
     [
         new("vnavmesh", ["vnavmesh"], "Required for automatic movement",
-            "Enable vnavmesh. SRankSentinel requests navigation when needed."),
-        new("Lifestream", ["Lifestream"], "Travel companion",
-            "Enable if you use it. SRankSentinel currently uses native World Visit and teleport."),
+            "Enable vnavmesh. SRankSentinel requests navigation when needed.", Required: true),
+        new("Lifestream", ["Lifestream"], "Required for World travel",
+            "Install or enable Lifestream for World travel. Hunts pause while it is unavailable.", Required: true),
         new("HuntAlerts", ["HuntAlerts"], "S-rank alert provider",
             "Enable S-rank announcements for your data center. Keep at least one alert provider enabled."),
         new("Sonar", ["SonarPlugin", "Sonar"], "S-rank alert provider",

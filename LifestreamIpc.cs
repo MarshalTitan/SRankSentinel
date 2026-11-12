@@ -1,41 +1,32 @@
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
+using Dalamud.Plugin.Services;
 
 namespace SRankSentinel;
 
-internal sealed class LifestreamIpc
+internal sealed class LifestreamIpc(IDalamudPluginInterface pi, IPluginLog log)
 {
-    private const uint UldahAetheryteId = 9;
+    private readonly ICallGateSubscriber<bool> isBusy = pi.GetIpcSubscriber<bool>("Lifestream.IsBusy");
+    private readonly ICallGateSubscriber<string, bool> changeWorld =
+        pi.GetIpcSubscriber<string, bool>("Lifestream.ChangeWorld");
 
-    private readonly ICallGateSubscriber<bool> isBusy;
-    private readonly ICallGateSubscriber<string, bool> changeWorld;
-    private readonly ICallGateSubscriber<uint, byte, bool> teleport;
+    public bool HasRequiredIpc => isBusy.HasFunction && changeWorld.HasFunction;
 
-    public LifestreamIpc(IDalamudPluginInterface pi)
+    public LifestreamReadiness ReadReadiness()
     {
-        isBusy = pi.GetIpcSubscriber<bool>("Lifestream.IsBusy");
-        changeWorld = pi.GetIpcSubscriber<string, bool>("Lifestream.ChangeWorld");
-        teleport = pi.GetIpcSubscriber<uint, byte, bool>("Lifestream.Teleport");
+        if (!HasRequiredIpc)
+            return LifestreamReadiness.Unavailable;
+        try { return isBusy.InvokeFunc() ? LifestreamReadiness.Busy : LifestreamReadiness.Idle; }
+        catch { return LifestreamReadiness.Unavailable; }
     }
 
-    public bool IsBusySafe()
-    {
-        try { return isBusy.InvokeFunc(); }
-        catch { return false; }
-    }
-
-    public bool TeleportToUldahSafe()
-        => TeleportSafe(UldahAetheryteId);
-
-    public bool ChangeWorldSafe(string world)
+    public bool TryChangeWorld(string world)
     {
         try { return changeWorld.InvokeFunc(world); }
-        catch { return false; }
-    }
-
-    public bool TeleportSafe(uint aetheryteId)
-    {
-        try { return teleport.InvokeFunc(aetheryteId, 0); }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Lifestream.ChangeWorld IPC failed for {World}", world);
+            return false;
+        }
     }
 }

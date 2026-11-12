@@ -25,11 +25,13 @@ public sealed partial class Plugin
         }
         var installed = pi?.InstalledPlugins?.ToArray() ?? [];
         var movementReady = CompanionPlugins.Find(installed, CompanionPlugins.All[0])?.IsLoaded == true;
+        var worldTravelReady = lifestream?.HasRequiredIpc == true;
         var alertsReady = CompanionPlugins.All.Skip(2).Any(companion => CompanionPlugins.Find(installed, companion)?.IsLoaded == true);
         ImGui.PushTextWrapPos(0f);
         ImGui.TextColored(SentinelModernStatusPill.ResolveColour(new("Readiness",
-            movementReady && alertsReady ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Warning)),
-            movementReady && alertsReady ? "Movement and S-rank alerts are ready." :
+            movementReady && worldTravelReady && alertsReady ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Warning)),
+            movementReady && worldTravelReady && alertsReady ? "Movement, World travel, and S-rank alerts are ready." :
+                !worldTravelReady ? LifestreamRequiredMessage :
                 !movementReady ? "Enable vnavmesh for automatic movement." : "Enable HuntAlerts or Sonar for S-rank alerts.");
         ImGui.PopTextWrapPos();
         ImGui.Spacing();
@@ -41,7 +43,7 @@ public sealed partial class Plugin
         }
         if (CompanionButton("Installer", "Open Plugin Installer", 180f))
             pi?.OpenPluginInstallerTo();
-        ImGui.TextWrapped("Lifestream is optional. HuntAlerts and Sonar are alternative alert sources.");
+        ImGui.TextWrapped("Lifestream is required for automated hunts. HuntAlerts and Sonar are alternative alert sources.");
         ImGui.TextWrapped("Use Installer to install or update a companion. Enable S-rank announcements and map links for your data center.");
         if (companionEnableStatus is not null) ImGui.TextWrapped(companionEnableStatus);
     }
@@ -52,8 +54,8 @@ public sealed partial class Plugin
         var loaded = plugin?.IsLoaded == true;
         var colour = SentinelModernStatusPill.ResolveColour(new("Plugin", loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error));
         var requirement = new SentinelModernStatusPillOptions(
-            companion.Name == "vnavmesh" ? "REQUIRED" : companion.Name == "Lifestream" ? "OPTIONAL" : "ALERT PROVIDER",
-            companion.Name == "Lifestream" ? SentinelModernPillTone.Neutral : SentinelModernPillTone.Accent);
+            companion.Required ? "REQUIRED" : "ALERT PROVIDER",
+            SentinelModernPillTone.Accent);
         var controlWidth = (loaded && !plugin!.HasConfigUi ? 110f : 182f) * scale;
         // Consumer content uses native table columns; Core still owns the card, tint, pills, and controls.
         var available = ImGui.GetContentRegionAvail().X - (24f + 28f) * scale;

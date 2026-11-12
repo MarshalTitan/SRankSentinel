@@ -121,6 +121,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private readonly IDataManager data;
     private readonly IFramework framework;
     private readonly IPluginLog log;
+    private readonly LifestreamIpc lifestream;
     private readonly VNavmeshIpc vnav;
     private readonly NativeTravel travel;
     private readonly CombatController combat;
@@ -343,7 +344,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pi);
-        vnav = new VNavmeshIpc(pi, pluginLog);
+        lifestream = new LifestreamIpc(pi, pluginLog);
+        vnav = new VNavmeshIpc(pi, pluginLog, CanStopSentinelMovement);
         travel = new NativeTravel(gameGui, objectTable, targetManager, condition, dataManager);
         combat = new CombatController(gameGui, condition, objectTable, targetManager);
         faloop = new FaloopClient(pluginLog);
@@ -1418,10 +1420,13 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         }
 
-        if (current is not null || state != SentinelState.Idle)
+        var readiness = lifestream.ReadReadiness();
+        if (current is not null || state != SentinelState.Idle || pendingAlerts.Count > 0 ||
+            readiness != LifestreamReadiness.Idle)
         {
             EnqueuePersistent(incoming);
-            status = $"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting";
+            status = readiness == LifestreamReadiness.Unavailable ? LifestreamRequiredMessage :
+                $"Queued {incoming.CreatureName}; {pendingAlerts.Count} S rank(s) waiting";
             log.Information("Eligible alert queued without replacing active hunt: {Mark} on {World}; {Count} pending",
                 incoming.CreatureName, incoming.World, pendingAlerts.Count);
             return;
@@ -1432,6 +1437,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartAlert(HuntAlertSnapshot alert, string source)
     {
+        worldTravel = null;
         if (HuntCatalog.IsAnySsName(alert.CreatureName) &&
             HuntCatalog.TryGetSsStagingLocation(alert.TerritoryId, out var ssLocation))
             alert = alert with { MapX = ssLocation.MapX, MapY = ssLocation.MapY };
@@ -1732,7 +1738,7 @@ public sealed partial class Plugin : IDalamudPlugin
         {
             RestorePersistentQueueOnFrameworkThread();
             CompleteFaloopLoginIfReady();
-            if (!config.Enabled)
+            if (!config.Enabled || !CanRunHuntTick(now))
                 return;
             travel.RefreshCurrentDataCenter();
             if (config.EnableFaloop)
@@ -1744,7 +1750,11 @@ public sealed partial class Plugin : IDalamudPlugin
                     automaticFaloopReauthenticationAttempted = false;
             }
             if (current is null && state == SentinelState.Idle)
+            {
+                if (pendingAlerts.Count != 0 && TryDequeueNextValid(out var pending))
+                    StartAlert(pending, "next eligible queued alert");
                 return;
+            }
             Tick(now);
         }
         catch (Exception ex)
@@ -1779,8 +1789,6 @@ public sealed partial class Plugin : IDalamudPlugin
         try
         {
             RestorePersistentQueue();
-            if (current is null && TryDequeueNextValid(out var restored))
-                StartAlert(restored, "restored persistent queue on the main framework thread");
             log.Information(
                 "Persistent hunt queue restored on the main framework thread: {Pending} queued hunt(s)",
                 pendingAlerts.Count);
@@ -1861,21 +1869,6 @@ public sealed partial class Plugin : IDalamudPlugin
         {
             case SentinelState.ResetToUldah:
                 TickResetToUldah(now);
-                return;
-            case SentinelState.WorldVisit:
-                TickWorldVisit(now);
-                return;
-            case SentinelState.SelectLogicalDataCenter:
-                TickSelectLogicalDataCenter(now);
-                return;
-            case SentinelState.SelectWorld:
-                TickSelectWorld(now);
-                return;
-            case SentinelState.ConfirmWorldVisit:
-                TickConfirmWorldVisit(now);
-                return;
-            case SentinelState.WaitForWorld:
-                TickWaitForWorld(now);
                 return;
             case SentinelState.TeleportToTerritory:
                 TickTeleportToTerritory(now);
@@ -2113,10 +2106,11 @@ public sealed partial class Plugin : IDalamudPlugin
             if (!string.IsNullOrWhiteSpace(current.World) &&
                 !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
             {
-                BeginRegionalWorldVisit(now);
+                BeginLifestreamWorldVisit(now);
                 return;
             }
 
+            worldTravel = null;
             log.Information("Travel state entered for {Mark}: {World} -> territory {Territory}, instance {Instance}",
                 current.CreatureName, current.World, current.TerritoryId, current.Instance);
             SetState(SentinelState.TeleportToTerritory,
@@ -6886,6 +6880,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ClearCurrent()
     {
+        worldTravel = null;
         ResetInstanceRangeRecovery();
         vnav.StopSafe();
         ResetParkingFacingSettleTracking();
@@ -8124,8 +8119,6 @@ public sealed partial class Plugin : IDalamudPlugin
 
         if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))
             ResetInstanceRangeRecovery();
-        if (IsWorldVisitState(previous) && !IsWorldVisitState(next))
-            ReleaseWorldVisitMenus();
         state = next;
         stateSinceUtc = DateTime.UtcNow;
         status = message;
@@ -8190,10 +8183,6 @@ public sealed partial class Plugin : IDalamudPlugin
         Idle,
         ResetToUldah,
         WorldVisit,
-        SelectLogicalDataCenter,
-        SelectWorld,
-        ConfirmWorldVisit,
-        WaitForWorld,
         TeleportToTerritory,
         WaitForTerritory,
         OpenHinterlandsGateway,
