@@ -5,6 +5,7 @@ public sealed partial class Plugin
     private int worldVisitAttempts;
     private DateTime worldVisitSetupDeadlineUtc;
     private DateTime? worldVisitLastBusyUtc;
+    private VisitMenuAction lastWorldVisitMenuAction;
     private string ownedWorldVisitDestination = string.Empty;
     private int playerReadyInstance = -1;
     private readonly HashSet<(string World, uint Territory)> observedSingleInstances = new();
@@ -23,6 +24,7 @@ public sealed partial class Plugin
     private void BeginWorldVisitAttempt(DateTime earliestAction)
     {
         worldVisitLastBusyUtc = null;
+        lastWorldVisitMenuAction = VisitMenuAction.WaitForSelector;
         worldVisitSetupDeadlineUtc = earliestAction.AddSeconds(Math.Clamp(config.TravelTimeoutSeconds, 15, 30));
         nextActionUtc = earliestAction;
         var origin = travel.CurrentVisitWorld;
@@ -113,7 +115,13 @@ public sealed partial class Plugin
             return;
         if (now >= worldVisitSetupDeadlineUtc)
         {
-            WorldVisitAttemptFailed(now, status);
+            LogWorldVisitMenuLayout(destination);
+            if (lastWorldVisitMenuAction == VisitMenuAction.WaitForRegionalLayout)
+                WorldVisitAttemptFailed(now, $"native World Visit UI layout could not be read: {status}", false);
+            else if (lastWorldVisitMenuAction is VisitMenuAction.SelectLogicalDataCenter or VisitMenuAction.WaitForWorldList)
+                WorldVisitAttemptFailed(now, $"native World Visit UI did not refresh: {status}");
+            else
+                WorldVisitAttemptFailed(now, status);
             return;
         }
         if (now < nextActionUtc || travel.IsBusy)
@@ -124,9 +132,11 @@ public sealed partial class Plugin
         catch (Exception ex)
         {
             log.Warning(ex, "Native World Visit menu could not be read safely");
-            WorldVisitAttemptFailed(now, "native menu read failed");
+            LogWorldVisitMenuLayout(destination);
+            WorldVisitAttemptFailed(now, "native World Visit UI layout could not be read", false);
             return;
         }
+        lastWorldVisitMenuAction = step.Action;
         status = step.Detail;
         switch (step.Action)
         {
@@ -153,6 +163,12 @@ public sealed partial class Plugin
                 SetState(SentinelState.ConfirmWorldVisit, $"Confirming World Visit to {destination}");
                 return;
         }
+    }
+
+    private void LogWorldVisitMenuLayout(string destination)
+    {
+        try { log.Warning("World Visit UI before close: {Layout}", travel.DescribeWorldVisitMenu(destination)); }
+        catch (Exception ex) { log.Warning(ex, "World Visit UI diagnostic read failed for {World}", destination); }
     }
 
     private void TickConfirmWorldVisit(DateTime now)
