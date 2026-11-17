@@ -2,6 +2,16 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("normal tag approach keeps the original direct ground route", TagGroundRouteTests.NormalDirect),
+    ("repeated tag stalls and early stops trigger alternate ground search", TagGroundRouteTests.RepeatedDirectFailure),
+    ("an unreachable tag candidate yields to the shortest reachable alternative", TagGroundRouteTests.UnreachableCandidate),
+    ("validated tag route goes around a wall and keeps the checkpoint until handled confirmation", TagGroundRouteTests.ObstacleAndCheckpoint),
+    ("stalled tag approach endpoints are not reused in the checkpoint", TagGroundRouteTests.FailedCandidateNotReused),
+    ("manual reposition rebuilds tag paths and ignores an old async result", TagGroundRouteTests.ManualReposition),
+    ("no valid alternate tag route holds the live hunt with bounded diagnostics", TagGroundRouteTests.NoValidRouteHolds),
+    ("mark death or lost combat context stops alternate tag movement", TagGroundRouteTests.DeathAndContextPreempt),
+    ("tag paths reject incomplete endpoints, roofs and excessive detours", TagGroundRouteTests.PathValidation),
+    ("a timed-out ground query neither spams work nor moves on stale completion", TagGroundRouteTests.QueryTimeoutIsBounded),
     ("death before Lifestream submission discards the target without aborting unrelated tasks", WorldVisitDeathBeforeRequest),
     ("death before native submission aborts Sentinel's accepted Lifestream request", WorldVisitDeathBeforeServerQueue),
     ("confirmed destination death in the server queue aborts then cancels once and waits for both owners", WorldVisitDeathInQueue),

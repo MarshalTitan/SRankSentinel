@@ -586,9 +586,34 @@ const reviewedCheckpointPatches = {
     ]
   ]
 };
+// Reverse only the reviewed ground tag recovery before the established hunt baseline.
+const reviewedTagGroundPatches = {
+  "Plugin.cs": [
+    [
+      "(now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds &&\n            !HoldLiveTagGroundRecovery(mark))",
+      "(now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds)"
+    ],
+    [
+      "        if (clearance <= TagApproachClearance + 1f)\n        {\n            TickTagGroundApproach(mark, clearance, now);\n            vnav.StopSafe();",
+      "        if (clearance <= TagApproachClearance + 1f)\n        {\n            vnav.StopSafe();"
+    ],
+    [
+      "        TickTagGroundApproach(mark, clearance, now);\n    }\n",
+      "        var routeRunning = vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe();\n        if (routeRunning && tagLastProgressUtc != DateTime.MinValue &&\n            (now - tagLastProgressUtc).TotalSeconds >= TagRouteStallSeconds)\n        {\n            vnav.StopSafe(\"tag approach stalled without meaningful progress\");\n            tagRecoveryFailures++;\n            tagLastProgressUtc = now;\n            nextActionUtc = now;\n            log.Warning(\n                \"Tag-required ground approach stalled; retrying without clearing the latch (failure {Failure}, HP={Hp:0.0}%)\",\n                tagRecoveryFailures, CombatController.HpPercent(mark));\n            routeRunning = false;\n        }\n\n        if (!routeRunning && now >= nextActionUtc)\n        {\n            var desiredCenterRange = mark.HitboxRadius +\n                                     (objects.LocalPlayer?.HitboxRadius ?? 0f) +\n                                     TagApproachClearance;\n            if (!vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))\n            {\n                tagRecoveryFailures++;\n                nextActionUtc = now.AddSeconds(1);\n                status = $\"Tag-required approach could not start; retry {tagRecoveryFailures} remains latched while the mark is alive\";\n                return;\n            }\n\n            tagLastProgressPosition = PlayerPosition();\n            tagBestClearance = clearance;\n            tagLastProgressUtc = now;\n        }\n\n        status = $\"Tag required: approaching {mark.Name.TextValue} for one confirmed ranged action ({clearance:0.0}y clear)\";\n    }\n"
+    ],
+    [
+      "    private void ResetTagRecoveryTracking()\n    {\n        tagGroundRoute.Reset();\n        tagRequiredSinceUtc",
+      "    private void ResetTagRecoveryTracking()\n    {\n        tagRequiredSinceUtc"
+    ]
+  ]
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedTagGroundPatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated tag ground recovery edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedWorldVisitDeathPatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated World Visit death cancellation edit: ${path}`);
     source = source.replace(change, original);
