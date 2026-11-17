@@ -90,16 +90,28 @@ internal static class TagGroundRouteTests
 
     internal static void ManualReposition()
     {
+        var direct = new Fixture();
+        direct.Tick();
+        direct.Tick(8);
+        direct.Frame = direct.At(new(-10, 0, 15));
+        Check(direct.Tick(0.25) == TagGroundRouteStep.Searching && direct.Nav.DirectCalls == 1,
+            "after a real failure, manual progress must not restart the stale direct route");
+
         var f = new Fixture();
         f.Escalate();
         f.SearchUntilFollow();
         var before = f.Nav.Requests.Count;
         var reposition = new Vector3(-10, 0, 15);
+        f.Nav.Path = (from, to) => f.Nav.Requests.Count == before + 1
+            ? [from, new(-40, 0, 0), .. AroundWall(new(-40, 0, 0), to).Skip(1)]
+            : AroundWall(from, to);
         f.Frame = f.At(reposition);
         Check(f.Tick(0.25) == TagGroundRouteStep.Searching && !f.Nav.RouteRunning,
             "manual move must invalidate and stop the old route");
         f.SearchUntilFollow();
         Check(f.Nav.Requests.Skip(before).All(r => r.From == reposition), "replan from actual current position");
+        Check(!f.Nav.Follows.Last().Contains(new Vector3(-40, 0, 0)),
+            "a new endpoint must not route the player back through the known wall-side stall");
 
         var async = new Fixture();
         var pending = new TaskCompletionSource<List<Vector3>>();

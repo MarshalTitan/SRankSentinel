@@ -29,6 +29,7 @@ internal sealed class TagGroundRouteRecovery
     internal const double RetrySeconds = 10;
     private const float RepositionDistance = 6f;
     private readonly List<Vector3> failed = [];
+    private readonly List<Vector3> stalledPositions = [];
     private readonly Queue<Vector3> candidates = new();
     private readonly List<(Vector3 Point, List<Vector3> Path, float Length)> valid = [];
     private Task<List<Vector3>>? query;
@@ -56,6 +57,7 @@ internal sealed class TagGroundRouteRecovery
     {
         Suspend();
         failed.Clear();
+        stalledPositions.Clear();
         sampled = false;
         DirectFailures = 0;
         nextSearch = DateTime.MinValue;
@@ -93,6 +95,15 @@ internal sealed class TagGroundRouteRecovery
             return TagGroundRouteStep.InRange;
         }
 
+        if (!AlternatesActive && DirectFailures > 0 &&
+            stalledPositions.All(point => Vector3.Distance(frame.Player, point) >= RepositionDistance))
+        {
+            nav.Stop();
+            directSubmitted = false;
+            DirectFailures = DirectFailureLimit;
+            nextSearch = now;
+            nav.Report($"player repositioned after a failed direct route; replacing the stale approach from {frame.Player}");
+        }
         if (!AlternatesActive)
             return TickDirect(now, frame, nav);
 
@@ -120,6 +131,7 @@ internal sealed class TagGroundRouteRecovery
             {
                 nav.Stop();
                 RememberFailure(selected.Point);
+                RememberStall(frame.Player);
                 nav.Report($"alternate tag route stalled/stopped early: point={selected.Point}, pathLength={selected.Length:0.0}, player={frame.Player}, mark={frame.Mark}, clearance={frame.Clearance:0.0}");
                 Suspend();
                 nextSearch = now.AddSeconds(1);
@@ -149,7 +161,7 @@ internal sealed class TagGroundRouteRecovery
             var path = query.IsCompletedSuccessfully && !queryTimeoutReported ? query.Result : null;
             _ = query.Exception;
             query = null;
-            if (ValidatePath(origin, queryPoint, frame.Mark, frame.Hitboxes, path, out var length, out var reason))
+            if (ValidateCandidatePath(queryPoint, frame, path, out var length, out var reason))
             {
                 valid.Add((queryPoint, path!, length));
                 nav.Report($"candidate ground path validated: point={queryPoint}, length={length:0.0}");
@@ -180,8 +192,7 @@ internal sealed class TagGroundRouteRecovery
         }
         foreach (var candidate in valid.OrderBy(route => route.Length))
         {
-            if (!ValidatePath(origin, candidate.Point, frame.Mark, frame.Hitboxes, candidate.Path,
-                    out _, out var reason))
+            if (!ValidateCandidatePath(candidate.Point, frame, candidate.Path, out _, out var reason))
             {
                 nav.Report($"candidate rejected before movement: point={candidate.Point}, reason={reason}");
                 continue;
@@ -218,6 +229,7 @@ internal sealed class TagGroundRouteRecovery
                 return TagGroundRouteStep.Direct;
             nav.Stop();
             RememberFailure(NearSidePoint(frame));
+            RememberStall(frame.Player);
             DirectFailures++;
             directSubmitted = false;
             nextSearch = now.AddSeconds(1);
@@ -235,6 +247,7 @@ internal sealed class TagGroundRouteRecovery
         }
         DirectFailures++;
         RememberFailure(NearSidePoint(frame));
+        RememberStall(frame.Player);
         nextSearch = now.AddSeconds(1);
         nav.Report($"direct tag approach rejected: failure={DirectFailures}, player={frame.Player}, destination={frame.Mark}");
         return TagGroundRouteStep.Retry;
@@ -296,6 +309,28 @@ internal sealed class TagGroundRouteRecovery
     {
         if (!failed.Any(bad => HorizontalDistance(point, bad) < 1f))
             failed.Add(point);
+    }
+
+    private void RememberStall(Vector3 player)
+    {
+        if (!stalledPositions.Any(point => Vector3.Distance(point, player) < 2f))
+            stalledPositions.Add(player);
+    }
+
+    private bool ValidateCandidatePath(Vector3 candidate, TagGroundRouteFrame frame, IReadOnlyList<Vector3>? path,
+        out float length, out string reason)
+    {
+        if (!ValidatePath(origin, candidate, frame.Mark, frame.Hitboxes, path, out length, out reason))
+            return false;
+        // Allow escape when still at the stall. After repositioning, do not send the player
+        // back through that known blocked spot just because another endpoint is selected.
+        if (stalledPositions.Any(point => Vector3.Distance(origin, point) >= RepositionDistance &&
+            DistanceToPath(point, origin, path!) < 2.5f))
+        {
+            reason = "route returns through a known stalled position after repositioning";
+            return false;
+        }
+        return true;
     }
 
     private static Vector3 NearSidePoint(TagGroundRouteFrame frame)
