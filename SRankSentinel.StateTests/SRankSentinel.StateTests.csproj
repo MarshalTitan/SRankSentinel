@@ -11,6 +11,7 @@
     <Compile Include="..\InstanceChangeRecovery.cs" Link="InstanceChangeRecovery.cs" />
     <Compile Include="..\WorldVisitPolicy.cs" Link="WorldVisitPolicy.cs" />
     <Compile Include="..\TagCheckpointCycle.cs" Link="TagCheckpointCycle.cs" />
+    <Compile Include="..\TagGroundRouteRecovery.cs" Link="TagGroundRouteRecovery.cs" />
     <Compile Include="..\DataCenterHunting.cs" Link="DataCenterHunting.cs" />
     <Compile Include="..\LifestreamTravel.cs" Link="LifestreamTravel.cs" />
     <Compile Include="..\WorldVisitDeathCancellation.cs" Link="WorldVisitDeathCancellation.cs" />

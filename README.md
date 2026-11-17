@@ -48,6 +48,12 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - Missing marks, unavailable coordinate projections, and unreachable local routes are neutral rather than death evidence. They receive bounded recovery and can end only as an explicit unresolved abandonment through Ul'dah, never as a false kill
 - Chernobog alerts are intentionally ignored and never queued because U'Ghamaro Mines navigation is unsupported; every other supported Centurio S rank remains enabled.
 
+### Ground tag approach recovery
+
+Normal TagApproach still starts with the direct ground approach to the live mark. After two stalls, early stops, or rejected starts, Sentinel checks alternate floor-projected endpoints around the mark using actual vnavmesh ground paths and follows the shortest valid route into ranged-tag clearance. Failed movement endpoints are excluded for the current checkpoint; substantial player repositioning rebuilds routes from the new position. Incomplete, excessive-height, body-crossing, and excessive-detour paths are rejected.
+
+If no route validates, Sentinel stops and holds the positively living hunt with the checkpoint still pending, then checks again after a bounded delay. Only the existing handled-action confirmation completes the tag and begins normal protected retreat. There is no Tarchia or territory blacklist. Logs beginning with `Tag ground routing:` describe failures, candidates, selected path lengths, and reposition recovery. The Nabaath Araeng wall still needs supervised live acceptance; mesh validation cannot prove that every real obstacle edge is correct.
+
 ## Dependencies
 
 - **vnavmesh** is required for navigation.

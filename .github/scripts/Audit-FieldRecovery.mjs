@@ -12,7 +12,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.69.0</Version>"],
+  [project, "<Version>0.7.70.0</Version>"],
   [plugin, "tagCycle.TryLatch"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until the current checkpoint is confirmed"],
@@ -176,3 +176,24 @@ if (!tagBody?.includes("ActionSequenceWasHandled") || !tagBody.includes("tagCycl
     !tagBody.includes("tagCycle.CanDispatch") || !tagBody.includes("BeginGroundRetreat(mark, postTag: true)") ||
     !plugin.includes("IsQueuedAlertFresh") || !plugin.includes("tagCycle.ObserveRevival"))
   throw new Error("Checkpoint confirmation/retreat, Raise, or DC queue gates are missing.");
+
+// Ground tag recovery is isolated from travel and from checkpoint completion.
+const tagGround = readFileSync('Plugin.TagGroundApproach.cs', 'utf8');
+const tagGroundPolicy = readFileSync('TagGroundRouteRecovery.cs', 'utf8');
+for (const hook of [
+  'TickTagGroundApproach(mark, clearance, now);',
+  '!HoldLiveTagGroundRecovery(mark)',
+  'tagGroundRoute.Reset();',
+]) {
+  if (!plugin.includes(hook)) throw new Error('Missing tag ground recovery boundary: ' + hook);
+}
+for (const hook of ['vnav.PathfindSafe(from, to, false)', 'vnav.MovePathSafe(path, false)',
+  'tagCycle.CanDispatch(IsExactCheckpointMark(target)', 'CombatController.IsMarkInCombat(target)']) {
+  if (!tagGround.includes(hook)) throw new Error('Unsafe tag ground navigation boundary: ' + hook);
+}
+if (/ConfirmHandled|ResetPull|\.Consumed\s*=|FailCurrent\(|SetState\(|Lifestream|Teleport\(|EnsureMounted\(/.test(tagGround + tagGroundPolicy))
+  throw new Error('Ground tag routing gained checkpoint, hunt lifetime, or travel authority');
+if (!tagGroundPolicy.includes('DirectFailureLimit = 2') || !tagGroundPolicy.includes('ValidatePath(') ||
+    !tagGroundPolicy.includes('failed.Any(') || !tagGroundPolicy.includes('now.AddSeconds(RetrySeconds)'))
+  throw new Error('Ground tag recovery lost its direct-first, path-validation or failure bounds');
+console.log('Ground tag approach audit passed: direct-first, ground-only, failed endpoint memory, live checkpoint retention, and no travel authority.');

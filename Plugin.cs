@@ -4913,7 +4913,8 @@ public sealed partial class Plugin : IDalamudPlugin
         }
 
         if (tagRequiredSinceUtc != DateTime.MinValue &&
-            (now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds)
+            (now - tagRequiredSinceUtc).TotalSeconds >= TagRecoveryBudgetSeconds &&
+            !HoldLiveTagGroundRecovery(mark))
         {
             FailCurrent(
                 $"tag preparation remained unresolved for {TagRecoveryBudgetSeconds:0}s while the mark stayed alive",
@@ -5008,6 +5009,7 @@ public sealed partial class Plugin : IDalamudPlugin
         UpdateTagRecoveryProgress(mark, clearance, now);
         if (clearance <= TagApproachClearance + 1f)
         {
+            TickTagGroundApproach(mark, clearance, now);
             vnav.StopSafe();
             if (now >= nextActionUtc && CanActAfterRevival() &&
                 tagCycle.Pending is { } checkpoint && tagCycle.CanDispatch(IsExactCheckpointMark(mark),
@@ -5044,39 +5046,7 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         }
 
-        var routeRunning = vnav.IsPathRunningSafe() || vnav.IsPathfindInProgressSafe();
-        if (routeRunning && tagLastProgressUtc != DateTime.MinValue &&
-            (now - tagLastProgressUtc).TotalSeconds >= TagRouteStallSeconds)
-        {
-            vnav.StopSafe("tag approach stalled without meaningful progress");
-            tagRecoveryFailures++;
-            tagLastProgressUtc = now;
-            nextActionUtc = now;
-            log.Warning(
-                "Tag-required ground approach stalled; retrying without clearing the latch (failure {Failure}, HP={Hp:0.0}%)",
-                tagRecoveryFailures, CombatController.HpPercent(mark));
-            routeRunning = false;
-        }
-
-        if (!routeRunning && now >= nextActionUtc)
-        {
-            var desiredCenterRange = mark.HitboxRadius +
-                                     (objects.LocalPlayer?.HitboxRadius ?? 0f) +
-                                     TagApproachClearance;
-            if (!vnav.MoveCloseToSafe(mark.Position, false, desiredCenterRange))
-            {
-                tagRecoveryFailures++;
-                nextActionUtc = now.AddSeconds(1);
-                status = $"Tag-required approach could not start; retry {tagRecoveryFailures} remains latched while the mark is alive";
-                return;
-            }
-
-            tagLastProgressPosition = PlayerPosition();
-            tagBestClearance = clearance;
-            tagLastProgressUtc = now;
-        }
-
-        status = $"Tag required: approaching {mark.Name.TextValue} for one confirmed ranged action ({clearance:0.0}y clear)";
+        TickTagGroundApproach(mark, clearance, now);
     }
 
     private void TickGroundRetreat(DateTime now)
@@ -7232,6 +7202,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ResetTagRecoveryTracking()
     {
+        tagGroundRoute.Reset();
         tagRequiredSinceUtc = DateTime.MinValue;
         tagEntityMissingSinceUtc = DateTime.MinValue;
         tagLastProgressUtc = DateTime.MinValue;
