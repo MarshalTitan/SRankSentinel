@@ -14,7 +14,17 @@ internal sealed class SsWatchLifetime
     internal bool Begin(DateTime evidenceUtc, DateTime now, int configuredSeconds)
     {
         if (StartedUtc != DateTime.MinValue)
-            return false;
+        {
+            if (!IsTimestamp(evidenceUtc) || evidenceUtc >= StartedUtc || evidenceUtc > now)
+                return false;
+            // An older queued report can prove the opportunity began earlier. It may
+            // shorten the deadline, but must never grant another full window from now.
+            var budget = hardDeadlineUtc - StartedUtc;
+            StartedUtc = evidenceUtc;
+            hardDeadlineUtc = StartedUtc + budget;
+            DeadlineUtc = new(Math.Min(DeadlineUtc.Ticks, hardDeadlineUtc.Ticks), DateTimeKind.Utc);
+            return true;
+        }
         StartedUtc = IsTimestamp(evidenceUtc) && evidenceUtc <= now ? evidenceUtc : now;
         hardDeadlineUtc = StartedUtc.AddSeconds(Math.Clamp(configuredSeconds, 1, MaximumSeconds));
         DeadlineUtc = hardDeadlineUtc;

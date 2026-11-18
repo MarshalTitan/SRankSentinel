@@ -48,7 +48,7 @@ public sealed partial class Plugin
 
     private bool TickSsReservationWatchdog(DateTime now)
     {
-        if (current is null || ssWatchExpiryReleased ||
+        if (current is null || (ssWatchExpiryReleased && state != SentinelState.SsWatch) ||
             !(state == SentinelState.SsWatch || (!killConfirmed && !markEverIdentified &&
                 HuntCatalog.IsAnySsName(current.CreatureName))))
             return false;

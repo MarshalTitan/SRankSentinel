@@ -6,6 +6,7 @@ var tests = new (string Name, Action Run)[]
     ("SS announcement cannot extend the original finite deadline", SsWatchTests.AnnouncementCannotExtend),
     ("repeated provider announcements cannot sustain an SS watch for six hours", SsWatchTests.RepeatedAnnouncementsCannotExtend),
     ("queued SS promotion and persistence keep the original watch start", SsWatchTests.QueuedPromotionKeepsOrigin),
+    ("earlier queued SS evidence may only shorten an already-started deadline", SsWatchTests.EarlierQueuedEvidenceOnlyShortens),
     ("living SS detection leaves passive watch and preserves live exit protection", SsWatchTests.LivingEntityLeavesPassiveWatch),
     ("SS watch expires without any detectable entity or kill report", SsWatchTests.NoEntityExpiresWithoutKill),
     ("announced SS flag cannot bypass hard watch expiry", SsWatchTests.AnnouncedFlagCannotBypassExpiry),

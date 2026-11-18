@@ -58,6 +58,17 @@ internal static class SsWatchTests
             HuntExitDecision.BlockForVisibleLiveEntity, "normal living-entity protection must remain effective");
     }
 
+    internal static void EarlierQueuedEvidenceOnlyShortens()
+    {
+        var watch = new SsWatchLifetime();
+        watch.Begin(Start.AddMinutes(2), Start.AddMinutes(2), 300);
+        watch.Begin(Opportunity.ReceivedAtUtc, Start.AddMinutes(2), 300);
+        Check(watch.StartedUtc == Start && watch.DeadlineUtc == Start.AddMinutes(5),
+            "discovering an earlier queued SS must preserve the first evidence, not the later precursor clock");
+        watch.Begin(Start.AddMinutes(4), Start.AddMinutes(4), 300);
+        Check(watch.DeadlineUtc == Start.AddMinutes(5), "later announcements still cannot extend the shortened bound");
+    }
+
     internal static void NoEntityExpiresWithoutKill()
     {
         var watch = Running();
