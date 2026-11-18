@@ -1118,7 +1118,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 }
                 if (reservedProfile is not null && HuntCatalog.IsSsSpawnMessage(text))
                 {
-                    current = current with { HuntType = "ssrank", ReceivedAtUtc = DateTime.UtcNow };
+                    current = SsWatchLifetime.Announce(current);
                     ssSpawnAnnounced = true;
                     status = $"{reservedProfile.SsName} spawn confirmed; continuing the reserved SS hunt";
                     log.Information(
@@ -1151,11 +1151,10 @@ public sealed partial class Plugin : IDalamudPlugin
                     ObserveSsChain(activeSsProfile,
                         $"{activeSsProfile.SsName} spawn message detected");
                     ssSpawnAnnounced = true;
-                    ssWatchDeadlineUtc = DateTime.MaxValue;
-                    log.Information(
-                        "Actual SS spawn announced: {Ss}; disabling the precursor timeout while its alert/entity is resolved",
-                        activeSsProfile.SsName);
-                    status = $"{activeSsProfile.SsName} announced; waiting for its alert or game object location";
+                    EnsureSsWatchDeadline(DateTime.UtcNow);
+                    log.Information("Actual SS spawn announced: {Ss}; retaining hard deadline {Deadline:o}",
+                        activeSsProfile.SsName, ssWatchDeadlineUtc);
+                    status = $"{activeSsProfile.SsName} announced; waiting for entity ({SsWatchRemaining(DateTime.UtcNow)})";
                 }
                 if (text.Contains(activeSsProfile.PrecursorName, StringComparison.OrdinalIgnoreCase))
                     ObserveSsChain(activeSsProfile,
@@ -1189,6 +1188,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 var killedInstance = ParseSonarInstance(text);
                 log.Information("Sonar kill notice parsed for world {World}: {Text}",
                     string.IsNullOrWhiteSpace(killedWorld) ? "(unresolved)" : killedWorld, text);
+                if (TryConfirmWatchedSsDeath(killedWorld, killedTerritory, killedInstance, DateTime.UtcNow,
+                        activeSsProfile is not null && HuntCatalog.TextMentionsMark(text, activeSsProfile.SsName), "Sonar"))
+                    return;
                 if (current is not null &&
                     HuntCatalog.TextMentionsMark(text, current.CreatureName) &&
                     KillNoticeMatchesAlert(killedWorld, killedTerritory, killedInstance, current))
@@ -1330,6 +1332,8 @@ public sealed partial class Plugin : IDalamudPlugin
             return;
         }
         PruneKilledAlerts();
+        if (isSs && IgnoreExpiredSsWatchReport(incoming))
+            return;
         if (killedAlerts.ContainsKey(incoming.Key))
             return;
 
@@ -1338,11 +1342,7 @@ public sealed partial class Plugin : IDalamudPlugin
             if (isSs && IsReservedSsWatch(current))
             {
                 var reserved = current;
-                current = reserved with
-                {
-                    HuntType = "ssrank",
-                    ReceivedAtUtc = incoming.ReceivedAtUtc,
-                };
+                current = SsWatchLifetime.Announce(reserved);
                 ssSpawnAnnounced = true;
                 log.Information(
                     "Promoted reserved SS opportunity while preserving its documented spawn destination: {Ss} on {World}; source={Source}, ignored provider point=({MapX:0.0}, {MapY:0.0})",
@@ -1368,7 +1368,7 @@ public sealed partial class Plugin : IDalamudPlugin
             {
                 var updatedQueue = pendingAlerts
                     .Select(alert => alert.Key == incoming.Key
-                        ? alert with { HuntType = "ssrank", ReceivedAtUtc = incoming.ReceivedAtUtc }
+                        ? SsWatchLifetime.Announce(alert)
                         : alert)
                     .ToArray();
                 pendingAlerts.Clear();
@@ -1409,6 +1409,7 @@ public sealed partial class Plugin : IDalamudPlugin
              (killConfirmed && clientState.TerritoryType == current.TerritoryId && !travel.IsBusy)) &&
             current.World.Equals(incoming.World, StringComparison.OrdinalIgnoreCase) &&
             current.TerritoryId == incoming.TerritoryId &&
+            SsAlertMatchesCurrent(incoming.World, incoming.TerritoryId, incoming.Instance) &&
             activeSsProfile is not null && ssProfile == activeSsProfile)
         {
             var currentInstance = travel.CurrentInstance;
@@ -1420,12 +1421,13 @@ public sealed partial class Plugin : IDalamudPlugin
                     $"{source} confirmed {incoming.CreatureName} while the completed S-rank player is dead");
                 return;
             }
-            EnqueuePersistent(incoming);
-            ssSpawnAnnounced = true;
+            EnsureSsWatchDeadline(DateTime.UtcNow, incoming.ReceivedAtUtc);
             ObserveSsChain(ssProfile,
                 $"{source} reported {incoming.CreatureName}; staging at its documented spawn until the entity is detectable");
-            ssWatchDeadlineUtc = DateTime.MaxValue;
-            status = $"{incoming.CreatureName} reported; navigating to its documented spawn location before entity tracking";
+            incoming = incoming with { ReceivedAtUtc = ssWatchLifetime.StartedUtc };
+            EnqueuePersistent(incoming);
+            ssSpawnAnnounced = true;
+            status = $"{incoming.CreatureName} reported; waiting for entity ({SsWatchRemaining(DateTime.UtcNow)})";
             return;
         }
 
@@ -1471,6 +1473,9 @@ public sealed partial class Plugin : IDalamudPlugin
         ssSpawnAnnounced = activeSsProfile is not null && !IsReservedSsWatch(alert);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
         ssWatchDeadlineUtc = DateTime.MinValue;
+        ResetSsWatchLifetime();
+        if (activeSsProfile is not null)
+            EnsureSsWatchDeadline(DateTime.UtcNow, alert.ReceivedAtUtc);
         ClearPendingSsChainEvidence();
         ResetSsStagingTracking();
         playerReadySinceUtc = DateTime.MinValue;
@@ -1512,6 +1517,7 @@ public sealed partial class Plugin : IDalamudPlugin
         discardReason = string.Empty;
         ssChainObserved = true;
         ssSpawnAnnounced = true;
+        ResetSsWatchLifetime();
         activeSsProfile = HuntCatalog.GetSsProfileForSsName(alert.CreatureName) ??
                           HuntCatalog.GetSsProfileForTerritory(alert.TerritoryId);
         postKillSsGraceDeadlineUtc = DateTime.MinValue;
@@ -1810,20 +1816,15 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void Tick(DateTime now)
     {
+        if (TickSsReservationWatchdog(now))
+            return;
+
         if ((state is SentinelState.PostKillSsGrace or SentinelState.SsWatch) &&
             TryBlockAutomaticHuntExit(
                 HuntExitRequestSource.ConfirmedDeath,
                 state,
                 "A post-kill/SS state was active while the exact current hunt entity was visibly alive"))
             return;
-
-        if (current is not null && IsReservedSsWatch(current) && !killConfirmed &&
-            !markEverIdentified &&
-            now >= current.ReceivedAtUtc.AddSeconds(config.SsChainTimeoutSeconds))
-        {
-            FailCurrent($"The reserved {current.CreatureName} opportunity expired before the SS was confirmed");
-            return;
-        }
 
         if (current is not null && !killConfirmed && clientState.TerritoryType == current.TerritoryId)
         {
@@ -3335,9 +3336,7 @@ public sealed partial class Plugin : IDalamudPlugin
             }
 
             ssChainObserved = true;
-            ssWatchDeadlineUtc = ssSpawnAnnounced
-                ? DateTime.MaxValue
-                : current.ReceivedAtUtc.AddSeconds(config.SsChainTimeoutSeconds);
+            EnsureSsWatchDeadline(DateTime.UtcNow, current.ReceivedAtUtc);
             ResetSsStagingTracking();
             SetState(SentinelState.SsWatch,
                 $"vnavmesh is ready; staging about {SsStagingTargetRadius:0}y from the documented {activeSsProfile.SsName} spawn until the entity is detectable");
@@ -5166,31 +5165,25 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void TickSsWatch(DateTime now)
     {
-        if (!ValidateSsWatchContext("SS watch"))
+        if (TickSsReservationWatchdog(now) || !ValidateSsWatchContext("SS watch"))
             return;
 
         if (combat.IsPlayerDead)
         {
-            var reason = ssSpawnAnnounced
-                ? $"{activeSsProfile!.SsName} is spawning after the completed S rank"
-                : $"{activeSsProfile!.PrecursorName} prey is active after the completed S rank";
-            QueueSsAfterCompletedHunt(null, activeSsProfile, now, reason);
+            if (killConfirmed)
+                QueueSsAfterCompletedHunt(null, activeSsProfile!, now,
+                    $"The SS opportunity remains reserved after the completed S rank ({SsWatchRemaining(now)})");
+            else
+                TickRaiseAcceptance(now, $"Dead during finite SS watch ({SsWatchRemaining(now)})");
             return;
         }
 
         ScanForSsEvidence(now);
         if (state != SentinelState.SsWatch || current is null || activeSsProfile is null)
             return;
-
-        if (!ssSpawnAnnounced && now >= ssWatchDeadlineUtc)
-        {
-            nextActionUtc = now;
-            SetState(SentinelState.ResetToUldah,
-                $"{activeSsProfile.SsName} opportunity expired; returning to Ul'dah on the current world");
-            return;
-        }
-
         TickSsStaging(now);
+        if (state == SentinelState.SsWatch)
+            AppendSsWatchCountdown(now);
     }
 
     private bool ValidateSsWatchContext(string phase)
@@ -5217,9 +5210,17 @@ public sealed partial class Plugin : IDalamudPlugin
         if (current is null || activeSsProfile is null)
             return;
 
-        var visibleSs = FindBattleNpc(activeSsProfile.SsDataId, activeSsProfile.SsName);
+        var visibleSs = TryBuildWatchedSs(out var watch) && IsInSsOpportunityContext(watch)
+            ? FindBattleNpc(activeSsProfile.SsDataId, activeSsProfile.SsName) : null;
         if (visibleSs is not null)
         {
+            if (visibleSs.IsDead || visibleSs.CurrentHp == 0)
+            {
+                EnsureSsWatchDeadline(now, now);
+                CompleteWatchedSsDeath(watch with { ReceivedAtUtc = ssWatchLifetime.StartedUtc },
+                    "The exact SS object is visibly dead during SS evidence scan");
+                return;
+            }
             HuntAlertSnapshot ss;
             if (TryFindQueuedSsForActiveContext(out var queuedSs))
             {
@@ -5246,8 +5247,9 @@ public sealed partial class Plugin : IDalamudPlugin
         if (TryFindQueuedSsForActiveContext(out var reportedSs))
         {
             ssSpawnAnnounced = true;
-            ssWatchDeadlineUtc = DateTime.MaxValue;
-            status = $"{reportedSs.CreatureName} was reported; holding its reservation and staging at the documented spawn until the entity is detectable";
+            EnsureSsWatchDeadline(now, reportedSs.ReceivedAtUtc);
+            ObserveSsChain(activeSsProfile, $"Queued {reportedSs.CreatureName} report accepted without extending its hard deadline");
+            status = $"{reportedSs.CreatureName} was reported; waiting for entity ({SsWatchRemaining(now)})";
         }
 
         var precursorCount = objects.OfType<IBattleChara>().Count(actor =>
@@ -5301,7 +5303,7 @@ public sealed partial class Plugin : IDalamudPlugin
             }
 
             status = ssSpawnAnnounced
-                ? $"{activeSsProfile.SsName} announced; holding at its staging point until the entity is detectable"
+                ? $"{activeSsProfile.SsName} announced; waiting for entity ({SsWatchRemaining(now)})"
                 : $"Holding at SS staging point; waiting for precursors ({SsWatchRemaining(now)})";
             return;
         }
@@ -5704,9 +5706,11 @@ public sealed partial class Plugin : IDalamudPlugin
         nextSsStagingAttemptUtc = now.AddSeconds(SsStagingRouteRetrySeconds);
     }
 
-    private string SsWatchRemaining(DateTime now) => ssSpawnAnnounced
-        ? "spawn announced; timeout disabled"
-        : $"{Math.Max(0, (int)Math.Ceiling((ssWatchDeadlineUtc - now).TotalSeconds))}s remaining";
+    private string SsWatchRemaining(DateTime now)
+    {
+        EnsureSsWatchDeadline(now);
+        return $"{ssWatchLifetime.RemainingSeconds(now)}s remaining";
+    }
 
     private void BeginSafeParking(IBattleChara target, bool fly)
     {
@@ -6618,6 +6622,7 @@ public sealed partial class Plugin : IDalamudPlugin
             !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase))
             return;
 
+        EnsureSsWatchDeadline(DateTime.UtcNow, DateTime.UtcNow);
         pendingSsChainEvidenceUtc = DateTime.UtcNow;
         pendingSsChainAlertKey = current.Key;
         pendingSsChainReason = reason;
@@ -6653,7 +6658,7 @@ public sealed partial class Plugin : IDalamudPlugin
         if (!ssChainObserved)
         {
             ssChainObserved = true;
-            ssWatchDeadlineUtc = DateTime.UtcNow.AddSeconds(config.SsChainTimeoutSeconds);
+            EnsureSsWatchDeadline(DateTime.UtcNow, DateTime.UtcNow);
             ResetSsStagingTracking();
             log.Information("SS precursor event detected: {Ss}; reason={Reason}", profile.SsName, reason);
         }
@@ -6671,6 +6676,7 @@ public sealed partial class Plugin : IDalamudPlugin
         queuedSs = pendingAlerts.FirstOrDefault(alert =>
             alert.World.Equals(current.World, StringComparison.OrdinalIgnoreCase) &&
             alert.TerritoryId == current.TerritoryId &&
+            SsAlertMatchesCurrent(alert.World, alert.TerritoryId, alert.Instance) &&
             HuntCatalog.IsSsName(alert.CreatureName, activeSsProfile))!;
         return queuedSs is not null;
     }
@@ -6681,10 +6687,13 @@ public sealed partial class Plugin : IDalamudPlugin
         DateTime now,
         string reason)
     {
-        if (current is null || !killConfirmed)
+        if (current is null || !killConfirmed || ssWatchExpiryReleased)
             return;
 
-        var ssAlert = reportedSs ?? BuildReservedSsWatch(current, profile, now);
+        EnsureSsWatchDeadline(now, reportedSs?.ReceivedAtUtc ?? now);
+        var ssAlert = reportedSs ?? BuildReservedSsWatch(current, profile, ssWatchLifetime.StartedUtc);
+        if (ssAlert is not null)
+            ssAlert = ssAlert with { ReceivedAtUtc = ssWatchLifetime.StartedUtc };
         if (ssAlert is not null && HuntCatalog.TryGetSsStagingLocation(current.TerritoryId, out var location))
             ssAlert = ssAlert with { MapX = location.MapX, MapY = location.MapY };
         if (ssAlert is not null && reportedSs is null && ssSpawnAnnounced)
@@ -6714,7 +6723,9 @@ public sealed partial class Plugin : IDalamudPlugin
         else if (IsReservedSsWatch(existing) && !IsReservedSsWatch(ssAlert))
         {
             var updatedQueue = pendingAlerts
-                .Select(alert => alert.Key == ssAlert.Key ? ssAlert : alert)
+                .Select(alert => alert.Key == ssAlert.Key
+                    ? ssAlert with { ReceivedAtUtc = alert.ReceivedAtUtc < ssAlert.ReceivedAtUtc ? alert.ReceivedAtUtc : ssAlert.ReceivedAtUtc }
+                    : alert)
                 .ToArray();
             pendingAlerts.Clear();
             foreach (var alert in updatedQueue)
@@ -6896,6 +6907,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ClearCurrent()
     {
+        ResetSsWatchLifetime();
         worldTravel = null;
         ResetInstanceRangeRecovery();
         vnav.StopSafe();
@@ -7436,6 +7448,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 HuntCatalog.NamesMatch(alert.CreatureName, creature),
                 IsObservedSingleInstance(alert.World, alert.TerritoryId));
 
+        if (TryConfirmWatchedSsDeath(world, territory, instance, deathAtUtc,
+                activeSsProfile is not null && HuntCatalog.NamesMatch(activeSsProfile.SsName, creature), source))
+            return;
         var currentMatched = current is not null && Matches(current);
         ObserveKnownHistoryDeaths(world, territory, instance, deathAtUtc,
             name => HuntCatalog.NamesMatch(name, creature));
@@ -7573,8 +7588,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private bool IsAlertFresh(HuntAlertSnapshot alert, DateTime now) =>
         IsWithinFreshnessWindow(alert.ReceivedAtUtc, now) &&
-        (!IsReservedSsWatch(alert) ||
-         now < alert.ReceivedAtUtc.AddSeconds(config.SsChainTimeoutSeconds)) &&
+        (!HuntCatalog.IsAnySsName(alert.CreatureName) ||
+         SsWatchLifetime.IsFresh(alert.ReceivedAtUtc, now, config.SsChainTimeoutSeconds)) &&
         HasUsableMapCoordinates(alert) &&
         !HuntCatalog.IsChernobog(alert.TerritoryId, alert.CreatureName) &&
         !killedAlerts.ContainsKey(alert.Key) &&

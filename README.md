@@ -54,6 +54,12 @@ Normal TagApproach still starts with the direct ground approach to the live mark
 
 If no route validates, Sentinel stops and holds the positively living hunt with the checkpoint still pending, then checks again after a bounded delay. Only the existing handled-action confirmation completes the tag and begins normal protected retreat. There is no Tarchia or territory blacklist. Logs beginning with `Tag ground routing:` describe failures, candidates, selected path lengths, and reposition recovery. The Nabaath Araeng wall still needs supervised live acceptance; mesh validation cannot prove that every real obstacle edge is correct.
 
+### SS reservation deadline
+
+An SS precursor/reservation has a hard maximum of **five minutes from its first accepted evidence**, including time spent queued or traveling. Sonar, HuntAlerts, repeated announcements and promotion from a precursor reservation preserve that start. The SS watch displays a real countdown, independent of ordinary queued-alert freshness. Invalid or unbounded deadlines are repaired against the original start.
+
+If no actual living SS is detected by expiry, Sentinel stops staging, removes reserved and announced duplicates for that exact World/territory/canonical-instance/SS context, and returns through Ul'dah to the normal queue. A positively matched provider death also closes an unseen SS reservation and records killed/no-tag History without inheriting the completed normal S's tag. A visibly living SS still vetoes conflicting death or abandonment and enters normal live tracking. No SS timeout is treated as proof of a kill.
+
 ## Dependencies
 
 - **vnavmesh** is required for navigation.

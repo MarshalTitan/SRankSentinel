@@ -2,6 +2,19 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("precursor creates a five-minute hard SS deadline", SsWatchTests.PrecursorStartsHardClock),
+    ("SS announcement cannot extend the original finite deadline", SsWatchTests.AnnouncementCannotExtend),
+    ("repeated provider announcements cannot sustain an SS watch for six hours", SsWatchTests.RepeatedAnnouncementsCannotExtend),
+    ("queued SS promotion and persistence keep the original watch start", SsWatchTests.QueuedPromotionKeepsOrigin),
+    ("living SS detection leaves passive watch and preserves live exit protection", SsWatchTests.LivingEntityLeavesPassiveWatch),
+    ("SS watch expires without any detectable entity or kill report", SsWatchTests.NoEntityExpiresWithoutKill),
+    ("announced SS flag cannot bypass hard watch expiry", SsWatchTests.AnnouncedFlagCannotBypassExpiry),
+    ("fully matched provider death clears an SS reservation without local detection", SsWatchTests.ExactExternalDeathNeedsNoObject),
+    ("SS watch death matching rejects wrong identity, timing and unproven context", SsWatchTests.RejectWrongDeathIdentity),
+    ("conflicting provider death cannot overrule a visibly living SS", SsWatchTests.ConflictingLiveDeathIsRejected),
+    ("MinValue, MaxValue and excessive SS deadlines repair within the original bound", SsWatchTests.InvalidDeadlineRepair),
+    ("withdrawn SS opportunity cannot reopen on another announcement", SsWatchTests.WithdrawalCannotReopen),
+    ("SS expiry duplicate cleanup preserves other Worlds, instances and marks", SsWatchTests.DuplicateCleanupIsContextBound),
     ("normal tag approach keeps the original direct ground route", TagGroundRouteTests.NormalDirect),
     ("repeated tag stalls and early stops trigger alternate ground search", TagGroundRouteTests.RepeatedDirectFailure),
     ("an unreachable tag candidate yields to the shortest reachable alternative", TagGroundRouteTests.UnreachableCandidate),
