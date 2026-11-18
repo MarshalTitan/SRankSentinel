@@ -44,7 +44,7 @@ travel/tag/parking/reward algorithm is edited.
 
 Update SRank **0.7.62.0** and Relay **0.5.0.6** through the normal permanent Sentinel
 repository URL in Dalamud. Keep dev copies disabled. Follow the
-[Wrothy-first paired procedure](https://github.com/MarshalTitan/SentinelRelay/blob/main/docs/SRANK_REMOTE_CONTROLS.md):
+[Primary Tester-first paired procedure](https://github.com/MarshalTitan/SentinelRelay/blob/main/docs/SRANK_REMOTE_CONTROLS.md):
 permission on/save; status; safe skip preserving queue; reset request with no action;
 confirm within 30s; wrong profile and permission-off rejection.
 No live behavior or private Discord authentication is certified by a successful build.
