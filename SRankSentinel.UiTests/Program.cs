@@ -53,6 +53,9 @@ internal static partial class Program
             Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
             Test("killed World Visit destination remains in History without a tag or credit", TestWorldVisitDeathHistory);
+            Test("SS watch countdown repairs invalid deadlines without resetting its first start", TestSsWatchCountdownRepair);
+            Test("expired SS duplicates release 40 hunts through the real queue policy", TestSsWatchFortyQueuedHunts);
+            Test("unseen SS death History cannot inherit the normal S tag", TestSsWatchKillHistoryIsolation);
             Test("personal credit requires a tagged final pull, kill, and contextual reward in either order", TestHistoryCredit);
             Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
             Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);

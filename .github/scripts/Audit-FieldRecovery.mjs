@@ -12,7 +12,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.70.0</Version>"],
+  [project, "<Version>0.7.71.0</Version>"],
   [plugin, "tagCycle.TryLatch"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until the current checkpoint is confirmed"],
@@ -197,3 +197,22 @@ if (!tagGroundPolicy.includes('DirectFailureLimit = 2') || !tagGroundPolicy.incl
     !tagGroundPolicy.includes('failed.Any(') || !tagGroundPolicy.includes('now.AddSeconds(RetrySeconds)'))
   throw new Error('Ground tag recovery lost its direct-first, path-validation or failure bounds');
 console.log('Ground tag approach audit passed: direct-first, ground-only, failed endpoint memory, live checkpoint retention, and no travel authority.');
+
+const ssWatch = readFileSync('Plugin.SsWatch.cs', 'utf8');
+const ssLifetime = readFileSync('SsWatchLifetime.cs', 'utf8');
+if (/ssWatchDeadlineUtc\s*=\s*DateTime\.MaxValue|timeout disabled|disabling the precursor timeout/.test(plugin + ssWatch))
+  throw new Error('An SS announcement can still disable its watchdog');
+if (!ssLifetime.includes('MaximumSeconds = 300') || !ssWatch.includes('ssWatchLifetime.Repair(ssWatchDeadlineUtc)'))
+  throw new Error('SS watch lacks a hard five-minute bound or invalid deadline repair');
+const ssTick = plugin.slice(plugin.indexOf('private void Tick(DateTime now)'), plugin.indexOf('private void TickResetToUldah'));
+if (!ssTick.includes('TickSsReservationWatchdog(now)') ||
+    ssTick.indexOf('TickSsReservationWatchdog(now)') > ssTick.indexOf('if (combat.IsPlayerDead)'))
+  throw new Error('SS watchdog can be bypassed by death/other hunt state waits');
+for (const hook of ['RemoveSsOpportunityDuplicates(opportunity)', 'StartSsAlertDirect(opportunity with',
+  'StartAlert(opportunity with', 'ConfirmKill(reason)', 'AppendSsWatchCountdown', 'IsInSsOpportunityContext']) {
+  if (!ssWatch.includes(hook)) throw new Error('Missing SS watch lifecycle boundary: ' + hook);
+}
+if (!plugin.includes('SsWatchLifetime.Announce(reserved)') || !plugin.includes('SsWatchLifetime.Announce(alert)') ||
+    !plugin.includes('SsWatchLifetime.IsFresh(alert.ReceivedAtUtc, now, config.SsChainTimeoutSeconds)'))
+  throw new Error('Promoted or queued SS report can lose the original finite reservation');
+console.log('SS watchdog audit passed: five-minute hard maximum, first-evidence clock, finite countdown, exact SS death identity and duplicate cleanup.');
