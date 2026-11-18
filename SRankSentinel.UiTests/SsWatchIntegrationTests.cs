@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using Dalamud.Plugin.Services;
 using SRankSentinel;
 
@@ -94,10 +93,9 @@ internal static partial class Program
         }
         // IsWorldVisitCompatible uses the actual cached game-data relation. No client memory,
         // player movement, or native addon calls are needed for these queue regressions.
-        var travel = (NativeTravel)RuntimeHelpers.GetUninitializedObject(typeof(NativeTravel));
+        var travel = new NativeTravel(null!, DispatchProxy.Create<IObjectTable, SsWatchNullService>(), null!, null!, null!);
         void SetTravel(string name, object value) => typeof(NativeTravel).GetField(name,
             BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(travel, value);
-        SetTravel("objects", DispatchProxy.Create<IObjectTable, SsWatchNullService>());
         var names = new[] { "Faerie", "Zalera", "Seraph", "Leviathan", "Balmung", "Exodus", "Kraken", "Midgardsormr" };
         var worlds = names.Select((name, i) => new VisitWorld((uint)(i + 1), name, 4, "Aether", 2)).ToDictionary(w => w.Id);
         SetTravel("visitWorlds", worlds);
