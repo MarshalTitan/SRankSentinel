@@ -19,8 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="MarshalTitan.SentinelCore" Version="[0.4.1]" />
-    <PackageReference Include="MarshalTitan.SentinelCore.UI" Version="[0.4.1]" />
+    <PackageReference Include="MarshalTitan.SentinelCore" Version="[0.4.1.1]" />
+    <PackageReference Include="MarshalTitan.SentinelCore.UI" Version="[0.4.1.1]" />
     <InternalsVisibleTo Include="SRankSentinel.UiTests" />
   </ItemGroup>
 
