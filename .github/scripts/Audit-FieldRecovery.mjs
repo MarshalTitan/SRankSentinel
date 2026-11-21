@@ -12,7 +12,7 @@ const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.72.0</Version>"],
+  [project, "<Version>0.7.73.0</Version>"],
   [plugin, "tagCycle.TryLatch"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until the current checkpoint is confirmed"],
@@ -216,3 +216,28 @@ if (!plugin.includes('SsWatchLifetime.Announce(reserved)') || !plugin.includes('
     !plugin.includes('SsWatchLifetime.IsFresh(alert.ReceivedAtUtc, now, config.SsChainTimeoutSeconds)'))
   throw new Error('Promoted or queued SS report can lose the original finite reservation');
 console.log('SS watchdog audit passed: five-minute hard maximum, first-evidence clock, finite countdown, exact SS death identity and duplicate cleanup.');
+
+const presence = readFileSync('Plugin.NormalSPresence.cs', 'utf8');
+const presencePolicy = readFileSync('OrdinarySPresenceGate.cs', 'utf8');
+for (const hook of ['chat.LogMessage += OnNormalSPresenceLog', 'clientState.ZoneInit += OnNormalSZoneInit',
+  'chat.LogMessage -= OnNormalSPresenceLog', 'clientState.ZoneInit -= OnNormalSZoneInit',
+  'BeginNormalSPresenceCheck(now)', 'TickNormalSPresence(now)', 'MaintainNormalSPresenceReadiness()',
+  'normalSPresence.Reset(alert.World, alert.TerritoryId)']) {
+  if (!plugin.includes(hook)) throw new Error('Missing ordinary S arrival lifecycle hook: ' + hook);
+}
+for (const hook of ['message.LogMessageId', 'zone.TerritoryType.RowId, zone.Instance', 'CanActAfterRevival()',
+  'contextMatches ? FindMark() : null', '!ssChainObserved', '!IsReservedSsWatch(current)',
+  '!HuntCatalog.IsAnySsName', '!HuntCatalog.IsAnyPrecursorName', 'SentinelState.PostKillSsGrace',
+  'HuntExitRequestSource.RecoveryBudget', 'AbandonNormalSPresence();']) {
+  if (!presence.includes(hook)) throw new Error('Unsafe ordinary S presence boundary: ' + hook);
+}
+const absence = presence.slice(presence.indexOf('private void AbandonNormalSPresence()'),
+  presence.indexOf('private void LogNormalSPresence('));
+if (!absence.includes('FailCurrent(') || /ConfirmKill|MarkKilled|\.Kill\(|\.Tag\(|\.Credit\(/.test(absence))
+  throw new Error('Presence absence must remain unresolved rather than positive death/credit');
+if (!presencePolicy.includes('PowerfulMarkMessageId = 9331') || !presencePolicy.includes('ObservationSeconds = 5') ||
+    !presencePolicy.includes('ReadyUtc.AddSeconds(ObservationSeconds)') ||
+    !presencePolicy.includes('OrdinarySPresenceDecision.ArrivalUnavailable'))
+  throw new Error('Presence gate lost native signal, ready clock, or conservative missed-arrival fallback');
+console.log('Ordinary S presence audit passed: native zone-scoped signal, five ready seconds, SS exclusions, unresolved-only absence.');
+

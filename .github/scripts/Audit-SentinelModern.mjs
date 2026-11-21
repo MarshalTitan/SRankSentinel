@@ -712,9 +712,54 @@ const reviewedSsWatchPatches = {
     ]
   ]
 };
+// Reverse only the reviewed ordinary-S arrival hooks before verifying all older hunt logic.
+const reviewedOrdinaryPresencePatches = {
+  "Plugin.cs": [
+    [
+      "        chat.ChatMessage += OnHistoryReward;\n        chat.LogMessage += OnNormalSPresenceLog;\n        clientState.ZoneInit += OnNormalSZoneInit;\n",
+      "        chat.ChatMessage += OnHistoryReward;\n"
+    ],
+    [
+      "        chat.ChatMessage -= OnHistoryReward;\n        chat.LogMessage -= OnNormalSPresenceLog;\n        clientState.ZoneInit -= OnNormalSZoneInit;\n",
+      "        chat.ChatMessage -= OnHistoryReward;\n"
+    ],
+    [
+      "    private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n        normalSPresence.Reset(alert.World, alert.TerritoryId);\n",
+      "    private void StartAlert(HuntAlertSnapshot alert, string source)\n    {\n"
+    ],
+    [
+      "    private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {\n        normalSPresence.Reset();\n",
+      "    private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {\n"
+    ],
+    [
+      "            case SentinelState.CheckNormalSPresence:\n                TickNormalSPresence(now);\n                return;\n            case SentinelState.WaitForMesh:\n",
+      "            case SentinelState.WaitForMesh:\n"
+    ],
+    [
+      "        BeginNormalSPresenceCheck(now);\n",
+      "        BeginMeshWait(\"Zoning and player readiness confirmed\");\n"
+    ],
+    [
+      "    private void ClearCurrent()\n    {\n        normalSPresence.Reset();\n",
+      "    private void ClearCurrent()\n    {\n"
+    ],
+    [
+      "        SsWatch,\n        CheckNormalSPresence,\n",
+      "        SsWatch,\n"
+    ],
+    [
+      "            CompleteFaloopLoginIfReady();\n            MaintainNormalSPresenceReadiness();\n",
+      "            CompleteFaloopLoginIfReady();\n"
+    ]
+  ]
+};
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of reviewedOrdinaryPresencePatches[path] ?? []) {
+    assert(source.split(change).length === 2, `Missing/duplicated ordinary S arrival edit: ${path}`);
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedSsWatchPatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated SS watchdog edit: ${path}`);
     source = source.replace(change, original);

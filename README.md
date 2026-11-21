@@ -48,6 +48,21 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 - Missing marks, unavailable coordinate projections, and unreachable local routes are neutral rather than death evidence. They receive bounded recovery and can end only as an explicit unresolved abandonment through Ul'dah, never as a false kill
 - Chernobog alerts are intentionally ignored and never queued because U'Ghamaro Mines navigation is unsupported; every other supported Centurio S rank remains enabled.
 
+### Ordinary S arrival presence
+
+After confirming the destination World, territory, live instance and loaded/interactable player,
+Sentinel observes ordinary S-rank presence for **five seconds** before starting the map approach.
+The native `LogMessage` **9331** signal is localization independent and cannot be supplied by a
+player quoting the message in chat. A fresh `ZoneInit` session buffers that signal during loading;
+the observation clock starts only after readiness. Each hunt/zone/instance arrival clears old evidence.
+
+An exact entity or native presence releases the existing approach and conservative LocateMark search.
+No entity and no presence after five ready seconds uses normal **unresolved** Ul'dah recovery,
+never a fabricated kill/tag/credit. Positive deaths keep their existing handling. If native arrival
+capture was unavailable (for example, the plugin subscribed after arrival), Sentinel keeps the
+conservative search rather than interpreting a missed event as absence. All SS reservations,
+precursors, staging, post-S grace and live SS tracking bypass this gate and retain their hard watchdog.
+
 ### Ground tag approach recovery
 
 Normal TagApproach still starts with the direct ground approach to the live mark. After two stalls, early stops, or rejected starts, Sentinel checks alternate floor-projected endpoints around the mark using actual vnavmesh ground paths and follows the shortest valid route into ranged-tag clearance. Failed movement endpoints are excluded for the current checkpoint; substantial player repositioning rebuilds routes from the new position. Incomplete, excessive-height, body-crossing, and excessive-detour paths are rejected.
@@ -129,3 +144,4 @@ History never changes hunt decisions.
 The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.3.1 assemblies.
 No separately installed SentinelCore plugin is required. See
 [the integration and validation notes](docs/SentinelModern.md) for build instructions.
+

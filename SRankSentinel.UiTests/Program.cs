@@ -52,6 +52,9 @@ internal static partial class Program
             Test("Plugins list includes all companions and handles disabled, missing, and loaded states", TestCompanionPlugins);
             Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
+            Test("native powerful-mark callback accepts only fresh ordinary-S evidence", TestNormalSPresenceCallback);
+            Test("all SS, precursor and post-kill contexts bypass arrival presence gating", TestNormalSPresenceSsExclusions);
+            Test("fast absence recovery preserves History and the queue without a false kill", TestNormalSPresenceUnresolvedHistory);
             Test("killed World Visit destination remains in History without a tag or credit", TestWorldVisitDeathHistory);
             Test("SS watch countdown repairs invalid deadlines without resetting its first start", TestSsWatchCountdownRepair);
             Test("expired SS duplicates release 40 hunts through the real queue policy", TestSsWatchFortyQueuedHunts);
@@ -355,6 +358,7 @@ internal static partial class Program
         // Exercise the real renderer without constructing game services or starting hunt automation.
         var plugin = (Plugin)RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
         SetField(plugin, "config", config);
+        SetField(plugin, "normalSPresence", new OrdinarySPresenceGate());
         SetField(plugin, "configOpen", true);
         SetField(plugin, "pendingAlerts", new Queue<HuntAlertSnapshot>());
         SetField(plugin, "status", "UI regression fixture");
@@ -730,3 +734,4 @@ internal static partial class Program
         }
     });
 }
+

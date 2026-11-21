@@ -357,6 +357,8 @@ public sealed partial class Plugin : IDalamudPlugin
         huntAlerts.Subscribe(OnHuntAlert);
         chat.ChatMessage += OnSonarChatMessage;
         chat.ChatMessage += OnHistoryReward;
+        chat.LogMessage += OnNormalSPresenceLog;
+        clientState.ZoneInit += OnNormalSZoneInit;
         framework.Update += OnFrameworkUpdate;
         pi.UiBuilder.Draw += DrawUi;
         pi.UiBuilder.OpenMainUi += OpenConfig;
@@ -400,6 +402,8 @@ public sealed partial class Plugin : IDalamudPlugin
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
         chat.ChatMessage -= OnHistoryReward;
+        chat.LogMessage -= OnNormalSPresenceLog;
+        clientState.ZoneInit -= OnNormalSZoneInit;
         framework.Update -= OnFrameworkUpdate;
         pi.UiBuilder.Draw -= DrawUi;
         pi.UiBuilder.OpenMainUi -= OpenConfig;
@@ -1448,6 +1452,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartAlert(HuntAlertSnapshot alert, string source)
     {
+        normalSPresence.Reset(alert.World, alert.TerritoryId);
         worldTravel = null;
         if (HuntCatalog.IsAnySsName(alert.CreatureName) &&
             HuntCatalog.TryGetSsStagingLocation(alert.TerritoryId, out var ssLocation))
@@ -1498,6 +1503,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)
     {
+        normalSPresence.Reset();
         vnav.StopSafe();
         current = alert;
         mark = null;
@@ -1751,6 +1757,7 @@ public sealed partial class Plugin : IDalamudPlugin
         {
             RestorePersistentQueueOnFrameworkThread();
             CompleteFaloopLoginIfReady();
+            MaintainNormalSPresenceReadiness();
             if (!config.Enabled || !CanRunHuntTick(now))
                 return;
             travel.RefreshCurrentDataCenter();
@@ -1908,6 +1915,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             case SentinelState.WaitForPlayerReady:
                 TickWaitForPlayerReady(now);
+                return;
+            case SentinelState.CheckNormalSPresence:
+                TickNormalSPresence(now);
                 return;
             case SentinelState.WaitForMesh:
                 TickWaitForMesh();
@@ -3291,7 +3301,7 @@ public sealed partial class Plugin : IDalamudPlugin
             "Hunt territory arrival confirmed: mark={Mark}, world={World}, territory={Territory}, instance={Instance}, mounted={Mounted}, inFlight={InFlight}; preparing local approach",
             current.CreatureName, travel.CurrentWorld, clientState.TerritoryType,
             travel.CurrentInstance, condition[ConditionFlag.Mounted], condition[ConditionFlag.InFlight]);
-        BeginMeshWait("Zoning and player readiness confirmed");
+        BeginNormalSPresenceCheck(now);
     }
 
     private void BeginMeshWait(string reason)
@@ -6907,6 +6917,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ClearCurrent()
     {
+        normalSPresence.Reset();
         ResetSsWatchLifetime();
         worldTravel = null;
         ResetInstanceRangeRecovery();
@@ -8262,6 +8273,7 @@ public sealed partial class Plugin : IDalamudPlugin
         AvoidIncidentalAggro,
         PostKillSsGrace,
         SsWatch,
+        CheckNormalSPresence,
     }
 
     private enum ParkingSettlePhase

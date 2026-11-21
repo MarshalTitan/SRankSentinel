@@ -2,6 +2,18 @@ using SRankSentinel;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("ordinary S exact entity passes arrival immediately", NormalSPresenceTests.ExactEntityWins),
+    ("native powerful-mark presence releases normal hunting", NormalSPresenceTests.PresencePasses),
+    ("absent ordinary S becomes unresolved after five ready seconds", NormalSPresenceTests.NoEvidenceExpires),
+    ("positive death takes priority over presence timeout", NormalSPresenceTests.PositiveDeathWins),
+    ("confirmed zone presence keeps conservative missing-entity recovery", NormalSPresenceTests.ConfirmedPresenceKeepsSearch),
+    ("old territory, World, instance and hunt evidence cannot satisfy arrival", NormalSPresenceTests.StaleContextsRejected),
+    ("loading buffers native presence without starting the observation clock", NormalSPresenceTests.LoadingAndReadiness),
+    ("SS, prey and grace contexts bypass the ordinary S gate", NormalSPresenceTests.SsBypasses),
+    ("several dead ordinary arrivals each cost five seconds", NormalSPresenceTests.SequentialMissingHunts),
+    ("only native powerful-mark ID qualifies, never SS messages or chat quotes", NormalSPresenceTests.NativeSignalOnly),
+    ("single-instance normalization matches native zone context", NormalSPresenceTests.SingleInstance),
+    ("missing arrival capture preserves conservative entity search", NormalSPresenceTests.MissedArrivalIsAmbiguous),
     ("precursor creates a five-minute hard SS deadline", SsWatchTests.PrecursorStartsHardClock),
     ("SS announcement cannot extend the original finite deadline", SsWatchTests.AnnouncementCannotExtend),
     ("repeated provider announcements cannot sustain an SS watch for six hours", SsWatchTests.RepeatedAnnouncementsCannotExtend),
@@ -1038,3 +1050,4 @@ static void CheckpointPullReset()
     Equal(TagMilestone.None, pull.Consumed);
     True(Latch(pull, 95f));
 }
+
