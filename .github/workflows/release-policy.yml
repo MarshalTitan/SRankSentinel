@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        plugin: [SRankSentinel, SentinelHunts]
+        plugin: [SRankSentinel]
     steps:
       - uses: actions/checkout@v4
       - name: Read-only token-free published manifest verification

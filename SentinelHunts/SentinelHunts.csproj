@@ -1,5 +1,8 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
+    <!-- Historical compile-only experiment: installable packaging and publication are retired. -->
+    <Use_DalamudPackager>false</Use_DalamudPackager>
+    <IsPackable>false</IsPackable>
     <Version>0.1.1.0</Version>
     <AssemblyName>SentinelHunts</AssemblyName>
     <RootNamespace>SentinelHunts</RootNamespace>
