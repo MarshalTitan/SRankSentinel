@@ -112,7 +112,7 @@ Published packages remain permanent GitHub Release assets named `SRankSentinel.z
 2. Wait for the normal **Build** workflow to pass.
 3. The version bump automatically starts the **Publish Beta** workflow.
 4. The workflow rebuilds and validates the package, publishes or repairs the `v<version>` prerelease asset, and updates this repository's legacy `repo.json` with the new version and permanent download URLs.
-5. After public ZIP validation, the pinned shared distribution action promotes the owning entry in this repository's root `repo.json`, optionally notifies the central generator, and always verifies the exact public child/central entry. This also applies to SentinelHunts without changing SRankSentinel's entry. No child writes the central manifest.
+5. After public ZIP validation, the pinned shared distribution action promotes the owning entry in this repository's root `repo.json`, optionally notifies the central generator, and always verifies the exact public child/central entry. No child writes the central manifest.
 
 Dalamud compares `AssemblyVersion` in `repo.json` with the installed assembly. The tester receives the newer beta through the normal **Update** button while development can continue on `main` between published versions.
 
@@ -145,3 +145,8 @@ The plugin bundles the exact published SentinelCore and SentinelCore.UI 0.3.1 as
 No separately installed SentinelCore plugin is required. See
 [the integration and validation notes](docs/SentinelModern.md) for build instructions.
 
+
+
+## Retired experiment
+
+The separate SentinelHunts experiment is retired. Its child/central feed entries, publishing workflows and old installable releases have been removed. Source under `SentinelHunts/` is historical engineering material only. Normal SRankSentinel releases remain supported and unchanged.

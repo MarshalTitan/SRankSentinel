@@ -1,0 +1,41 @@
+name: Retire obsolete Hunts artifacts
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/retire-hunts.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  retire:
+    if: github.repository == 'MarshalTitan/SRankSentinel' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove only explicitly retired experimental releases and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo=MarshalTitan/SRankSentinel
+          before=$(gh api "repos/$repo/releases?per_page=100" --paginate --jq '.[] | select(.tag_name | test("^v0\\.7\\.")) | [.id,.tag_name,(.assets | map([.id,.name,.digest]))] | @json')
+          for tag in v0.1.1.0-sentinelhunts v0.1.0.0-sentinelhunts sentinelhunts-v0.1.0.0; do
+            if gh api "repos/$repo/releases/tags/$tag" > /tmp/hunts-release.json 2>/dev/null; then
+              jq -e --arg tag "$tag" '.tag_name == $tag and ([.assets[].name] | all(. == "SentinelHunts.zip"))' /tmp/hunts-release.json > /dev/null
+              id=$(jq -r .id /tmp/hunts-release.json)
+              gh api --method DELETE "repos/$repo/releases/$id"
+              echo "Retired release $tag and its experimental ZIP. Historical Git tag retained."
+            else
+              echo "No release remains for $tag."
+            fi
+          done
+          gh api "repos/$repo/actions/artifacts?per_page=100" --paginate --jq '.artifacts[] | select(.name | test("^SentinelHunts(-|$)")) | .id' > /tmp/hunts-artifacts.txt
+          while read -r id; do
+            test -n "$id" || continue
+            gh api --method DELETE "repos/$repo/actions/artifacts/$id"
+            echo "Retired experimental Hunts CI artifact $id."
+          done < /tmp/hunts-artifacts.txt
+          after=$(gh api "repos/$repo/releases?per_page=100" --paginate --jq '.[] | select(.tag_name | test("^v0\\.7\\.")) | [.id,.tag_name,(.assets | map([.id,.name,.digest]))] | @json')
+          test "$before" = "$after"
+          echo 'All normal v0.7.x release IDs, tags and asset IDs/digests are unchanged.'
