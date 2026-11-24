@@ -1,7 +1,6 @@
-# Solo combat assist test build
+# Solo combat assist
 
-Based on public 0.7.74.0, including the personal contribution receipt. The optional setting defaults off.
-The public catalog is unchanged during the trial.
+Available in S Rank Sentinel 0.7.75.0. **Stay and fight with Wrath + BossMod** defaults off. You can turn it off during a fight: Sentinel releases its Wrath lease and resumes normal tagging and retreat. You do not need to stop the plugin or reset the hunt.
 
 ## Setup
 
