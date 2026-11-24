@@ -756,6 +756,35 @@ const reviewedOrdinaryPresencePatches = {
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  for (const [change, original] of [
+  [
+    "        fullAssist.End(\"Plugin unloading\");\n        DisposeRemoteRecovery();",
+    "        DisposeRemoteRecovery();"
+  ],
+  [
+    "            if (!config.Enabled || !CanRunHuntTick(now))\n            {\n                if (state == SentinelState.AssistedCombat) fullAssist.End(\"Automation unavailable\");\n                return;\n            }",
+    "            if (!config.Enabled || !CanRunHuntTick(now))\n                return;"
+  ],
+  [
+    "        if (state == SentinelState.AssistedCombat)\n        {\n            TickAssistedCombat(now);\n            return;\n        }\n        if (TickSsReservationWatchdog(now))",
+    "        if (TickSsReservationWatchdog(now))"
+  ],
+  [
+    "                    mark.Name.TextValue, pullCycle, pending.Checkpoint.Label, tagCycle.Consumed, activeTagActionId, mark.GameObjectId, sequence);\n                if (firstTagOfPull && pending.Checkpoint.Kind == TagMilestone.Initial && config.FullCombatAssist)\n                    TryBeginCombatAssist(mark);",
+    "                    mark.Name.TextValue, pullCycle, pending.Checkpoint.Label, tagCycle.Consumed, activeTagActionId, mark.GameObjectId, sequence);"
+  ],
+  [
+    "        if (previous == SentinelState.AssistedCombat && previous != next)\n            fullAssist.End(\"Leaving assisted combat\");\n        if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))",
+    "        if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))"
+  ],
+  [
+    "        CheckNormalSPresence,\n        AssistedCombat,\n",
+    "        CheckNormalSPresence,\n"
+  ]
+].filter(() => path === "Plugin.cs")) {
+    assert(source.split(change).length === 2, "Missing or duplicated assisted combat hook");
+    source = source.replace(change, original);
+  }
   for (const [change, original] of reviewedOrdinaryPresencePatches[path] ?? []) {
     assert(source.split(change).length === 2, `Missing/duplicated ordinary S arrival edit: ${path}`);
     source = source.replace(change, original);

@@ -52,6 +52,8 @@ internal static partial class Program
             Test("Plugins list includes all companions and handles disabled, missing, and loaded states", TestCompanionPlugins);
             Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
+            Test("full combat assist is opt-in and round-trips without changing checkpoint settings", TestAssistDefaults);
+            Test("production assist adapter probes BossMod movement and exact module; never grants unguarded Wrath", TestAssistReadiness);
             Test("native powerful-mark callback accepts only fresh ordinary-S evidence", TestNormalSPresenceCallback);
             Test("all SS, precursor and post-kill contexts bypass arrival presence gating", TestNormalSPresenceSsExclusions);
             Test("fast absence recovery preserves History and the queue without a false kill", TestNormalSPresenceUnresolvedHistory);

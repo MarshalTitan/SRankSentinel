@@ -27,6 +27,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool TagAt75Percent { get; set; } = true;
     public bool TagAt50Percent { get; set; } = true;
     public bool TagAt25Percent { get; set; } = true;
+    public bool FullCombatAssist { get; set; } // opt-in; absent on existing installs is false
     public bool RetagAfterRaise { get; set; } = true;
     public string FaloopUsername { get; set; } = string.Empty;
     public string FaloopSessionId { get; set; } = string.Empty;

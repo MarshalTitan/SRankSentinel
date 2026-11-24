@@ -1,7 +1,8 @@
 using SRankSentinel;
 
-var tests = new (string Name, Action Run)[]
-{
+(string Name, Action Run)[] tests =
+[
+    .. CombatAssistTests.Cases(),
     ("ordinary S exact entity passes arrival immediately", NormalSPresenceTests.ExactEntityWins),
     ("native powerful-mark presence releases normal hunting", NormalSPresenceTests.PresencePasses),
     ("absent ordinary S becomes unresolved after five ready seconds", NormalSPresenceTests.NoEvidenceExpires),
@@ -116,7 +117,7 @@ var tests = new (string Name, Action Run)[]
     ("second takeoff timeout abandons without a ground run", SecondTakeoffTimeoutDoesNotGroundRun),
     ("second cycle starts immediately once flight confirms", SecondCycleConfirmedFlightPermitsRoute),
     ("a genuinely non-flyable territory permits an explicit ground route", NonFlyableTerritoryPermitsGroundRoute),
-};
+];
 
 var failures = 0;
 foreach (var test in tests)
