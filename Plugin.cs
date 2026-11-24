@@ -328,6 +328,7 @@ public sealed partial class Plugin : IDalamudPlugin
         IDataManager dataManager,
         IGameGui gameGui,
         IFramework framework,
+        IPartyList partyList,
         ITargetManager targetManager,
         IPluginLog pluginLog,
         IPlayerState playerState)
@@ -340,6 +341,8 @@ public sealed partial class Plugin : IDalamudPlugin
         objects = objectTable;
         data = dataManager;
         this.framework = framework;
+        assistParty = partyList;
+        assistTargets = targetManager;
         log = pluginLog;
 
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
@@ -356,6 +359,7 @@ public sealed partial class Plugin : IDalamudPlugin
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
         chat.ChatMessage += OnSonarChatMessage;
+        chat.LogMessage += OnHistoryContribution;
         chat.ChatMessage += OnHistoryReward;
         chat.LogMessage += OnNormalSPresenceLog;
         clientState.ZoneInit += OnNormalSZoneInit;
@@ -395,6 +399,7 @@ public sealed partial class Plugin : IDalamudPlugin
     public void Dispose()
     {
         fullAssist.End("Plugin unloading");
+        (assistProvider as IDisposable)?.Dispose();
         DisposeRemoteRecovery();
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
@@ -402,6 +407,7 @@ public sealed partial class Plugin : IDalamudPlugin
         faloop.Dispose();
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
+        chat.LogMessage -= OnHistoryContribution;
         chat.ChatMessage -= OnHistoryReward;
         chat.LogMessage -= OnNormalSPresenceLog;
         clientState.ZoneInit -= OnNormalSZoneInit;
@@ -1453,6 +1459,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartAlert(HuntAlertSnapshot alert, string source)
     {
+        NewAssistHunt();
         normalSPresence.Reset(alert.World, alert.TerritoryId);
         worldTravel = null;
         if (HuntCatalog.IsAnySsName(alert.CreatureName) &&
@@ -1504,6 +1511,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)
     {
+        NewAssistHunt();
         normalSPresence.Reset();
         vnav.StopSafe();
         current = alert;
@@ -1750,6 +1758,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private void OnFrameworkUpdate(IFramework _)
     {
         var now = DateTime.UtcNow;
+        CheckAssistFrame(now);
         if ((now - lastTickUtc).TotalMilliseconds < 250)
             return;
         lastTickUtc = now;

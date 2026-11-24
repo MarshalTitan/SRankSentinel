@@ -1,8 +1,6 @@
 namespace SRankSentinel;
 
-// The owner token is valid only for one positively tagged actor, job and pull. A provider must
-// enforce hostile target identity AND live combat at dispatch. Polling is for handoff/lifecycle,
-// not a substitute for that dispatch guard.
+// One observed actor/job/pull. Wrath may already have submitted an action when a reset is observed.
 internal readonly record struct AssistFight(ulong Actor, uint BaseId, uint Job, int Pull);
 internal readonly record struct AssistFrame(AssistFight Fight, bool Enabled, bool Exact, bool Alive,
     bool InCombat, float Hp, float EngageHp, bool ConfirmedInitial, bool PlayerUsable)
@@ -20,7 +18,7 @@ internal interface IGuardedRotation : IDisposable
 internal interface ICombatAssistProvider
 {
     string? Unavailable(AssistFight fight);
-    // Atomic conditional grant, or no ownership. A rejected/partial acquisition cleans up itself.
+    // A rejected or partial acquisition must clean up its own temporary overrides.
     IGuardedRotation? TryAcquire(AssistFight fight);
 }
 
@@ -29,12 +27,17 @@ internal sealed class FullCombatAssist
     private IGuardedRotation? rotation;
     private AssistFight ownedFight;
     private AssistFight? awaitingRaise;
+    private float lowestHp = float.PositiveInfinity;
+    internal bool ResetSuspected { get; private set; }
+    internal bool AwaitingRaise => awaitingRaise is not null;
+    internal static bool IsSolo(int partySize, bool alliance, bool crossWorldParty) =>
+        partySize is 0 or 1 && !alliance && !crossWorldParty;
     internal bool Active => rotation is not null;
     internal string Detail { get; private set; } = "Waiting for the initial confirmed tag";
 
     internal bool TryEnter(AssistFrame frame, ICombatAssistProvider provider)
     {
-        if (!frame.Eligible || Active) return false;
+        if (!frame.Eligible || Active || ResetSuspected) return false;
         try
         {
             if (provider.Unavailable(frame.Fight) is { } why)
@@ -49,6 +52,7 @@ internal sealed class FullCombatAssist
                 return false;
             }
             ownedFight = frame.Fight;
+            lowestHp = Math.Min(lowestHp, frame.Hp);
             Detail = "Wrath rotation + BossMod mechanic avoidance";
             return true;
         }
@@ -60,6 +64,8 @@ internal sealed class FullCombatAssist
         if (!Active) return false;
         try
         {
+            if (frame.Exact && frame.Alive && frame.Fight == ownedFight && !ObserveBoss(frame.InCombat, frame.Hp))
+                return false;
             if (frame.Eligible && frame.Fight == ownedFight && rotation!.Healthy)
             {
                 if (provider.Unavailable(frame.Fight) is not { } why) return true;
@@ -82,7 +88,30 @@ internal sealed class FullCombatAssist
     {
         var fight = awaitingRaise;
         awaitingRaise = null;
-        return acceptedRaise && fight == frame.Fight && TryEnter(frame, provider);
+        return acceptedRaise && fight == frame.Fight && ObserveBoss(frame.InCombat, frame.Hp) && TryEnter(frame, provider);
+    }
+
+    // This warning only disarms assist. The existing stable full-HP reset detector still owns
+    // the tag cycle. Keep the low-water mark across Raise so several smaller heals add up.
+    internal bool ObserveBoss(bool inCombat, float hp)
+    {
+        if (ResetSuspected) return false;
+        if (!inCombat || !float.IsFinite(hp) || hp - lowestHp >= 5f)
+        {
+            End(inCombat ? $"Boss HP rose from {lowestHp:0.0}% to {hp:0.0}%; safe tagging for this hunt"
+                         : "Boss left combat; safe tagging for this hunt");
+            ResetSuspected = true;
+            return false;
+        }
+        lowestHp = Math.Min(lowestHp, hp);
+        return true;
+    }
+
+    internal void NewHunt()
+    {
+        ResetSuspected = false;
+        End("Waiting for the initial confirmed tag");
+        lowestHp = float.PositiveInfinity;
     }
 
     internal void End(string reason)
@@ -91,7 +120,7 @@ internal sealed class FullCombatAssist
         var old = rotation;
         rotation = null;
         ownedFight = default;
-        Detail = reason;
+        if (!ResetSuspected) Detail = reason;
         old?.Dispose();
     }
 }

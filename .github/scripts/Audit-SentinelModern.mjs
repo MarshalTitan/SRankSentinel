@@ -757,6 +757,12 @@ const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
   for (const [change, original] of [
+    ["        IPartyList partyList,\n        ITargetManager targetManager,", "        ITargetManager targetManager,"],
+    ["        this.framework = framework;\n        assistParty = partyList;\n        assistTargets = targetManager;", "        this.framework = framework;"],
+    ["        CheckAssistFrame(now);\n        if ((now - lastTickUtc).TotalMilliseconds < 250)", "        if ((now - lastTickUtc).TotalMilliseconds < 250)"],
+    ["        fullAssist.End(\"Plugin unloading\");\n        (assistProvider as IDisposable)?.Dispose();", "        fullAssist.End(\"Plugin unloading\");"],
+    ["        NewAssistHunt();\n        normalSPresence.Reset(alert.World, alert.TerritoryId);", "        normalSPresence.Reset(alert.World, alert.TerritoryId);"],
+    ["    private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {\n        NewAssistHunt();", "    private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)\n    {"],
   [
     "        fullAssist.End(\"Plugin unloading\");\n        DisposeRemoteRecovery();",
     "        DisposeRemoteRecovery();"
@@ -831,7 +837,9 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
     }
     // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
     for (const hook of [
+      "        chat.LogMessage += OnHistoryContribution;\n",
       "        chat.ChatMessage += OnHistoryReward;\n",
+      "        chat.LogMessage -= OnHistoryContribution;\n",
       "        chat.ChatMessage -= OnHistoryReward;\n",
       "        ObserveHistorySpawn(huntType, world, creature, territory, instance, source, occurredAtUtc);\n",
       "                ObserveHistoryTag(current, now);\n",

@@ -130,7 +130,7 @@ jobs:
             Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "Privacy maintenance: replace personal copyright attribution in bundled Core package and assembly metadata with project attribution. Runtime source, saved configuration, character identity, Discord routing, and gameplay behavior are unchanged." --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "History now confirms personal hunt credit from the game contribution reward as well as hunt currency receipts, when matched to one tagged, confirmed kill." --prerelease
             if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 

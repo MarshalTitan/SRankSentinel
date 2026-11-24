@@ -347,7 +347,7 @@ public sealed partial class Plugin
         var assist = config.FullCombatAssist;
         changed |= DrawBoolean("Stay and fight with Wrath + BossMod", ref assist);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("When enabled, Sentinel may remain in combat after its initial confirmed tag if Wrath Auto-Rotation and BossMod AI are both ready for the exact active S/SS rank. Otherwise Sentinel uses its normal safe-tag behavior.");
+            ImGui.SetTooltip("Solo: configure your job in Wrath and leave standalone Auto-Rotation off. Enable BossMod AI and allow movement. After a confirmed tag, Sentinel can fight until the boss dies, leaves combat, or heals 5 percentage points. A queued action may still land.");
         if (assist) ImGui.TextWrapped(assistReadiness ?? "Waiting for the initial confirmed tag");
         if (!changed)
             return;

@@ -22,6 +22,31 @@ internal static class CombatAssistTests
     private static void Check(bool ok) { if (!ok) throw new Exception("Combat assist regression"); }
     internal static IEnumerable<(string, Action)> Cases()
     {
+        yield return ("solo eligibility rejects party, alliance and cross-world party", () => {
+            Check(FullCombatAssist.IsSolo(0,false,false) && FullCombatAssist.IsSolo(1,false,false));
+            Check(!FullCombatAssist.IsSolo(2,false,false) && !FullCombatAssist.IsSolo(0,true,false) &&
+                  !FullCombatAssist.IsSolo(0,false,true));
+        });
+        foreach (bool combatDrop in new[] { true, false })
+            yield return ("boss " + (combatDrop ? "left combat despite add aggro" : "healed five points cumulatively") +
+                " locks assist until the next hunt's confirmed tag", () => {
+                var a = new FullCombatAssist(); var p = new Provider();
+                Check(a.TryEnter(Valid,p));
+                Check(a.ObserveBoss(true,60) && a.ObserveBoss(true,62) && a.ObserveBoss(true,64.9f));
+                Check(!a.ObserveBoss(!combatDrop,combatDrop ? 64.9f : 65));
+                Check(a.ResetSuspected && !a.Active && p.Last.Releases == 1);
+                a.End("ground retreat");
+                var later = Valid with { Fight = Valid.Fight with { Pull = 2 } };
+                Check(!a.TryEnter(later,p) && !a.TryResume(later,true,p) && p.Acquires == 1);
+                a.NewHunt();
+                Check(!a.TryEnter(Valid with { ConfirmedInitial = false },p) && !a.TryEnter(Valid with { InCombat = false },p));
+                Check(a.TryEnter(Valid with { Fight = Valid.Fight with { Actor = 102 } },p));
+            });
+        yield return ("a boss heal across death suppresses Raise handoff for this hunt", () => {
+            var a = new FullCombatAssist(); var p = new Provider(); Check(a.TryEnter(Valid,p));
+            Check(a.ObserveBoss(true,31)); a.SuspendForDeath();
+            Check(!a.TryResume(Valid with {Hp = 43},true,p) && a.ResetSuspected && !a.Active && p.Acquires == 1);
+        });
         foreach (var (name, frame) in new (string, AssistFrame)[] {
             ("off", Valid with { Enabled = false }), ("precursor or wrong identity", Valid with { Exact = false }),
             ("boss dead", Valid with { Alive = false }), ("idle boss", Valid with { InCombat = false }),
@@ -31,7 +56,7 @@ internal static class CombatAssistTests
                 var p = new Provider(); Check(!new FullCombatAssist().TryEnter(frame,p) && p.Acquires == 0);
             });
         foreach (var reason in new[] { "Wrath missing", "job not ready", "BossMod missing", "AI disabled",
-                     "movement forbidden", "module missing", "hostile target guard unavailable" })
+                     "movement forbidden", "module missing", "standalone rotation already enabled" })
             yield return ("safe tag fallback: " + reason, () => {
                 var p = new Provider { Missing = reason }; var a = new FullCombatAssist();
                 Check(!a.TryEnter(Valid,p) && !a.Active && p.Acquires == 0 && a.Detail == reason);

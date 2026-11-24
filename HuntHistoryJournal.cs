@@ -149,20 +149,21 @@ internal sealed class HuntHistoryJournal(Configuration config, Func<string, bool
     }
 
     internal bool Reward(string world, uint territory, int instance, HuntAlertSnapshot? current,
-        bool currentPullTagged, DateTime now, string reward)
+        bool currentPullTagged, DateTime now, string reward, bool currentVisiblyAlive = false)
     {
         lock (sync)
         {
+            if (currentVisiblyAlive) return false;
             var candidates = CreditCandidates.Where(entry =>
-                entry.CreditedAtUtc is null && taggedThisSession.Contains(entry.Id) &&
+                taggedThisSession.Contains(entry.Id) &&
                 entry.World.Equals(world, StringComparison.OrdinalIgnoreCase) &&
                 entry.TerritoryId == territory && entry.Instance == Math.Max(1, instance) &&
                 (entry.KilledAtUtc is { } killed && now >= killed && now - killed <= RewardWindow &&
                     completedTaggedPulls.Contains(entry.Id) ||
                  entry.KilledAtUtc is null && currentPullTagged && current is not null &&
                     Find(current)?.Id == entry.Id)).ToArray();
-            // Do not guess which hunt earned a generic currency line if the context is ambiguous.
-            if (candidates.Length != 1) return false;
+            // A second line from an already credited kill must not spill onto a different hunt.
+            if (candidates.Length != 1 || candidates[0].CreditedAtUtc is not null) return false;
             var entry = candidates[0];
             pendingRewards[entry.Id] = (now, reward);
             return TryCredit(entry, now);
