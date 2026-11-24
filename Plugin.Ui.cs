@@ -248,6 +248,7 @@ public sealed partial class Plugin
         if (DrawBoolean("Enabled", ref enabled))
         {
             config.Enabled = enabled;
+            if (!enabled && state == SentinelState.AssistedCombat) fullAssist.End("Sentinel disabled");
             if (!enabled)
             {
                 vnav.StopSafe();
@@ -341,12 +342,21 @@ public sealed partial class Plugin
         changed |= DrawBoolean("Additional tag at 50%", ref at50);
         changed |= DrawBoolean("Additional tag at 25%", ref at25);
         changed |= DrawBoolean("Retag after Raise", ref afterRaise);
+        ImGui.Spacing();
+        ImGui.TextUnformatted("FULL COMBAT ASSIST");
+        var assist = config.FullCombatAssist;
+        changed |= DrawBoolean("Stay and fight with Wrath + BossMod", ref assist);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Solo: configure your job in Wrath and leave standalone Auto-Rotation off. Enable BossMod AI and allow movement. After a confirmed tag, Sentinel can fight until the boss dies, leaves combat, or heals 5 percentage points. A queued action may still land.");
+        if (assist) ImGui.TextWrapped(assistReadiness ?? "Waiting for the initial confirmed tag");
         if (!changed)
             return;
         config.TagAt75Percent = at75;
         config.TagAt50Percent = at50;
         config.TagAt25Percent = at25;
         config.RetagAfterRaise = afterRaise;
+        config.FullCombatAssist = assist;
+        if (!assist && state == SentinelState.AssistedCombat) fullAssist.End("Combat assist disabled");
         config.Save();
     }
 

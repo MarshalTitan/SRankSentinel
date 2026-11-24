@@ -328,6 +328,7 @@ public sealed partial class Plugin : IDalamudPlugin
         IDataManager dataManager,
         IGameGui gameGui,
         IFramework framework,
+        IPartyList partyList,
         ITargetManager targetManager,
         IPluginLog pluginLog,
         IPlayerState playerState)
@@ -340,6 +341,8 @@ public sealed partial class Plugin : IDalamudPlugin
         objects = objectTable;
         data = dataManager;
         this.framework = framework;
+        assistParty = partyList;
+        assistTargets = targetManager;
         log = pluginLog;
 
         config = pi.GetPluginConfig() as Configuration ?? new Configuration();
@@ -395,6 +398,8 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        fullAssist.End("Plugin unloading");
+        (assistProvider as IDisposable)?.Dispose();
         DisposeRemoteRecovery();
         vnav.StopSafe();
         faloop.EventReceived -= OnFaloopEvent;
@@ -1454,6 +1459,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartAlert(HuntAlertSnapshot alert, string source)
     {
+        NewAssistHunt();
         normalSPresence.Reset(alert.World, alert.TerritoryId);
         worldTravel = null;
         if (HuntCatalog.IsAnySsName(alert.CreatureName) &&
@@ -1505,6 +1511,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void StartSsAlertDirect(HuntAlertSnapshot alert, string source)
     {
+        NewAssistHunt();
         normalSPresence.Reset();
         vnav.StopSafe();
         current = alert;
@@ -1751,6 +1758,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private void OnFrameworkUpdate(IFramework _)
     {
         var now = DateTime.UtcNow;
+        CheckAssistFrame(now);
         if ((now - lastTickUtc).TotalMilliseconds < 250)
             return;
         lastTickUtc = now;
@@ -1761,7 +1769,10 @@ public sealed partial class Plugin : IDalamudPlugin
             CompleteFaloopLoginIfReady();
             MaintainNormalSPresenceReadiness();
             if (!config.Enabled || !CanRunHuntTick(now))
+            {
+                if (state == SentinelState.AssistedCombat) fullAssist.End("Automation unavailable");
                 return;
+            }
             travel.RefreshCurrentDataCenter();
             if (config.EnableFaloop)
             {
@@ -1825,6 +1836,11 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void Tick(DateTime now)
     {
+        if (state == SentinelState.AssistedCombat)
+        {
+            TickAssistedCombat(now);
+            return;
+        }
         if (TickSsReservationWatchdog(now))
             return;
 
@@ -4969,6 +4985,8 @@ public sealed partial class Plugin : IDalamudPlugin
                 log.Information(
                     "Tag confirmed by handled action sequence: {Mark}, pull={Pull}, checkpoint={Checkpoint}, consumed={Consumed}, action={ActionId}, target={TargetId}, sequence={Sequence}",
                     mark.Name.TextValue, pullCycle, pending.Checkpoint.Label, tagCycle.Consumed, activeTagActionId, mark.GameObjectId, sequence);
+                if (firstTagOfPull && pending.Checkpoint.Kind == TagMilestone.Initial && config.FullCombatAssist)
+                    TryBeginCombatAssist(mark);
                 return;
             }
 
@@ -8186,6 +8204,8 @@ public sealed partial class Plugin : IDalamudPlugin
             resetToUldahRequestReason = string.Empty;
         }
 
+        if (previous == SentinelState.AssistedCombat && previous != next)
+            fullAssist.End("Leaving assisted combat");
         if (IsInstanceRecoveryState(previous) && !IsInstanceRecoveryState(next))
             ResetInstanceRangeRecovery();
         state = next;
@@ -8276,6 +8296,7 @@ public sealed partial class Plugin : IDalamudPlugin
         PostKillSsGrace,
         SsWatch,
         CheckNormalSPresence,
+        AssistedCombat,
     }
 
     private enum ParkingSettlePhase
