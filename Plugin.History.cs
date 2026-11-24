@@ -8,6 +8,7 @@ public sealed partial class Plugin
 {
     private HuntHistoryJournal? historyJournal;
     private string[]? historyCurrencyNames;
+    private string? historyContributionText;
     private HuntHistoryJournal History => historyJournal ??= new(config, IsHuntDataCenterEnabled);
 
     private void ObserveHistorySpawn(string? huntType, string? world, string? creature, uint territory,
@@ -52,26 +53,46 @@ public sealed partial class Plugin
     private void ObserveHistoryKill(HuntAlertSnapshot alert, bool taggedFinalPull, DateTime now) =>
         ObserveHistory(() => History.Kill(alert, taggedFinalPull, now));
 
+    private void OnHistoryContribution(ILogMessage message)
+    {
+        var reward = HuntRewardReceipt.MatchNative(message.LogMessageId);
+        if (reward is null) return;
+        // A native LogMessage is a game-sheet event, not a player's chat message.
+        ObserveHistory(() => RecordHistoryReward(reward, $"native LogMessage {message.LogMessageId} (SystemMessage/57)"));
+    }
+
     private void OnHistoryReward(IHandleableChatMessage message)
     {
-        // Chat reports from Sonar, players, echo, or a generic defeat line are not personal credit.
-        if (message.LogKind != XivChatType.SystemMessage || !string.IsNullOrWhiteSpace(message.OriginalSender.ExtractText()))
-            return;
+        if (!HuntRewardReceipt.IsRewardSource(message.LogKind, message.OriginalSender.IsEmpty)) return;
         ObserveHistory(() =>
         {
+            // Also cover server messages printed directly to chat rather than via Dalamud's
+            // native log queue. Compare the complete client-language sheet text, never a substring.
+            historyContributionText ??= data.GetExcelSheet<LogMessage>()
+                .TryGetRow(HuntRewardReceipt.ContributionMessageId, out var row) ? row.Text.ExtractText() : string.Empty;
             historyCurrencyNames ??= GetHistoryCurrencyNames();
-            var reward = HuntRewardReceipt.Match(message.OriginalMessage.ExtractText(), historyCurrencyNames);
-            if (reward is null) return false;
-            if (current is not null && !killConfirmed)
-            {
-                if (!pullCycleTagged || !markEverIdentified || !markCombatObserved ||
-                    DateTime.UtcNow - lastMarkSeenUtc > TimeSpan.FromSeconds(15)) return false;
-                var visible = FindMark();
-                if (visible is not null && !visible.IsDead && visible.CurrentHp > 0) return false;
-            }
-            return History.Reward(travel.CurrentWorld, clientState.TerritoryType, travel.CurrentInstance,
-                current, pullCycleTagged, DateTime.UtcNow, reward);
+            var reward = HuntRewardReceipt.MatchChat(message.LogKind, message.OriginalMessage.ExtractText(),
+                historyContributionText, historyCurrencyNames);
+            return reward is not null && RecordHistoryReward(reward, $"chat {message.LogKind}/{(int)message.LogKind}");
         });
+    }
+
+    private bool RecordHistoryReward(string reward, string source)
+    {
+        var now = DateTime.UtcNow;
+        var world = travel.CurrentWorld;
+        var territory = clientState.TerritoryType;
+        if (!travel.TryReadLiveInstance(out var instance)) return false;
+        var activeHere = current is not null && current.TerritoryId == territory &&
+            current.World.Equals(world, StringComparison.OrdinalIgnoreCase) && current.Instance == Math.Max(1, instance);
+        var visible = activeHere ? FindMark() : null;
+        var live = visible is { IsDead: false, CurrentHp: > 0 };
+        var eligiblePull = activeHere && !killConfirmed && pullCycleTagged && markEverIdentified &&
+            markCombatObserved && now - lastMarkSeenUtc <= TimeSpan.FromSeconds(15);
+        var credited = History.Reward(world, territory, instance, current, eligiblePull, now, reward, live);
+        log.Information("History reward: {Reward}, source={Source}, world={World}, territory={Territory}, instance={Instance}, visibleLiveVeto={Live}, creditConfirmedNow={Credited}",
+            reward, source, world, territory, instance, live, credited);
+        return credited;
     }
 
     private string[] GetHistoryCurrencyNames()
@@ -104,6 +125,22 @@ public sealed partial class Plugin
 
 internal static class HuntRewardReceipt
 {
+    // LogMessage sheet: 4442 (LogKind 57). Item/currency acquisitions also use 62 (LootNotice).
+    internal const uint ContributionMessageId = 4442;
+    internal const string Contribution = "Hunt contribution reward";
+
+    internal static string? MatchNative(uint id) => id == ContributionMessageId ? Contribution : null;
+
+    internal static bool IsRewardSource(XivChatType kind, bool senderEmpty) =>
+        senderEmpty && kind is (XivChatType.SystemMessage or XivChatType.LootNotice);
+
+    internal static string? MatchChat(XivChatType kind, string text, string localizedContribution, IEnumerable<string> currencyNames)
+    {
+        if (kind == XivChatType.SystemMessage && localizedContribution.Length != 0 &&
+            text.Equals(localizedContribution, StringComparison.Ordinal)) return Contribution;
+        return Match(text, currencyNames);
+    }
+
     internal static string? Match(string text, IEnumerable<string> currencyNames)
     {
         // Only positive acquisition wording, including the supported game-client languages.

@@ -356,6 +356,7 @@ public sealed partial class Plugin : IDalamudPlugin
         huntAlerts = pi.GetIpcSubscriber<HuntTrainMessageDto, object>("HuntAlerts.OnHuntTrainMessageReceived");
         huntAlerts.Subscribe(OnHuntAlert);
         chat.ChatMessage += OnSonarChatMessage;
+        chat.LogMessage += OnHistoryContribution;
         chat.ChatMessage += OnHistoryReward;
         chat.LogMessage += OnNormalSPresenceLog;
         clientState.ZoneInit += OnNormalSZoneInit;
@@ -401,6 +402,7 @@ public sealed partial class Plugin : IDalamudPlugin
         faloop.Dispose();
         huntAlerts.Unsubscribe(OnHuntAlert);
         chat.ChatMessage -= OnSonarChatMessage;
+        chat.LogMessage -= OnHistoryContribution;
         chat.ChatMessage -= OnHistoryReward;
         chat.LogMessage -= OnNormalSPresenceLog;
         clientState.ZoneInit -= OnNormalSZoneInit;

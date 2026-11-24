@@ -802,7 +802,9 @@ for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
     }
     // Only these exact passive observer insertions are allowed over the unchanged hunt baseline.
     for (const hook of [
+      "        chat.LogMessage += OnHistoryContribution;\n",
       "        chat.ChatMessage += OnHistoryReward;\n",
+      "        chat.LogMessage -= OnHistoryContribution;\n",
       "        chat.ChatMessage -= OnHistoryReward;\n",
       "        ObserveHistorySpawn(huntType, world, creature, territory, instance, source, occurredAtUtc);\n",
       "                ObserveHistoryTag(current, now);\n",

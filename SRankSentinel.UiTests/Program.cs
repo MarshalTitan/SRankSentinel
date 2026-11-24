@@ -62,6 +62,9 @@ internal static partial class Program
             Test("personal credit requires a tagged final pull, kill, and contextual reward in either order", TestHistoryCredit);
             Test("history rejects stale, wrong-instance, ambiguous, reset, and restored-session credit", TestHistoryCreditRejections);
             Test("reward recognition accepts acquisition and rejects other messages", TestRewardReceipts);
+            Test("native and localized contribution receipts require the correct source", TestContributionSources);
+            Test("contribution before or after death credits one tagged hunt, including across Clear", TestContributionOrdering);
+            Test("a live, ambiguous, stale or wrong-context receipt cannot grant personal credit", TestContributionProtection);
             Test("unified populated history and stacked activity stay within bounds at multiple sizes/scales", TestPopulatedHistory);
             Test("compact companion cards contain their status/actions at all UI scales", TestCompanionCardLayout);
             Test("empty History renders summary cards without fabricating records", TestEmptyHistoryLayout);
