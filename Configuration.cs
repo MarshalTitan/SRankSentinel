@@ -27,6 +27,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool TagAt75Percent { get; set; } = true;
     public bool TagAt50Percent { get; set; } = true;
     public bool TagAt25Percent { get; set; } = true;
+    public CombatRotationProvider RotationProvider { get; set; } = CombatRotationProvider.WrathCombo;
     public bool FullCombatAssist { get; set; } // opt-in; absent on existing installs is false
     public Dictionary<ulong, HuntGearset> HuntingGearsets { get; set; } = [];
     public bool RetagAfterRaise { get; set; } = true;

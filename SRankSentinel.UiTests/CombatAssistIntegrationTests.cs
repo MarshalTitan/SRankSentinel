@@ -9,18 +9,56 @@ internal static partial class Program
     {
         var cfg = JsonSerializer.Deserialize<Configuration>("{}")!;
         Check(!cfg.FullCombatAssist && cfg.RetagAfterRaise && cfg.TagAt75Percent, "Old saves must retain safe tagging");
+        Check(cfg.RotationProvider == CombatRotationProvider.WrathCombo, "Existing installs lost their provider.");
+        cfg.RotationProvider = CombatRotationProvider.RotationSolverReborn;
         cfg.FullCombatAssist = true;
         cfg.TagAt50Percent = false;
         var restored = JsonSerializer.Deserialize<Configuration>(JsonSerializer.Serialize(cfg))!;
-        Check(restored.FullCombatAssist && !restored.TagAt50Percent && restored.RetagAfterRaise, "Tag options must be independent");
+        Check(restored.RotationProvider == CombatRotationProvider.RotationSolverReborn && restored.FullCombatAssist && !restored.TagAt50Percent && restored.RetagAfterRaise, "Tag options must be independent");
+    }
+
+    private static void TestAssistProviderSwitch()
+    {
+        var pi = DispatchProxy.Create<IDalamudPluginInterface, AssistProbeInterface>();
+        var probe = (AssistProbeInterface)(object)pi;
+        probe.ExpectedOid = 202;
+        using var router = new SelectedCombatRotation(pi);
+        var config = new Configuration { Enabled = true, FullCombatAssist = true };
+        var plugin = CreateConsumer(config);
+        var assist = new FullCombatAssist();
+        var frame = new AssistFrame(new(101, 202, 21, 1), true, true, true, true, 90, 95, true, true);
+        Check(assist.TryEnter(frame, router.Wrath), "Test must start with a real granted lease.");
+        SetField(plugin, "fullAssist", assist);
+        SetField(plugin, "assistProvider", router);
+        SetField(plugin, "assistHuntProvider", (CombatRotationProvider?)CombatRotationProvider.WrathCombo);
+        config.RotationProvider = CombatRotationProvider.RotationSolverReborn;
+        typeof(Plugin).GetMethod("CheckAssistFrame", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(plugin, [DateTime.UtcNow]);
+        Check(!assist.Active && !assist.AwaitingRaise && !probe.Enabled && probe.Releases == 1,
+            "Changing provider left an active rotation or a stale Raise handoff.");
     }
 
     private static void TestAssistReadiness()
     {
         var pi = DispatchProxy.Create<IDalamudPluginInterface, AssistProbeInterface>();
         var probe = (AssistProbeInterface)(object)pi;
-        var adapter = new CombatAssistIpc(pi);
+        using var router = new SelectedCombatRotation(pi);
+        var adapter = router.Wrath;
         var f = new AssistFight(101, 202, 21, 1);
+        var rsr = router.For(CombatRotationProvider.RotationSolverReborn)!;
+        Check(ReferenceEquals(adapter, router.For(CombatRotationProvider.WrathCombo)) &&
+            router.For((CombatRotationProvider)99) == null, "Selection substituted another provider.");
+        Check(rsr.Unavailable(f) == RotationSolverRebornIpc.Unsupported && rsr.TryAcquire(f) == null &&
+            !probe.AttemptedMutation, "Selecting RSR mutated a provider without an ownership contract.");
+        probe.RsrHasStatus = false;
+        Check(rsr.Unavailable(f)!.Contains("not enabled") && router.Reborn.Conflict() == null, "Missing RSR blocked optional Wrath.");
+        var rsrPlugin = DispatchProxy.Create<IExposedPlugin, ExposedPluginFixture>();
+        ((ExposedPluginFixture)(object)rsrPlugin).InternalName = "RotationSolver";
+        ((ExposedPluginFixture)(object)rsrPlugin).IsLoaded = true;
+        probe.Installed = [rsrPlugin];
+        Check(router.Reborn.Conflict() is not null && rsr.Unavailable(f)!.Contains("unavailable") && adapter.TryAcquire(f) is null,
+            "Loaded RSR without readable activity allowed a competing grant.");
+        probe.RsrHasStatus = true;
         foreach (var (channel, value, reason) in new (string, object?, string)[] {
             ("WrathCombo.IPCReady", false, "Wrath IPC unavailable"),
             ("WrathCombo.IsCurrentJobAutoRotationReady", false, "not ready"),
@@ -31,6 +69,12 @@ internal static partial class Program
             ("BossMod.Configuration", new List<string>{"False","False"}, "permission unknown"),
             ("BossMod.Configuration", null, "permission unknown"),
             ("WrathCombo.GetAutoRotationState", true, "standalone"),
+            ("RotationSolverReborn.AutorotationActive", true, "Reborn is active"),
+            ("BossMod.Rotation.IsAutorotationActive", true, "Disable BossMod rotation"),
+            ("BossMod.AI.IsAutoTargetEnabled", true, "auto-target"),
+            ("BossMod.Rotation.IsAutoTargetActive", true, "auto-target"),
+            ("BossMod.Rotation.GetActiveModules", new List<string>(), "movement module"),
+            ("BossMod.Rotation.GetActiveModules", new List<string>{"BossMod.Autorotation.MiscAI.NormalMovement","BossMod.Autorotation.MiscAI.PassiveAggressive"}, "action-capable"),
         })
         {
             probe.ExpectedOid = f.BaseId;
@@ -43,6 +87,10 @@ internal static partial class Program
         probe.OverrideChannel = "";
         var lease = adapter.TryAcquire(f);
         Check(lease?.Healthy == true && probe.Enabled && probe.Effective.Count == 5, "Rotation wasn't granted after verified overrides");
+        probe.OverrideChannel = "RotationSolverReborn.AutorotationActive";
+        probe.OverrideValue = true;
+        Check(adapter.Unavailable(f)!.Contains("Reborn is active"), "Competing rotation started unnoticed during a lease.");
+        probe.OverrideChannel = "";
         probe.Effective[13] = false;
         Check(!lease!.Healthy, "Conflicting settings went unnoticed");
         lease.Dispose();
@@ -69,6 +117,8 @@ internal static partial class Program
 public class AssistProbeInterface : DispatchProxy
 {
     internal uint ExpectedOid;
+    internal bool RsrHasStatus = true;
+    internal IExposedPlugin[] Installed = [];
     internal string OverrideChannel = "";
     internal object? OverrideValue;
     internal bool DidCheckModule, DidReadMovement, AttemptedMutation;
@@ -79,12 +129,13 @@ public class AssistProbeInterface : DispatchProxy
     private readonly Guid id = Guid.NewGuid();
     protected override object? Invoke(MethodInfo? method, object?[]? args)
     {
+        if (method?.Name == "get_InstalledPlugins") return Installed;
         if (method?.Name is not ("GetIpcSubscriber" or "GetIpcProvider")) throw new InvalidOperationException();
         var channel = (string)args![0]!;
         var sub = Create(method.ReturnType, typeof(AssistProbeChannel));
         ((AssistProbeChannel)sub).Read = (name, a) =>
         {
-            if (name is "get_HasFunction" or "get_HasAction") return true;
+            if (name is "get_HasFunction" or "get_HasAction") return channel != "RotationSolverReborn.AutorotationActive" || RsrHasStatus;
             if (channel.EndsWith(".WrathComboCallback", StringComparison.Ordinal))
             {
                 AttemptedMutation = true;
@@ -101,6 +152,12 @@ public class AssistProbeInterface : DispatchProxy
             if (name != "InvokeFunc") throw new Exception("Unexpected IPC operation");
             switch (channel)
             {
+                case "BossMod.AI.IsAutoTargetEnabled":
+                case "BossMod.Rotation.IsAutoTargetActive":
+                case "BossMod.Rotation.IsAutorotationActive":
+                case "RotationSolverReborn.AutorotationActive": return channel == OverrideChannel ? OverrideValue : false;
+                case "BossMod.Rotation.GetActiveModules": return channel == OverrideChannel ? OverrideValue :
+                    new List<string>{ "BossMod.Autorotation.MiscAI.NormalMovement", "BossMod.Autorotation.MiscAI.AutoTarget" };
                 case "BossMod.HasModuleByDataId":
                     if (a is not [uint oid] || oid != ExpectedOid) throw new Exception("Wrong live OID");
                     DidCheckModule = true; break;

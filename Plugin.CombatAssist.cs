@@ -6,7 +6,9 @@ namespace SRankSentinel;
 public sealed partial class Plugin
 {
     private readonly FullCombatAssist fullAssist = new();
-    private ICombatAssistProvider? assistProvider;
+    private SelectedCombatRotation? assistProvider;
+    private CombatRotationProvider? assistHuntProvider;
+    private SelectedCombatRotation RotationAdapters => assistProvider ??= new(pi, reason => log.Warning("{Reason}", reason));
     private readonly IPartyList assistParty;
     private readonly ITargetManager assistTargets;
     private string assistReadiness = "Waiting for an initially tagged S/SS";
@@ -16,6 +18,7 @@ public sealed partial class Plugin
 
     private void NewAssistHunt()
     {
+        assistHuntProvider = null;
         fullAssist?.NewHunt();
         assistReadiness = "Waiting for the initial confirmed tag";
     }
@@ -24,10 +27,16 @@ public sealed partial class Plugin
     // hunt here. Monitor the boss actor even when an incidental enemy keeps the player in combat.
     private void CheckAssistFrame(DateTime now)
     {
-        (assistProvider as CombatAssistIpc)?.RetryRelease(now);
+        assistProvider?.Wrath.RetryRelease(now);
         if (!fullAssist.Active && !fullAssist.AwaitingRaise) return;
         try
         {
+            if (assistHuntProvider != config.RotationProvider)
+            {
+                fullAssist.End("Rotation provider changed; safe tagging until the next hunt");
+                assistReadiness = fullAssist.Detail;
+                return;
+            }
             if (!config.Enabled || !config.FullCombatAssist || !SoloAssistAllowed || current is null ||
                 killConfirmed || travel.IsBusy || current.TerritoryId != clientState.TerritoryType ||
                 !travel.CurrentWorld.Equals(current.World, StringComparison.OrdinalIgnoreCase) ||
@@ -74,7 +83,14 @@ public sealed partial class Plugin
         if (!SoloAssistAllowed) { assistReadiness = "Available only while solo"; return false; }
         var frame = AssistContext(target);
         if (!frame.Eligible) return false;
-        var provider = assistProvider ??= new CombatAssistIpc(pi, reason => log.Warning("{Reason}", reason));
+        assistHuntProvider ??= config.RotationProvider;
+        if (assistHuntProvider != config.RotationProvider)
+        {
+            assistReadiness = "Rotation provider changed; safe tagging until the next hunt";
+            return false;
+        }
+        var provider = RotationAdapters.For(config.RotationProvider);
+        if (provider is null) { assistReadiness = "Unknown rotation provider; using safe tagging"; return false; }
         // No movement or target changes on the unavailable path.
         var reason = provider.Unavailable(frame.Fight);
         if (reason is not null)
@@ -125,7 +141,8 @@ public sealed partial class Plugin
             ResetRaiseTracking();
             return;
         }
-        if (fullAssist.Active && same && fullAssist.Maintain(AssistContext(target!), assistProvider!))
+        if (fullAssist.Active && same && assistHuntProvider == config.RotationProvider &&
+            RotationAdapters.For(config.RotationProvider) is { } provider && fullAssist.Maintain(AssistContext(target!), provider))
             return;
 
         if (fullAssist.Active || fullAssist.AwaitingRaise) fullAssist.End("Returning to safe tagging");

@@ -86,7 +86,7 @@ If no actual living SS is detected by expiry, Sentinel stops staging, removes re
 - **vnavmesh** is required for navigation.
 - **HuntAlerts and Sonar** are the production alert providers and should both be installed and enabled.
 - **Lifestream** is required for automated hunts and owns World travel. Enable a build with Patch 7.58 World Visit support. Same-World hunts do not submit a World change.
-- Wrath Combo and BossMod are optional for [solo full combat assist](docs/full-combat-assist.md). With **Stay and fight with Wrath + BossMod** off (the default), Sentinel uses its usual tagging, retreat and checkpoints. You can turn assist off during a fight without disabling Sentinel.
+- BossMod and combat rotation providers are optional for [solo full combat assist](docs/full-combat-assist.md). Wrath supports temporary control. Rotation Solver Reborn is recognized, but its current API cannot safely grant it; selecting RSR uses safe tagging. With **Stay and fight with combat rotation + BossMod** off (the default), Sentinel uses its usual tagging, retreat and checkpoints. You can turn assist off during a fight without disabling Sentinel.
 - HuntTrainAssistant is not required or used.
 
 Patch 7.58 World Visit supports Aether, Crystal, Dynamis, and Primal for North American characters. Eligibility uses the physical region in the game data. Under **Data Center Hunting**, all four North American DCs are on by default. Disabling a DC drops its queued hunts and excludes its reports from History while leaving the active hunt alone. After a hunt, Sentinel stays on the visited World in Ul'dah until another eligible alert requires a World change. See [regional World Visit and provider setup](docs/regional-world-visit.md).

@@ -3,7 +3,10 @@ using Dalamud.Plugin;
 
 namespace SRankSentinel;
 
-internal sealed record CompanionPlugin(string Name, string[] InternalNames, string Role, string Setup, bool Required = false);
+internal sealed record CompanionPlugin(string Name, string[] InternalNames, string Role, string Setup, bool Required = false, string? CombatRole = null)
+{
+    internal bool AlertProvider => !Required && CombatRole is null;
+}
 
 internal static class CompanionPlugins
 {
@@ -17,6 +20,12 @@ internal static class CompanionPlugins
             "Enable S-rank announcements for your data center. Keep at least one alert provider enabled."),
         new("Sonar", ["SonarPlugin", "Sonar"], "S-rank alert provider",
             "Enable S-rank chat announcements and map links for your data center."),
+        new("BossMod", ["BossMod"], "Mechanic awareness and movement",
+            "Provides encounter mechanic awareness and AI movement/avoidance during Full Combat Assist.", CombatRole: "FULL COMBAT ASSIST"),
+        new("Wrath Combo", ["WrathCombo"], "Optional job rotation",
+            "Provides automated job rotations when selected for Full Combat Assist.", CombatRole: "COMBAT ROTATION"),
+        new("Rotation Solver Reborn", ["RotationSolver"], "Alternative job rotation",
+            "Alternative combat rotation provider for Full Combat Assist.", CombatRole: "COMBAT ROTATION"),
     ];
 
     internal static bool IsSupported(string name) => All.Any(plugin =>
