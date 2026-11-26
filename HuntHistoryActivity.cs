@@ -4,7 +4,7 @@ using SentinelCore.UI;
 
 namespace SRankSentinel;
 
-internal readonly record struct HuntHistoryActivityDay(DateTime Date, int Reported, int Tagged)
+internal readonly record struct HuntHistoryActivityDay(DateTime Date, int Reported, int Tagged, int Confirmed = 0)
 {
     internal int Untagged => Reported - Tagged;
 }
@@ -22,17 +22,22 @@ internal static class HuntHistoryActivity
             var index = (entry.ReportedAtUtc.ToLocalTime().Date - first).Days;
             if (index is < 0 or >= 7) continue;
             var day = days[index];
-            days[index] = day with { Reported = day.Reported + 1, Tagged = day.Tagged + (entry.TaggedAtUtc is null ? 0 : 1) };
+            days[index] = day with { Reported = day.Reported + 1, Tagged = day.Tagged + (entry.TaggedAtUtc is null ? 0 : 1),
+                Confirmed = day.Confirmed + (entry.CreditedAtUtc is null ? 0 : 1) };
         }
         return days;
     }
 
-    internal static void Draw(IReadOnlyList<HuntHistoryActivityDay> days, float scale)
+    internal static string Footer(IReadOnlyList<HuntHistoryActivityDay> days) =>
+        $"{days.Sum(day => day.Reported):N0} reports · {days.Sum(day => day.Tagged):N0} tagged · {days.Sum(day => day.Confirmed):N0} confirmed";
+
+    internal static float Draw(IReadOnlyList<HuntHistoryActivityDay> days, float scale)
     {
         ImGui.TextColored(SentinelModernPalette.Accent, "Untagged");
         ImGui.SameLine();
         ImGui.TextColored(SentinelModernPalette.Teal, "Tagged");
-        if (!ImGui.BeginTable("##SpawnActivity", days.Count, ImGuiTableFlags.SizingStretchSame)) return;
+        var labelBottom = ImGui.GetCursorScreenPos().Y;
+        if (!ImGui.BeginTable("##SpawnActivity", days.Count, ImGuiTableFlags.SizingStretchSame)) return labelBottom;
         try
         {
             var maximum = Math.Max(1, days.Max(day => day.Reported));
@@ -63,10 +68,12 @@ internal static class HuntHistoryActivity
                     var label = day.Date.ToString("MMM d");
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + MathF.Max(0f, (size.X - ImGui.CalcTextSize(label).X) / 2f));
                     ImGui.TextUnformatted(label);
+                    labelBottom = Math.Max(labelBottom, ImGui.GetItemRectMax().Y);
                 }
                 finally { ImGui.PopID(); }
             }
         }
         finally { ImGui.EndTable(); }
+        return labelBottom;
     }
 }

@@ -232,8 +232,11 @@ public sealed partial class Plugin
             ImGui.TextWrapped("No reports in this period for your enabled hunt expansions.");
             return;
         }
-        HuntHistoryActivity.Draw(days, ImGuiHelpers.GlobalScale);
-        SentinelModernActionDock.Status($"{days.Sum(day => day.Reported):N0} reports · {days.Sum(day => day.Tagged):N0} tagged");
+        var scale = ImGuiHelpers.GlobalScale;
+        var labelBottom = HuntHistoryActivity.Draw(days, scale);
+        var cursor = ImGui.GetCursorScreenPos();
+        ImGui.SetCursorScreenPos(new(cursor.X, Math.Max(labelBottom + scale, cursor.Y - 10f * scale)));
+        SentinelModernActionDock.Status(HuntHistoryActivity.Footer(days));
     }
 
     private void DrawHistorySection(IReadOnlyList<HuntHistoryEntry> entries)
@@ -268,7 +271,7 @@ public sealed partial class Plugin
                 if (entry.CreditedAtUtc is not null) detail += $" · Reward: {entry.Reward}";
                 DrawSettingsRow("History.Spawn." + entry.Id,
                     $"{entry.Rank} · {entry.CreatureName}",
-                    $"{timestamp.ToLocalTime():MMM d, HH:mm} · {entry.World} · {zone ?? $"Territory {entry.TerritoryId}"} · instance {entry.Instance}\n{detail}",
+                    $"{timestamp.ToLocalTime():MMM d, HH:mm} · {entry.World} · {zone ?? $"Territory {entry.TerritoryId}"}{entry.InstanceLabel}\n{detail}",
                     () => SentinelModernStatusPill.Draw(new(outcome,
                         entry.CreditedAtUtc is not null ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Neutral),
                         modernShell.Motion, ImGuiHelpers.GlobalScale), 128f, ImGuiHelpers.GlobalScale);

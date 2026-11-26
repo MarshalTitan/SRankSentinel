@@ -27,9 +27,12 @@ public sealed partial class Plugin
             if (!travel.IsWorldVisitCompatible(resolvedWorld) || !IsHuntDataCenterEnabled(resolvedWorld) ||
                 !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
                 return false;
+            bool? multiple = clientState.TerritoryType == territory &&
+                travel.CurrentWorld.Equals(resolvedWorld, StringComparison.OrdinalIgnoreCase) &&
+                travel.TryReadLiveInstance(out var liveInstance) ? liveInstance > 0 : null;
             return History.Spawn(CanonicalizeObservedInstance(new(ss ? "ssrank" : "srank", resolvedWorld, definition.Name,
                 territory, definition.DataId, definition.PreferredAetheryteId, Math.Max(1, instance),
-                0, 0, reported)), source);
+                0, 0, reported)), source, multiple);
         });
     }
 

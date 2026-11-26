@@ -9,6 +9,9 @@ public sealed record HuntHistoryEntry
     public string World { get; set; } = string.Empty;
     public uint TerritoryId { get; set; }
     public int Instance { get; set; }
+    // Null on legacy/remote records with no direct topology observation.
+    public bool? HadPublicInstances { get; set; }
+    internal string InstanceLabel => (HadPublicInstances ?? Instance > 1) ? $" · Instance {Instance}" : string.Empty;
     public string Rank { get; set; } = "S";
     public string Source { get; set; } = string.Empty;
     // Feed receipt times, not an invented exact server spawn time.
@@ -68,27 +71,40 @@ internal sealed class HuntHistoryJournal(Configuration config, Func<string, bool
         }
     }
 
-    internal bool Spawn(HuntAlertSnapshot alert, string source) => Spawn(alert, source, active: false);
+    internal bool Spawn(HuntAlertSnapshot alert, string source, bool? hadPublicInstances = null) =>
+        Spawn(alert, source, active: false, hadPublicInstances);
 
-    private bool Spawn(HuntAlertSnapshot alert, string source, bool active)
+    private bool Spawn(HuntAlertSnapshot alert, string source, bool active, bool? hadPublicInstances = null)
     {
         lock (sync)
         {
             config.SpawnHistory ??= [];
             var existing = Find(alert);
-            if (existing is not null) return false;
+            if (existing is not null) return NoteTopology(existing, hadPublicInstances);
             if (!config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId))) return false;
             if (!active && worldEnabled?.Invoke(alert.World) == false) return false;
             config.SpawnHistory.Add(new()
             {
                 AlertKey = alert.Key, CreatureName = alert.CreatureName, World = alert.World,
-                TerritoryId = alert.TerritoryId, Instance = alert.Instance,
+                TerritoryId = alert.TerritoryId, Instance = alert.Instance, HadPublicInstances = hadPublicInstances,
                 Rank = alert.HuntType == "ssrank" ? "SS" : "S", Source = source,
                 ReportedAtUtc = alert.ReceivedAtUtc,
             });
             Trim();
             return true;
         }
+    }
+
+    internal bool ObserveTopology(HuntAlertSnapshot alert, bool multiple)
+    {
+        lock (sync) return NoteTopology(Find(alert), multiple);
+    }
+
+    private static bool NoteTopology(HuntHistoryEntry? entry, bool? multiple)
+    {
+        if (entry is null || entry.HadPublicInstances.HasValue || !multiple.HasValue) return false;
+        entry.HadPublicInstances = multiple;
+        return true;
     }
 
     internal bool Tag(HuntAlertSnapshot alert, DateTime now, bool firstTagOfPull = true)
