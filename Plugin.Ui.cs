@@ -334,6 +334,7 @@ public sealed partial class Plugin
 
     private void DrawTagCheckpointControls()
     {
+        DrawHuntGearset();
         var at75 = config.TagAt75Percent;
         var at50 = config.TagAt50Percent;
         var at25 = config.TagAt25Percent;

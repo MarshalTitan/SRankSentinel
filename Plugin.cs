@@ -337,6 +337,7 @@ public sealed partial class Plugin : IDalamudPlugin
         commands = commandManager;
         this.clientState = clientState;
         this.condition = condition;
+        huntJobPlayer = playerState;
         chat = chatGui;
         objects = objectTable;
         data = dataManager;
@@ -1868,6 +1869,7 @@ public sealed partial class Plugin : IDalamudPlugin
                         ConfirmKill($"Previously identified {visibleMark.Name.TextValue} is visibly dead");
                         return;
                     }
+                    if (!combat.IsPlayerDead && !EnsureHuntJob(now)) return;
                     if (ObservePullCycleReset(visibleMark, now))
                         return;
                     LatchTagRequirement(visibleMark, now);
@@ -1884,6 +1886,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             }
 
+            if (visibleMark == null && !EnsureHuntJob(now)) return;
             if (tagRequired && state != SentinelState.TagApproach &&
                 state != SentinelState.AvoidIncidentalAggro && IsLocalHuntState(state))
             {
@@ -1892,6 +1895,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 return;
             }
         }
+
+        else if (current != null && !combat.IsPlayerDead && state != SentinelState.PostKillSsGrace &&
+            !resetToUldahAllowsLiveEntityExit && !EnsureHuntJob(now)) return;
 
         if (state != SentinelState.AvoidIncidentalAggro && ShouldBeginIncidentalAggroAvoidance(out var threat))
         {
@@ -5046,6 +5052,8 @@ public sealed partial class Plugin : IDalamudPlugin
                     CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent))
             {
                 var crossed = TagCheckpointCycle.Crossed(CombatController.HpPercent(mark), ActiveDistanceProfile.EngageHpPercent);
+                if (!EnsureHuntJob(now)) return;
+                activeTagActionId = combat.ResolveTagActionId();
                 var attempt = combat.TrySingleTag(activeTagActionId, mark);
                 if (attempt.Submitted && attempt.ClientAccepted)
                 {

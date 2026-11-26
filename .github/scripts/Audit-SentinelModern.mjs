@@ -756,6 +756,38 @@ const reviewedOrdinaryPresencePatches = {
 const baseline = JSON.parse(read("docs/sentinel-modern-hunt-baseline.json"));
 for (const [path, expectedHash] of Object.entries(baseline.sha256)) {
   let source = read(path);
+  // Isolate the job-readiness hooks before applying the unchanged hunt baseline checks.
+  const jobHooks = {
+  "Plugin.cs": [
+    ["                    if (!combat.IsPlayerDead && !EnsureHuntJob(now)) return;\n                    if (ObservePullCycleReset(visibleMark, now))", "                    if (ObservePullCycleReset(visibleMark, now))"],
+    [
+      "        this.condition = condition;\n        huntJobPlayer = playerState;",
+      "        this.condition = condition;"
+    ],
+    [
+      "            if (visibleMark == null && !EnsureHuntJob(now)) return;\n            if (tagRequired && state != SentinelState.TagApproach &&",
+      "            if (tagRequired && state != SentinelState.TagApproach &&"
+    ],
+    [
+      "        else if (current != null && !combat.IsPlayerDead && state != SentinelState.PostKillSsGrace &&\n            !resetToUldahAllowsLiveEntityExit && !EnsureHuntJob(now)) return;\n\n        if (state != SentinelState.AvoidIncidentalAggro && ShouldBeginIncidentalAggroAvoidance(out var threat))",
+      "        if (state != SentinelState.AvoidIncidentalAggro && ShouldBeginIncidentalAggroAvoidance(out var threat))"
+    ],
+    [
+      "                if (!EnsureHuntJob(now)) return;\n                activeTagActionId = combat.ResolveTagActionId();\n                var attempt = combat.TrySingleTag(activeTagActionId, mark);",
+      "                var attempt = combat.TrySingleTag(activeTagActionId, mark);"
+    ]
+  ],
+  "CombatController.cs": [
+    [
+      "    internal static uint GetBaseRangedTagAction",
+      "    private static uint GetBaseRangedTagAction"
+    ]
+  ]
+};
+  for (const [after, before] of jobHooks[path] ?? []) {
+    assert(source.split(after).length === 2, "Missing or duplicated job readiness hook: " + path);
+    source = source.replace(after, before);
+  }
   for (const [change, original] of [
     ["        IPartyList partyList,\n        ITargetManager targetManager,", "        ITargetManager targetManager,"],
     ["        this.framework = framework;\n        assistParty = partyList;\n        assistTargets = targetManager;", "        this.framework = framework;"],

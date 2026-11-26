@@ -27,6 +27,12 @@ S Rank Sentinel is a standalone Dalamud S-rank orchestrator. HuntAlerts and Sona
 21. Incidental overworld aggro first uses protected escape routes that do not cross the S/SS safety radius. After a bounded number of failed escape attempts, a WAR/MRD client targets only the positively identified non-mark NPC attacking it and uses a minimal Heavy Swing/Tomahawk fallback until that attacker clears, then resumes the exact hunt state. The current S/SS is excluded by object ID, data ID, and name.
 22. Once the hunt and any SS opportunity finish, attempt a normal Teleport directly to Ul'dah on the **current visited World**, including while mounted/flying when the game permits it. Landing is used only after concrete Teleport rejection, not as a prerequisite. Remove kill-reported or stale queue entries, physically confirm Ul'dah arrival, and then start the next valid queued target. Actual or reserved SS opportunities sort ahead of ordinary S ranks; ordinary S ranks retain expansion priority and oldest-first order. Sentinel never World Visits back to the character's Home World automatically.
 
+## Combat job readiness
+
+On Main under **Tagging → Combat gearset**, choose this character’s saved combat set if you want automatic restoration. Without a selection, any job with a supported ranged tag can hunt; Fisher and other unsupported jobs pause before travel or tagging. With a selection, Sentinel expects its job and restores only that exact saved set. If you rename or move the set, select it again.
+
+Sentinel waits through combat, loading, fishing and duties. It makes at most two equip requests and waits for the game to confirm the job and slot. If both fail, the current hunt stays paused. Equip the set yourself, select a different set, or press **Retry combat gearset** once ready.
+
 ## Safety defaults
 
 - Initial coordinate stop: **35y**
