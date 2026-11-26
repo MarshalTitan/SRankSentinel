@@ -119,6 +119,7 @@ public sealed partial class Plugin
             status = "Combat assist suspended; waiting for an interactable player";
             return;
         }
+        if (same && !EnsureHuntJob(now)) return;
         if (!fullAssist.Active && same && TryBeginCombatAssist(target!, afterRaise: true))
         {
             ResetRaiseTracking();

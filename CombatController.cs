@@ -120,7 +120,7 @@ internal sealed class CombatController(
             queuedForTarget);
     }
 
-    private static uint GetBaseRangedTagAction(uint classJobId) => classJobId switch
+    internal static uint GetBaseRangedTagAction(uint classJobId) => classJobId switch
     {
         1 or 19 => 24,       // Gladiator/Paladin: Shield Lob
         3 or 21 => 46,       // Marauder/Warrior: Tomahawk

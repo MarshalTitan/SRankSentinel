@@ -3,6 +3,7 @@ using SRankSentinel;
 (string Name, Action Run)[] tests =
 [
     .. CombatAssistTests.Cases(),
+    .. HuntJobTests.Cases(),
     ("ordinary S exact entity passes arrival immediately", NormalSPresenceTests.ExactEntityWins),
     ("native powerful-mark presence releases normal hunting", NormalSPresenceTests.PresencePasses),
     ("absent ordinary S becomes unresolved after five ready seconds", NormalSPresenceTests.NoEvidenceExpires),

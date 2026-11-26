@@ -130,7 +130,7 @@ jobs:
             Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "Optional solo combat assist: after its confirmed tag, Sentinel can hand rotation to Wrath and movement to BossMod. Switching assist off restores safe tagging and retreat. Assist defaults off and stops for the hunt if the boss leaves combat or regains five percentage points of HP." --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "Hunt travel and tagging now pause on Fisher or another unsupported job. Choose a combat gearset under Tagging for bounded automatic restoration when the character is free to change jobs." --prerelease
             if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 

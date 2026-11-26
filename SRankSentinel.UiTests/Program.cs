@@ -52,6 +52,7 @@ internal static partial class Program
             Test("Plugins list includes all companions and handles disabled, missing, and loaded states", TestCompanionPlugins);
             Test("Dalamud activation contracts match the API-15 installer", TestActivationContract);
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
+            Test("Fisher holds live hunt boundaries, preserves the queue and clears stale actions", TestRealHuntJobBoundaries);
             Test("full combat assist is opt-in and round-trips without changing checkpoint settings", TestAssistDefaults);
             Test("production adapter checks the exact BossMod module and acquires, verifies and releases a Wrath lease", TestAssistReadiness);
             Test("native powerful-mark callback accepts only fresh ordinary-S evidence", TestNormalSPresenceCallback);

@@ -45,7 +45,7 @@ public sealed partial class Plugin
             if (previous != provider && worldTravel is { } transfer)
                 log.Information("Lifestream readiness {Provider}: target={Target} ({DC}), current={Current}, requests={Attempts}",
                     provider, transfer.Destination.Name, transfer.Destination.LogicalDc, travel.CurrentWorld, transfer.Attempts);
-            TickLifestreamWorldVisit(now, provider);
+            if (EnsureHuntJob(now)) TickLifestreamWorldVisit(now, provider);
             return false;
         }
         if (provider == LifestreamReadiness.Busy)
