@@ -130,7 +130,7 @@ jobs:
             Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "Hunt travel and tagging now pause on Fisher or another unsupported job. Choose a combat gearset under Tagging for bounded automatic restoration when the character is free to change jobs." --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "History now shows confirmed credit in the seven-day footer and labels meaningful instances. Optional combat integrations have readiness cards and a saved provider choice. Wrath checks for competing rotations; selecting Rotation Solver Reborn uses safe tagging because its current API cannot grant verifiable ownership." --prerelease
             if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 

@@ -59,10 +59,12 @@ internal static partial class Program
 
     private static void TestCompanionPlugins() => InContext(() =>
     {
-        Check(CompanionPlugins.All.Select(x => x.Name).SequenceEqual(new[] { "vnavmesh", "Lifestream", "HuntAlerts", "Sonar" }),
+        Check(CompanionPlugins.All.Select(x => x.Name).SequenceEqual(new[] { "vnavmesh", "Lifestream", "HuntAlerts", "Sonar", "BossMod", "Wrath Combo", "Rotation Solver Reborn" }),
             "A requested companion is missing.");
         Check(CompanionPlugins.All.Where(x => x.Required).Select(x => x.Name).SequenceEqual(new[] { "vnavmesh", "Lifestream" }),
             "Movement and World travel must be required, while alert providers remain alternatives.");
+        Check(CompanionPlugins.All.Where(c => c.AlertProvider).Select(c => c.Name).SequenceEqual(new[] { "HuntAlerts", "Sonar" }),
+            "Optional combat plugins must not satisfy alert readiness.");
         Check(!CompanionPlugins.IsSupported("SRankSentinel") && !CompanionPlugins.IsSupported("arbitrary-plugin"),
             "Activation allowlist permits unrelated plugins.");
         var installed = CompanionPlugins.All.Select((companion, index) =>
@@ -278,6 +280,9 @@ internal static partial class Program
                 Check(activity.DC.CursorMaxPos.X <= activity.Pos.X + activity.Size.X + 1f &&
                     activity.DC.CursorMaxPos.Y <= activity.Pos.Y + activity.Size.Y + 1f && !activity.ScrollbarX && !activity.ScrollbarY,
                     "Stacked history chart overflows its Core card.");
+                var footerRoom = activity.InnerClipRect.Max.Y - activity.DC.CursorMaxPos.Y;
+                Check(footerRoom >= 3f * scale - 1f,
+                    $"History footer reaches the clip boundary at scale {scale}: {footerRoom}px.");
                 var windows = ImGui.GetCurrentContext().Windows;
                 for (var index = 0; index < windows.Size; index++)
                     Check(!Marshal.PtrToStringUTF8((nint)windows[index].Name)!.Contains("##CreditedHistory"),
@@ -567,7 +572,22 @@ internal static partial class Program
             TaggedAtUtc = tagged ? today.AddHours(13).ToUniversalTime() : null,
         };
         var entries = new[] { Entry(0), Entry(0, true), Entry(0, true), Entry(6), Entry(6, true), Entry(7, true), Entry(-1, true) };
+        entries[1].CreditedAtUtc = entries[1].TaggedAtUtc;
+        entries[5].CreditedAtUtc = entries[5].TaggedAtUtc; // outside this week
         var week = HuntHistoryActivity.BuildWeek(entries, today.AddHours(19));
+        Check(HuntHistoryActivity.Footer(week) == "5 reports · 3 tagged · 1 confirmed", "Footer mixed report dates or counted tags as credit.");
+        var now = DateTime.UtcNow;
+        var alert = HistoryAlert(now);
+        var cfg = new Configuration();
+        var journal = new HuntHistoryJournal(cfg);
+        journal.Spawn(alert, "Sonar");
+        var saved = journal.Snapshot().Spawns.Single();
+        Check(saved.InstanceLabel == "" && (saved with { Instance = 2 }).InstanceLabel == " · Instance 2", "Legacy instance display.");
+        Check(journal.ObserveTopology(alert, true) && !journal.ObserveTopology(alert, false), "First observed topology was lost.");
+        var first = journal.Snapshot().Spawns.Single();
+        Check(first.InstanceLabel == " · Instance 1" && first.AlertKey == saved.AlertKey && first.Instance == saved.Instance, "Topology changed hunt identity.");
+        Check((first with { HadPublicInstances = false }).InstanceLabel == "" &&
+            JsonSerializer.Deserialize<HuntHistoryEntry>(JsonSerializer.Serialize(first))!.InstanceLabel == first.InstanceLabel, "Topology did not survive reload.");
         Check(week.Length == 7 && week[0].Date == today.AddDays(-6) && week[^1].Date == today,
             "Activity did not use seven local calendar days.");
         Check(week[0].Reported == 2 && week[0].Tagged == 1 && week[0].Untagged == 1 &&

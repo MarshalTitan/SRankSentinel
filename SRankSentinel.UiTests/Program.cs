@@ -54,6 +54,7 @@ internal static partial class Program
             Test("history deduplicates reports, separates respawns, and persists bounded records", TestHistoryPersistence);
             Test("Fisher holds live hunt boundaries, preserves the queue and clears stale actions", TestRealHuntJobBoundaries);
             Test("full combat assist is opt-in and round-trips without changing checkpoint settings", TestAssistDefaults);
+            Test("changing providers mid-fight releases Wrath and cannot start RSR", TestAssistProviderSwitch);
             Test("production adapter checks the exact BossMod module and acquires, verifies and releases a Wrath lease", TestAssistReadiness);
             Test("native powerful-mark callback accepts only fresh ordinary-S evidence", TestNormalSPresenceCallback);
             Test("all SS, precursor and post-kill contexts bypass arrival presence gating", TestNormalSPresenceSsExclusions);

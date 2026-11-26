@@ -10,13 +10,14 @@ internal sealed class CombatAssistIpc(IDalamudPluginInterface pi, Action<string>
     private const string Prefix = "SRankSentinel";
     private Lease? owned;
     private DateTime retryAfter;
+    private readonly RotationSolverRebornIpc reborn = new(pi);
     // WrathCombo.API.AutoRotationConfigOption: InCombatOnly, DPSRotationMode=Manual,
     // OnlyAttackInCombat, BypassQuest, BypassFATE. The setter accepts boxed values.
     private static readonly (int Option, object Value)[] Options = [(0, true), (1, 0), (13, true), (21, false), (22, false)];
 
     private bool RotationOn() => pi.GetIpcSubscriber<bool>(Wrath + "GetAutoRotationState").InvokeFunc();
 
-    public string? Unavailable(AssistFight fight)
+    internal string? RotationUnavailable()
     {
         try
         {
@@ -26,17 +27,13 @@ internal sealed class CombatAssistIpc(IDalamudPluginInterface pi, Action<string>
                 return "Wrath Auto-Rotation is not ready for this job";
             if (owned is null && RotationOn())
                 return "Turn standalone Wrath Auto-Rotation off so Sentinel can start and stop it";
-            if (!pi.GetIpcSubscriber<bool>("BossMod.AI.IsEnabled").InvokeFunc()) return "BossMod AI disabled";
-            if (!pi.GetIpcSubscriber<uint, bool>("BossMod.HasModuleByDataId").InvokeFunc(fight.BaseId))
-                return "BossMod has no module for this mark";
-            var result = pi.GetIpcSubscriber<IReadOnlyList<string>, bool, List<string>>("BossMod.Configuration")
-                .InvokeFunc(new[] { "AIConfig", "ForbidMovement" }, false);
-            if (result is not [var value] || !bool.TryParse(value, out var forbidden))
-                return "BossMod AI movement permission unknown";
-            return forbidden ? "BossMod AI movement disabled" : null;
+            return reborn.Conflict();
         }
-        catch { return "Wrath or BossMod readiness IPC unavailable"; }
+        catch { return "Wrath readiness IPC unavailable"; }
     }
+
+    public string? Unavailable(AssistFight fight) =>
+        RotationUnavailable() ?? BossModCombatReadiness.Unavailable(pi, fight.BaseId);
 
     public IGuardedRotation? TryAcquire(AssistFight fight)
     {
@@ -65,7 +62,7 @@ internal sealed class CombatAssistIpc(IDalamudPluginInterface pi, Action<string>
                     .InvokeFunc(id, option, value) is not (0 or 13))
                     throw new InvalidOperationException($"Wrath denied option {option}");
             }
-            if (!OptionsMatch() || lease.Revoked || RotationOn())
+            if (!OptionsMatch() || lease.Revoked || RotationOn() || Unavailable(fight) is not null)
                 throw new InvalidOperationException("Rotation settings or ownership changed before enable");
             if (pi.GetIpcSubscriber<Guid, bool, int>(Wrath + "SetAutoRotationState").InvokeFunc(id, true) is not (0 or 13) ||
                 !lease.Healthy) throw new InvalidOperationException("Wrath did not enable rotation");

@@ -27,10 +27,25 @@ public sealed partial class Plugin
             if (!travel.IsWorldVisitCompatible(resolvedWorld) || !IsHuntDataCenterEnabled(resolvedWorld) ||
                 !IsWithinFreshnessWindow(reported, DateTime.UtcNow))
                 return false;
+            var multiple = ReadHistoryTopology(resolvedWorld, territory);
             return History.Spawn(CanonicalizeObservedInstance(new(ss ? "ssrank" : "srank", resolvedWorld, definition.Name,
                 territory, definition.DataId, definition.PreferredAetheryteId, Math.Max(1, instance),
-                0, 0, reported)), source);
+                0, 0, reported)), source, multiple);
         });
+    }
+
+    private bool? ReadHistoryTopology(string world, uint territory)
+    {
+        try
+        {
+            return clientState.TerritoryType == territory && travel.CurrentWorld.Equals(world, StringComparison.OrdinalIgnoreCase) &&
+                travel.TryReadLiveInstance(out var instance) ? instance > 0 : null;
+        }
+        catch (Exception ex)
+        {
+            log?.Debug("Instance topology unavailable for History: {Reason}", ex.Message);
+            return null; // A display hint must never prevent recording the report.
+        }
     }
 
     private void ObserveKnownHistoryDeaths(string world, uint territory, int instance, DateTime when,

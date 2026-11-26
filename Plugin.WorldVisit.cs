@@ -187,6 +187,7 @@ public sealed partial class Plugin
     {
         if (current is not { } alert)
             return;
+        ObserveHistory(() => History.ObserveTopology(alert, instance > 0));
         var context = (alert.World.ToUpperInvariant(), alert.TerritoryId);
         if (instance != 0)
         {

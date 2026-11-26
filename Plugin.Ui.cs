@@ -332,6 +332,8 @@ public sealed partial class Plugin
         config.Save();
     }
 
+    private static readonly string[] RotationNames = ["Wrath Combo", "Rotation Solver Reborn"];
+
     private void DrawTagCheckpointControls()
     {
         DrawHuntGearset();
@@ -346,10 +348,23 @@ public sealed partial class Plugin
         ImGui.Spacing();
         ImGui.TextUnformatted("FULL COMBAT ASSIST");
         var assist = config.FullCombatAssist;
-        changed |= DrawBoolean("Stay and fight with Wrath + BossMod", ref assist);
+        changed |= DrawBoolean("Stay and fight with combat rotation + BossMod", ref assist);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Solo: configure your job in Wrath and leave standalone Auto-Rotation off. Enable BossMod AI and allow movement. After a confirmed tag, Sentinel can fight until the boss dies, leaves combat, or heals 5 percentage points. A queued action may still land.");
-        if (assist) ImGui.TextWrapped(assistReadiness ?? "Waiting for the initial confirmed tag");
+            ImGui.SetTooltip("Solo: after a confirmed initial tag, the selected rotation and BossMod can take over if both are ready. Otherwise Sentinel uses normal safe tagging.");
+        var selected = (int)config.RotationProvider;
+        if (ImGui.Combo("Rotation provider", ref selected, RotationNames, RotationNames.Length))
+        {
+            config.RotationProvider = (CombatRotationProvider)selected;
+            if (fullAssist is { Active: true } or { AwaitingRaise: true })
+            {
+                fullAssist.End("Rotation provider changed; safe tagging until the next hunt");
+                assistReadiness = fullAssist.Detail;
+            }
+            changed = true;
+        }
+        if (config.RotationProvider == CombatRotationProvider.RotationSolverReborn)
+            ImGui.TextWrapped(RotationSolverRebornIpc.Unsupported);
+        else if (assist) ImGui.TextWrapped(assistReadiness ?? "Waiting for the initial confirmed tag");
         if (!changed)
             return;
         config.TagAt75Percent = at75;

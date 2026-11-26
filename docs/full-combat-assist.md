@@ -1,6 +1,6 @@
 # Solo combat assist
 
-Available in S Rank Sentinel 0.7.75.0. **Stay and fight with Wrath + BossMod** defaults off. You can turn it off during a fight: Sentinel releases its Wrath lease and resumes normal tagging and retreat. You do not need to stop the plugin or reset the hunt.
+**Stay and fight with combat rotation + BossMod** defaults off. You can turn it off during a fight: Sentinel releases its Wrath lease and resumes normal tagging and retreat. You do not need to stop the plugin or reset the hunt.
 
 ## Setup
 
@@ -10,8 +10,24 @@ Available in S Rank Sentinel 0.7.75.0. **Stay and fight with Wrath + BossMod** d
 - Enable BossMod AI yourself and allow movement (disable “Disable movement”). Check that your BossMod
   setup actually moves in a supported solo encounter. Sentinel verifies AI, movement permission and the
   module for the exact boss data ID; permission is not confirmation that a dodge succeeded.
-- Turn on **Stay and fight with Wrath + BossMod** under Tagging in Sentinel. When any prerequisite is
+- Disable BossMod auto-target and any offensive rotation presets. Keep its normal movement module active.
+  Sentinel checks the active modules at entry and during combat, including action-capable MiscAI modules.
+- Choose **Wrath Combo** under Rotation provider; turn off any standalone RSR rotation.
+  Turn on **Stay and fight with combat rotation + BossMod** under Tagging in Sentinel. When any prerequisite is
   unavailable, the normal initial tag, retreat, checkpoints and Raise retag still apply.
+
+## Rotation Solver Reborn
+
+RSR can be selected, but Sentinel uses ordinary safe tagging with that selection on the verified **7.5.8.11**
+API. It never silently switches to Wrath. The [public IPC](https://github.com/FFXIV-CombatReborn/RotationSolverReborn/blob/7.5.8.11/RotationSolver/Integrations/IPC/IPCProvider.cs)
+exposes `ChangeOperatingMode(StateCommandType)` and a variant with temporary setting overrides. The
+[mode enum](https://github.com/FFXIV-CombatReborn/RotationSolverReborn/blob/7.5.8.11/RotationSolver/Engine/Data/RSCommandType.cs)
+includes Off, Auto, TargetOnly, Manual, AutoDuty, Henched, and PvP. The setter returns void; none of these modes
+grants an identified caller ownership. [AutorotationActive](https://github.com/FFXIV-CombatReborn/RotationSolverReborn/blob/7.5.8.11/RotationSolver/Engine/State/DataCenter.cs)
+combines modes and player availability. It cannot confirm the current job has an executable rotation or
+distinguish Sentinel's control from a user or another plugin. Sentinel reads this signal to prevent Wrath conflicts;
+it never sends an RSR mode command or restores a guessed mode. Changing provider during a fight releases
+Sentinel's lease and resumes normal safe tagging. A new provider requires a new safe handoff.
 
 ## During a hunt
 

@@ -26,7 +26,7 @@ public sealed partial class Plugin
         var installed = pi?.InstalledPlugins?.ToArray() ?? [];
         var movementReady = CompanionPlugins.Find(installed, CompanionPlugins.All[0])?.IsLoaded == true;
         var worldTravelReady = lifestream?.HasRequiredIpc == true;
-        var alertsReady = CompanionPlugins.All.Skip(2).Any(companion => CompanionPlugins.Find(installed, companion)?.IsLoaded == true);
+        var alertsReady = CompanionPlugins.All.Any(companion => companion.AlertProvider && CompanionPlugins.Find(installed, companion)?.IsLoaded == true);
         ImGui.PushTextWrapPos(0f);
         ImGui.TextColored(SentinelModernStatusPill.ResolveColour(new("Readiness",
             movementReady && worldTravelReady && alertsReady ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Warning)),
@@ -35,6 +35,7 @@ public sealed partial class Plugin
                 !movementReady ? "Enable vnavmesh for automatic movement." : "Enable HuntAlerts or Sonar for S-rank alerts.");
         ImGui.PopTextWrapPos();
         ImGui.Spacing();
+        RefreshCombatCardDetails(installed);
         foreach (var companion in CompanionPlugins.All)
         {
             var plugin = CompanionPlugins.Find(installed, companion);
@@ -43,10 +44,41 @@ public sealed partial class Plugin
         }
         if (CompanionButton("Installer", "Open Plugin Installer", 180f))
             pi?.OpenPluginInstallerTo();
+        ImGui.TextWrapped("Full Combat Assist requires BossMod AI and one compatible rotation provider. Combat plugins are optional for ordinary hunting.");
         ImGui.TextWrapped("Lifestream is required for automated hunts. HuntAlerts and Sonar are alternative alert sources.");
         ImGui.TextWrapped("Use Installer to install or update a companion. Enable S-rank announcements and map links for your data center.");
         if (companionEnableStatus is not null) ImGui.TextWrapped(companionEnableStatus);
     }
+
+    private Dictionary<string, string>? combatCardDetails;
+    private DateTime combatCardRefresh;
+
+    // The Plugins page only reads public readiness signals; rendering it cannot acquire a lease.
+    private void RefreshCombatCardDetails(IExposedPlugin[] installed)
+    {
+        if (DateTime.UtcNow < combatCardRefresh) return;
+        combatCardRefresh = DateTime.UtcNow.AddSeconds(1);
+        combatCardDetails ??= new();
+        combatCardDetails.Clear();
+        foreach (var companion in CompanionPlugins.All.Where(c => c.CombatRole is not null &&
+            CompanionPlugins.Find(installed, c)?.IsLoaded == true))
+        {
+            try
+            {
+                combatCardDetails[companion.Name] = companion.Name switch
+                {
+                    "Wrath Combo" => RotationAdapters.Wrath.RotationUnavailable() ?? "Rotation ready for this job",
+                    "Rotation Solver Reborn" => RotationAdapters.Reborn.Unavailable(default),
+                    _ => BossModCombatReadiness.Unavailable(pi, ActiveEncounterOid()) ?? "Ready for the exact active mark",
+                };
+            }
+            catch { combatCardDetails[companion.Name] = "Readiness unavailable"; }
+        }
+    }
+
+    private uint ActiveEncounterOid() => current is not null && !killConfirmed && identifiedMarkGameObjectId != 0 &&
+        objects.SearchById(identifiedMarkGameObjectId) is Dalamud.Game.ClientState.Objects.Types.IBattleChara target &&
+        IsExactCheckpointMark(target) ? target.BaseId : 0;
 
     private void DrawCompanionCard(CompanionPlugin companion, IExposedPlugin? plugin)
     {
@@ -54,8 +86,11 @@ public sealed partial class Plugin
         var loaded = plugin?.IsLoaded == true;
         var colour = SentinelModernStatusPill.ResolveColour(new("Plugin", loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error));
         var requirement = new SentinelModernStatusPillOptions(
-            companion.Required ? "REQUIRED" : "ALERT PROVIDER",
+            companion.CombatRole is { } role ? "OPTIONAL · " + role : companion.Required ? "REQUIRED" : "ALERT PROVIDER",
             SentinelModernPillTone.Accent);
+        var description = companion.Setup;
+        if (companion.CombatRole is not null && plugin is not null)
+            description += "\n" + (loaded ? combatCardDetails?.GetValueOrDefault(companion.Name) ?? "Checking readiness" : "Installed but disabled");
         var controlWidth = (loaded && !plugin!.HasConfigUi ? 110f : 182f) * scale;
         // Consumer content uses native table columns; Core still owns the card, tint, pills, and controls.
         var available = ImGui.GetContentRegionAvail().X - (24f + 28f) * scale;
@@ -66,7 +101,7 @@ public sealed partial class Plugin
         var inlineBadge = ImGui.CalcTextSize(companion.Name).X + ImGui.GetStyle().ItemSpacing.X + badgeSize.X <= textWidth;
         var titleHeight = inlineBadge ? MathF.Max(ImGui.GetTextLineHeight(), badgeSize.Y)
             : ImGui.GetTextLineHeightWithSpacing() + badgeSize.Y;
-        var contentHeight = titleHeight + ImGui.GetStyle().ItemSpacing.Y + ImGui.CalcTextSize(companion.Setup, false, textWidth).Y;
+        var contentHeight = titleHeight + ImGui.GetStyle().ItemSpacing.Y + ImGui.CalcTextSize(description, false, textWidth).Y;
         var height = MathF.Max(30f * scale, contentHeight) + 20f * scale + 2f * ImGui.GetStyle().CellPadding.Y
             + (stackActions ? 30f * scale + ImGui.GetStyle().ItemSpacing.Y : 0f);
         using var card = SentinelModernGlassCard.Begin("Companion." + companion.Name,
@@ -97,7 +132,7 @@ public sealed partial class Plugin
             if (inlineBadge) ImGui.SameLine();
             SentinelModernStatusPill.Draw(requirement, modernShell.Motion, scale);
             ImGui.PushTextWrapPos(0f);
-            try { SentinelModernActionDock.Status(companion.Setup); }
+            try { SentinelModernActionDock.Status(description); }
             finally { ImGui.PopTextWrapPos(); }
             if (!stackActions)
             {
@@ -232,8 +267,11 @@ public sealed partial class Plugin
             ImGui.TextWrapped("No reports in this period for your enabled hunt expansions.");
             return;
         }
-        HuntHistoryActivity.Draw(days, ImGuiHelpers.GlobalScale);
-        SentinelModernActionDock.Status($"{days.Sum(day => day.Reported):N0} reports · {days.Sum(day => day.Tagged):N0} tagged");
+        var scale = ImGuiHelpers.GlobalScale;
+        var labelBottom = HuntHistoryActivity.Draw(days, scale);
+        var cursor = ImGui.GetCursorScreenPos();
+        ImGui.SetCursorScreenPos(new(cursor.X, Math.Max(labelBottom + scale, cursor.Y - 10f * scale)));
+        SentinelModernActionDock.Status(HuntHistoryActivity.Footer(days));
     }
 
     private void DrawHistorySection(IReadOnlyList<HuntHistoryEntry> entries)
@@ -268,7 +306,7 @@ public sealed partial class Plugin
                 if (entry.CreditedAtUtc is not null) detail += $" · Reward: {entry.Reward}";
                 DrawSettingsRow("History.Spawn." + entry.Id,
                     $"{entry.Rank} · {entry.CreatureName}",
-                    $"{timestamp.ToLocalTime():MMM d, HH:mm} · {entry.World} · {zone ?? $"Territory {entry.TerritoryId}"} · instance {entry.Instance}\n{detail}",
+                    $"{timestamp.ToLocalTime():MMM d, HH:mm} · {entry.World} · {zone ?? $"Territory {entry.TerritoryId}"}{entry.InstanceLabel}\n{detail}",
                     () => SentinelModernStatusPill.Draw(new(outcome,
                         entry.CreditedAtUtc is not null ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Neutral),
                         modernShell.Motion, ImGuiHelpers.GlobalScale), 128f, ImGuiHelpers.GlobalScale);
