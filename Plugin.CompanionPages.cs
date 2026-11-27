@@ -290,20 +290,31 @@ public sealed partial class Plugin
     private static void DrawSpawnActivity(IReadOnlyList<HuntHistoryEntry> entries, DateTime today)
     {
         var days = HuntHistoryActivity.BuildWeek(entries, today);
+        const string title = "Spawned / tagged · last 7 days", untagged = "Untagged", tagged = "Tagged";
+        var scale = ImGuiHelpers.GlobalScale;
+        var padding = new Vector2(14f, 12f);
+        var width = MathF.Max(1f, ImGui.GetContentRegionAvail().X - 2f * padding.X * scale);
+        var style = ImGui.GetStyle();
+        var legendWidth = ImGui.CalcTextSize(untagged).X + style.ItemSpacing.X + ImGui.CalcTextSize(tagged).X;
+        var inlineLegend = ImGui.CalcTextSize(title).X + style.ItemSpacing.X + legendWidth <= width - 1f;
+        var headerHeight = ImGui.CalcTextSize(title, false, width).Y + (inlineLegend ? 0f : ImGui.GetTextLineHeightWithSpacing());
+        var height = (2f * padding.Y + HuntHistoryActivity.BarHeight) * scale + headerHeight +
+            ImGui.GetTextLineHeight() + 2f * (style.ItemSpacing.Y + style.CellPadding.Y);
         using var card = SentinelModernGlassCard.Begin("History.Activity",
-            new SentinelModernGlassCardOptions { Size = new Vector2(0f, 176f) }, ImGuiHelpers.GlobalScale);
+            new SentinelModernGlassCardOptions { Size = new Vector2(0f, MathF.Ceiling(height) / scale), Padding = padding }, scale);
         if (!card.IsVisible) return;
-        ImGui.TextWrapped("Spawned / tagged · last 7 days");
+        ImGui.TextWrapped(title);
         if (days.Sum(day => day.Reported) == 0)
         {
             ImGui.TextWrapped("No reports in this period for your enabled hunt expansions.");
             return;
         }
-        var scale = ImGuiHelpers.GlobalScale;
-        var labelBottom = HuntHistoryActivity.Draw(days, scale);
-        var cursor = ImGui.GetCursorScreenPos();
-        ImGui.SetCursorScreenPos(new(cursor.X, Math.Max(labelBottom + scale, cursor.Y - 10f * scale)));
-        SentinelModernActionDock.Status(HuntHistoryActivity.Footer(days));
+        if (inlineLegend)
+            ImGui.SameLine(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - legendWidth);
+        ImGui.TextColored(SentinelModernPalette.Accent, untagged);
+        ImGui.SameLine();
+        ImGui.TextColored(SentinelModernPalette.Teal, tagged);
+        HuntHistoryActivity.Draw(days, scale);
     }
 
     private void DrawHistorySection(IReadOnlyList<HuntHistoryEntry> entries)
