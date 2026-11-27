@@ -7,21 +7,21 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 const project = read("SRankSentinel.csproj");
 const pin = JSON.parse(read("sentinelcore-packages.json"));
 const locked = JSON.parse(read("packages.lock.json")).dependencies["net10.0-windows7.0"];
-assert(pin.version === "0.3.1.1" && pin.release === "v0.3.1.1" &&
-  pin.commit === "2dc7cd22a7337420918a3639f9c91139651ca9e2", "Wrong Core release pin.");
+assert(pin.version === "0.4.1.2" && pin.release === "v0.4.1.2" &&
+  pin.commit === "ffa1a6ed3c89337bfb901b566b9339e2e229d154", "Wrong Core release pin.");
 const expected = {
-  "MarshalTitan.SentinelCore": "2c34941081aea0fffce0609e15da38633aeacf4f0c0e4f68137932351856eb11",
-  "MarshalTitan.SentinelCore.UI": "4d21d7c868f48fd082e0bcbd42be136a4611dfb6b9e4588dcef5dde7037d6057"
+  "MarshalTitan.SentinelCore": "82057104351fb05bbcbc579a62a3373ce7f17b46a9f39b06e872c72262c4f949",
+  "MarshalTitan.SentinelCore.UI": "ee2aec0d063eb1ee1da815de58c58bb2c8ff2199ce395c118c1c3976606a4c1d"
 };
 assert(pin.packages.length === 2, "Only Core and Core.UI are required.");
 for (const [id, hash] of Object.entries(expected)) {
   const packagePin = pin.packages.find(p => p.id === id);
   assert(packagePin?.sha256 === hash && packagePin.url ===
-    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.3.1.1/${id}.0.3.1.1.nupkg`,
+    `https://github.com/MarshalTitan/SentinelCore/releases/download/v0.4.1.2/${id}.0.4.1.2.nupkg`,
     `Wrong published package/hash: ${id}`);
-  assert(project.includes(`<PackageReference Include="${id}" Version="[0.3.1.1]" />`),
+  assert(project.includes(`<PackageReference Include="${id}" Version="[0.4.1.2]" />`),
     `Reference must pin exact published version: ${id}`);
-  assert(locked[id]?.resolved === "0.3.1.1" && locked[id]?.requested === "[0.3.1.1, 0.3.1.1]",
+  assert(locked[id]?.resolved === "0.4.1.2" && locked[id]?.requested === "[0.4.1.2, 0.4.1.2]",
     `Dependency lock must pin exact published version: ${id}`);
 }
 assert(!project.includes("SentinelCore.Dalamud") && !project.includes("<ProjectReference"),
@@ -42,7 +42,7 @@ for (const [path, source] of sources) {
   assert(!/(?:class|struct|record)\s+(?:SentinelModern\w+|SentinelPalette|SentinelStyleScope)/.test(source),
     `Local canonical primitive: ${path}`);
 }
-const ui = read("Plugin.Ui.cs");
+const ui = read("Plugin.Ui.cs") + read("Plugin.UiPresentation.cs");
 for (const api of ["PushAppShell", "SentinelModernWindowChrome.UseCustomHeader", "SentinelModernAppShell",
   "SentinelModernNavItem", "SentinelModernGlassCard", "SentinelModernSettingsRow", "SentinelModernSwitch",
   "SentinelModernStatusPillOptions", "SentinelModernAppSurfaceStyle.Unified", "AmbientIntensity = 0.9f"]) {
@@ -55,7 +55,7 @@ assert(ui.includes("new Vector2(680, 720), ImGuiCond.FirstUseEver") &&
 assert(ui.includes("config.ModernWindowCollapsed ? headerHeight : ModernMinimumWindowSize.Y") &&
   ui.includes("Vector2.Max(new Vector2(480f, 520f), SentinelModernAppLayout.MinimumWindowSize(hasActionDock: true))") &&
   !/HeaderHeight\s*=|Layout\s*=|AllowStackedNavigation|CompactBreakpoint|IsCompact/.test(ui),
-  "Use Core 0.3.1.1's default non-stacking application layout, with a Core-audited 480x520 expanded minimum.");
+  "Use Core 0.4.1.2's default non-stacking application layout, with a Core-audited 480x520 expanded minimum.");
 for (const helper of ["DrawEnabledControl", "DrawExpansionControls", "DrawDistanceControls",
   "DrawRecoveryControls"]) {
   assert(ui.split(helper + "();").length >= 3, `Themes must share ${helper}`);
@@ -74,7 +74,8 @@ assert(ui.includes('"Plugins", FontAwesomeIcon.Plug') && ui.includes('"History",
   "Keep the ecosystem Plug icon, existing History icon, and compact Classic button.");
 const companionPages = read("Plugin.CompanionPages.cs");
 assert(companionPages.includes('SentinelModernGlassCard.Begin("Companion."') &&
-  companionPages.includes('loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error') &&
+  companionPages.includes('loaded ? SentinelModernPillTone.Enabled') &&
+  companionPages.includes('optional || companion.AlertProvider ? SentinelModernPillTone.Neutral') &&
   companionPages.includes('Accent = colour, AccentStrength = 0.65f') &&
   ui.includes('"Theme", FontAwesomeIcon.Palette') &&
   companionPages.includes('"History.Clear", "Clear history"') && companionPages.includes('ObserveHistory(History.ClearAll)') &&
@@ -89,6 +90,13 @@ assert(historyActivity.includes('HuntHistoryActivityDay[] BuildWeek') &&
   historyActivity.includes('day.Untagged') && historyActivity.includes('day.Tagged') &&
   !/new Vector4|AddCircle|GlassCard\(|PushStyle/.test(historyActivity),
   "The consumer data chart may draw segments only, using shared Core colours and enclosing cards.");
+assert(ui.includes('SentinelModernDisclosure.Draw') && ui.includes('config.CollapsedUiSections') &&
+  ui.includes('IsCollapsed = config.ModernWindowCollapsed') &&
+  ui.includes('ImGui.BeginChild("##MainSettings"') && ui.includes('SectionHeader("RECOVERY")'),
+  "Disclosure persistence and non-collapsible Recovery footer are required.");
+assert(companionPages.includes('UiSection("Plugins.Normal"') && companionPages.includes('UiSection("Plugins.Combat"') &&
+  companionPages.includes('UiSection("History.Spawns"') && historyActivity.includes('RoundCornersTop') &&
+  historyActivity.includes('RoundCornersBottom'), "Mode groups, report disclosure and gap-free rounded bars are required.");
 const journal = read("HuntHistoryJournal.cs");
 const historyObserver = read("Plugin.History.cs");
 assert(journal.includes('config.IsExpansionEnabled(HuntCatalog.GetExpansion(alert.TerritoryId))') &&
@@ -891,4 +899,4 @@ for (const workflow of ["build.yml", "release.yml"]) {
     assert(content.includes(check), `${workflow} must enforce ${check}`);
   }
 }
-console.log("Sentinel Modern 2 audit passed: exact Core 0.3.1.1 packages, shared UI, passive history hooks, and baseline hunt sources after removing exact reviewed travel changes.");
+console.log("Sentinel Modern 2 audit passed: exact Core 0.4.1.2 packages, shared UI, passive history hooks, and baseline hunt sources after removing exact reviewed travel changes.");

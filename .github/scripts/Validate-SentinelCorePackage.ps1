@@ -14,7 +14,7 @@ foreach ($package in $pin.packages) {
     $dllPath = Join-Path $StagingPath $package.assembly
     if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) { throw "ZIP missing $($package.assembly)" }
     $version = [Reflection.AssemblyName]::GetAssemblyName($dllPath).Version.ToString()
-    if ($version -ne '0.3.1.0') { throw "Wrong assembly version for $($package.assembly): $version" }
+    if ($version -ne '0.4.1.0') { throw "Wrong assembly version for $($package.assembly): $version" }
     $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path $root ".sentinelcore-packages/$($package.file)"))
     try {
         $entry = @($archive.Entries | Where-Object { $_.FullName -like 'lib/*' -and $_.Name -eq $package.assembly })[0]

@@ -56,13 +56,16 @@ internal static class HuntHistoryActivity
                     var untaggedHeight = size.Y * day.Untagged / maximum;
                     var taggedHeight = size.Y * day.Tagged / maximum;
                     var drawList = ImGui.GetWindowDrawList();
-                    // Stacked data segments only; no consumer card, control, or layout primitive.
+                    // Only outer corners are rounded; the shared stack seam stays flat and gap-free.
+                    var radius = MathF.Min(3f * scale, MathF.Min((right - x) * 0.5f, (untaggedHeight + taggedHeight) * 0.5f));
                     if (day.Untagged > 0)
                         drawList.AddRectFilled(new(x, bottom.Y - untaggedHeight), new(right, bottom.Y),
-                            ImGui.ColorConvertFloat4ToU32(SentinelModernPalette.Accent));
+                            ImGui.ColorConvertFloat4ToU32(SentinelModernPalette.Accent), radius,
+                            day.Tagged > 0 ? ImDrawFlags.RoundCornersBottom : ImDrawFlags.RoundCornersAll);
                     if (day.Tagged > 0)
                         drawList.AddRectFilled(new(x, bottom.Y - untaggedHeight - taggedHeight), new(right, bottom.Y - untaggedHeight),
-                            ImGui.ColorConvertFloat4ToU32(SentinelModernPalette.Teal));
+                            ImGui.ColorConvertFloat4ToU32(SentinelModernPalette.Teal), radius,
+                            day.Untagged > 0 ? ImDrawFlags.RoundCornersTop : ImDrawFlags.RoundCornersAll);
                     if (ImGui.IsItemHovered())
                         ImGui.SetTooltip($"{day.Date:MMM d}: {day.Reported:N0} spawned / {day.Tagged:N0} tagged\n{day.Untagged:N0} untagged; tags grouped by report date.");
                     var label = day.Date.ToString("MMM d");
