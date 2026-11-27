@@ -65,7 +65,7 @@ public sealed partial class Plugin
         if (UiSection("Plugins.Combat", "FULL COMBAT ASSIST"))
         {
             ImGui.TextWrapped("Uses the four normal integrations above, BossMod AI and one selected rotation provider: Wrath Combo OR Rotation Solver Reborn. Do not enable both rotations. Expanding this section does not enable combat assist.");
-            ImGui.TextWrapped(config.FullCombatAssist ? readiness.CombatLabel : "Optional mode is off. " + readiness.CombatLabel);
+            ImGui.TextWrapped(config.FullCombatAssist ? readiness.CombatLabel : "Optional mode is off. Missing combat integrations do not affect Normal Tagging.");
             ImGui.TextWrapped("The current RSR handoff remains unavailable until its IPC can verify job readiness and exclusive rotation control. SRank keeps safe tagging when a selected provider cannot pass its checks.");
             foreach (var companion in CompanionPlugins.All.Where(c => c.CombatRole is not null))
             {
@@ -194,7 +194,8 @@ public sealed partial class Plugin
         }
         if (plugin is null)
         {
-            SentinelModernStatusPill.Draw(new("MISSING", SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
+            var optional = companion.AlertProvider || (companion.CombatRole is not null && !config.FullCombatAssist);
+            SentinelModernStatusPill.Draw(new("MISSING", optional ? SentinelModernPillTone.Neutral : SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
             ImGui.SameLine();
         }
         else
