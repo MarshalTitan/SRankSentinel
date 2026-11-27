@@ -31,6 +31,9 @@ internal static partial class Program
         };
         try
         {
+            Test("UI disclosure mouse, keyboard and gamepad state persists without gameplay changes", TestDisclosurePersistence);
+            Test("mode readiness distinguishes ordinary tagging from verified combat handoffs", TestModeReadinessPresentation);
+            Test("collapsed cards, reports and anchored Recovery fit text/UI scales", TestCollapsiblePageLayout);
             Test("v15 migration preserves all hunt values, credentials, and queues", TestLegacyMigration);
             Test("Modern choice and selected page survive save/load", TestThemeRoundTrip);
             Test("merged pages migrate to Main without changing theme or hunt settings", TestMergedPageSelection);
@@ -109,6 +112,7 @@ internal static partial class Program
         var snapshot = JsonSerializer.SerializeToNode(config)!.AsObject();
         snapshot.Remove("Version");
         snapshot.Remove("WindowTheme");
+        snapshot.Remove("CollapsedUiSections");
         snapshot.Remove("WindowPage");
         snapshot.Remove("ModernWindowCollapsed");
         snapshot.Remove("ModernExpandedWidth");

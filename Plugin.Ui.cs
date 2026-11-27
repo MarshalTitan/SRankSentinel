@@ -84,6 +84,7 @@ public sealed partial class Plugin
                             RequestClose = () => configOpen = false,
                             RequestCollapse = ToggleModernCollapse,
                             CollapseTooltip = config.ModernWindowCollapsed ? "Expand" : "Minimize",
+                            IsCollapsed = config.ModernWindowCollapsed,
                         }, modernShell, modernNavigation, selectModernPage, drawModernContent,
                         drawActionDock: !config.ModernWindowCollapsed && config.WindowPage == (int)ConfigurationPage.Theme
                             ? drawModernActionDock : null);
@@ -144,7 +145,7 @@ public sealed partial class Plugin
                 DrawModernIcon(icon, context.DrawList, context.Minimum, context.Maximum,
                     ImGui.ColorConvertFloat4ToU32(context.Colour));
                 if (ImGui.GetIO().NavVisible && ImGui.IsItemFocused() && !ImGui.IsItemHovered())
-                    ImGui.SetTooltip(label);
+                    SentinelModernNavigationPresentation.Tooltip(label, ImGuiHelpers.GlobalScale, besideItem: true);
             },
         };
 
@@ -202,17 +203,7 @@ public sealed partial class Plugin
                     config.Save();
                 break;
             default:
-                DrawEnabledControl();
-                ImGui.Spacing();
-                DrawHuntStatus();
-                SentinelModernUi.SectionHeader("EXPANSION HUNTING");
-                DrawExpansionControls();
-                SentinelModernUi.SectionHeader("DATA CENTER HUNTING");
-                DrawDataCenterControls();
-                SentinelModernUi.SectionHeader("TAGGING");
-                DrawTagCheckpointControls();
-                SentinelModernUi.SectionHeader("RECOVERY");
-                DrawRecoveryControls();
+                DrawModernMainPage();
                 break;
         }
     }
@@ -221,10 +212,14 @@ public sealed partial class Plugin
         ? SentinelModernSwitch.Draw(label, label, ref value, modernShell.Motion, ImGuiHelpers.GlobalScale)
         : ImGui.Checkbox(label, ref value);
 
-    private bool DrawActionButton(string label, bool danger = false) => modernUiFrame
-        ? danger ? SentinelModernActionDock.DangerButton(label, label, default, ImGuiHelpers.GlobalScale)
-                 : SentinelModernActionDock.PrimaryButton(label, label, default, ImGuiHelpers.GlobalScale)
-        : ImGui.Button(label);
+    private bool DrawActionButton(string label, bool danger = false)
+    {
+        if (!modernUiFrame) return ImGui.Button(label);
+        var size = ActionButtonSize(label);
+        var wrapped = WrapSettingsLabel(label, MathF.Max(1f, size.X - 24f * ImGuiHelpers.GlobalScale));
+        return danger ? SentinelModernActionDock.DangerButton(label, wrapped, size, ImGuiHelpers.GlobalScale)
+            : SentinelModernActionDock.PrimaryButton(label, wrapped, size, ImGuiHelpers.GlobalScale);
+    }
 
     private void ToggleModernCollapse()
     {
@@ -513,19 +508,24 @@ public sealed partial class Plugin
             var scale = ImGuiHelpers.GlobalScale;
             var width = ImGui.GetContentRegionAvail().X - (28f * scale);
             var columns = SentinelModernSettingsRowLayout.ResolveColumns(width, scale);
-            var headingSize = ImGui.CalcTextSize(heading, false, width);
+            var wasExpanded = config.CollapsedUiSections?.Contains("Distance." + id) != true;
+            var headingHeight = SentinelModernDisclosure.Measure(heading, width, scale);
             string[] labels = ["Initial coordinate stop", "Safe parking clearance",
                 "Emergency clearance", "Engage only at/below HP %"];
             var rowsHeight = labels.Sum(label => SentinelModernSettingsRowLayout.Resolve(width,
                 ImGui.CalcTextSize(WrapSettingsLabel(label, columns.TextWidth)).Y, 0f,
                 ImGui.GetFrameHeight(), false, scale).Size.Y);
-            var height = headingSize.Y + rowsHeight + (5f * ImGui.GetStyle().ItemSpacing.Y) + (28f * scale);
+            var height = headingHeight + (28f * scale) + (wasExpanded
+                ? rowsHeight + 5f * ImGui.GetStyle().ItemSpacing.Y : 0f);
             using var card = SentinelModernGlassCard.Begin(id + "-profile",
                 new SentinelModernGlassCardOptions { Size = new Vector2(0f, height / scale) }, scale);
             if (card.IsVisible)
             {
-                ImGui.TextWrapped(heading);
-                DrawDistanceProfileValues(id, profile, flagMinimum, safeMinimum, emergencyMinimum);
+                var expanded = UiSection("Distance." + id, heading, accent: false);
+                // The retained card height follows the new disclosure state next frame.
+                // Never submit sliders into the short card on its first expansion frame.
+                if (expanded && wasExpanded)
+                    DrawDistanceProfileValues(id, profile, flagMinimum, safeMinimum, emergencyMinimum);
             }
             return;
         }

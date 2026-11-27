@@ -14,6 +14,8 @@ public sealed class Configuration : IPluginConfiguration
     public bool ModernWindowCollapsed { get; set; }
     public float ModernExpandedWidth { get; set; }
     public float ModernExpandedHeight { get; set; }
+    // Presentation only. Missing values on upgrade leave every section expanded.
+    public HashSet<string> CollapsedUiSections { get; set; } = [];
     public bool Enabled { get; set; } = true;
     public bool EnableFaloop { get; set; }
     public bool EnableHuntAlertsFallback { get; set; } = true;

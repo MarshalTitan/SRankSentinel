@@ -130,7 +130,7 @@ jobs:
             Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "History now shows confirmed credit in the seven-day footer and labels meaningful instances. Optional combat integrations have readiness cards and a saved provider choice. Wrath checks for competing rotations; selecting Rotation Solver Reborn uses safe tagging because its current API cannot grant verifiable ownership." --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes-file docs/NAVIGATION_POLISH.md --prerelease
             if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 

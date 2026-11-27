@@ -24,28 +24,57 @@ public sealed partial class Plugin
             companionEnableTask = null;
         }
         var installed = pi?.InstalledPlugins?.ToArray() ?? [];
-        var movementReady = CompanionPlugins.Find(installed, CompanionPlugins.All[0])?.IsLoaded == true;
+        var movementReady = CompanionPlugins.Find(installed, CompanionPlugins.All[0])?.IsLoaded == true
+            && vnav?.IsReadySafe() == true;
         var worldTravelReady = lifestream?.HasRequiredIpc == true;
-        var alertsReady = CompanionPlugins.All.Any(companion => companion.AlertProvider && CompanionPlugins.Find(installed, companion)?.IsLoaded == true);
+        var alertsReady = CompanionPlugins.All.Any(companion => companion.AlertProvider &&
+            CompanionPlugins.Find(installed, companion)?.IsLoaded == true &&
+            (companion.Name == "HuntAlerts" ? config.EnableHuntAlertsFallback : config.EnableSonarFallback));
+        RefreshCombatCardDetails(installed);
+        var rotationName = config.RotationProvider == CombatRotationProvider.RotationSolverReborn
+            ? "Rotation Solver Reborn" : "Wrath Combo";
+        var boss = CompanionPlugins.Find(installed, CompanionPlugins.All[4]);
+        var selectedRotation = CompanionPlugins.All.First(c => c.Name == rotationName);
+        var solo = false;
+        try { solo = SoloAssistAllowed; }
+        catch { /* Services may not yet be available; readiness remains conservative. */ }
+        var readiness = new PluginModeReadiness(movementReady, worldTravelReady, alertsReady, solo,
+            boss?.IsLoaded == true ? combatCardDetails?.GetValueOrDefault("BossMod") switch {
+                "Ready for the exact active mark" => null, var detail => detail ?? "Checking BossMod readiness" }
+                : "BossMod is not enabled",
+            CompanionPlugins.Find(installed, selectedRotation)?.IsLoaded == true
+                ? combatCardDetails?.GetValueOrDefault(rotationName) switch {
+                    "Rotation ready for this job" => null, var detail => detail ?? "Checking rotation readiness" }
+                : rotationName + " is not enabled", rotationName);
+        var selectedReason = config.FullCombatAssist ? readiness.CombatReason : readiness.NormalReason;
         ImGui.PushTextWrapPos(0f);
         ImGui.TextColored(SentinelModernStatusPill.ResolveColour(new("Readiness",
-            movementReady && worldTravelReady && alertsReady ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Warning)),
-            movementReady && worldTravelReady && alertsReady ? "Movement, World travel, and S-rank alerts are ready." :
-                !worldTravelReady ? LifestreamRequiredMessage :
-                !movementReady ? "Enable vnavmesh for automatic movement." : "Enable HuntAlerts or Sonar for S-rank alerts.");
+            selectedReason is null ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Warning)),
+            config.FullCombatAssist ? readiness.CombatLabel : readiness.NormalLabel);
         ImGui.PopTextWrapPos();
         ImGui.Spacing();
-        RefreshCombatCardDetails(installed);
-        foreach (var companion in CompanionPlugins.All)
+        if (UiSection("Plugins.Normal", "NORMAL TAGGING"))
         {
-            var plugin = CompanionPlugins.Find(installed, companion);
-            DrawCompanionCard(companion, plugin);
-            ImGui.Spacing();
+            ImGui.TextWrapped("vnavmesh supplies movement; Lifestream supplies automated World travel. Keep at least one functioning HuntAlerts or Sonar announcement provider enabled. Combat plugins are not required.");
+            foreach (var companion in CompanionPlugins.All.Where(c => c.CombatRole is null))
+            {
+                DrawCompanionCard(companion, CompanionPlugins.Find(installed, companion));
+                ImGui.Spacing();
+            }
+        }
+        if (UiSection("Plugins.Combat", "FULL COMBAT ASSIST"))
+        {
+            ImGui.TextWrapped("Uses the four normal integrations above, BossMod AI and one selected rotation provider: Wrath Combo OR Rotation Solver Reborn. Do not enable both rotations. Expanding this section does not enable combat assist.");
+            ImGui.TextWrapped(config.FullCombatAssist ? readiness.CombatLabel : "Optional mode is off. Missing combat integrations do not affect Normal Tagging.");
+            ImGui.TextWrapped("The current RSR handoff remains unavailable until its IPC can verify job readiness and exclusive rotation control. SRank keeps safe tagging when a selected provider cannot pass its checks.");
+            foreach (var companion in CompanionPlugins.All.Where(c => c.CombatRole is not null))
+            {
+                DrawCompanionCard(companion, CompanionPlugins.Find(installed, companion));
+                ImGui.Spacing();
+            }
         }
         if (CompanionButton("Installer", "Open Plugin Installer", 180f))
             pi?.OpenPluginInstallerTo();
-        ImGui.TextWrapped("Full Combat Assist requires BossMod AI and one compatible rotation provider. Combat plugins are optional for ordinary hunting.");
-        ImGui.TextWrapped("Lifestream is required for automated hunts. HuntAlerts and Sonar are alternative alert sources.");
         ImGui.TextWrapped("Use Installer to install or update a companion. Enable S-rank announcements and map links for your data center.");
         if (companionEnableStatus is not null) ImGui.TextWrapped(companionEnableStatus);
     }
@@ -84,7 +113,9 @@ public sealed partial class Plugin
     {
         var scale = ImGuiHelpers.GlobalScale;
         var loaded = plugin?.IsLoaded == true;
-        var colour = SentinelModernStatusPill.ResolveColour(new("Plugin", loaded ? SentinelModernPillTone.Enabled : SentinelModernPillTone.Error));
+        var optional = companion.CombatRole is not null && !config.FullCombatAssist;
+        var colour = SentinelModernStatusPill.ResolveColour(new("Plugin", loaded ? SentinelModernPillTone.Enabled
+            : optional || companion.AlertProvider ? SentinelModernPillTone.Neutral : SentinelModernPillTone.Error));
         var requirement = new SentinelModernStatusPillOptions(
             companion.CombatRole is { } role ? "OPTIONAL · " + role : companion.Required ? "REQUIRED" : "ALERT PROVIDER",
             SentinelModernPillTone.Accent);
@@ -163,7 +194,8 @@ public sealed partial class Plugin
         }
         if (plugin is null)
         {
-            SentinelModernStatusPill.Draw(new("MISSING", SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
+            var optional = companion.AlertProvider || (companion.CombatRole is not null && !config.FullCombatAssist);
+            SentinelModernStatusPill.Draw(new("MISSING", optional ? SentinelModernPillTone.Neutral : SentinelModernPillTone.Warning), modernShell.Motion, ImGuiHelpers.GlobalScale);
             ImGui.SameLine();
         }
         else
@@ -276,7 +308,7 @@ public sealed partial class Plugin
 
     private void DrawHistorySection(IReadOnlyList<HuntHistoryEntry> entries)
     {
-        SentinelModernUi.SectionHeader($"SPAWN REPORTS ({entries.Count})");
+        if (!UiSection("History.Spawns", $"SPAWN REPORTS ({entries.Count})")) return;
         if (entries.Count == 0)
         {
             DrawSettingsRow("History.EmptySpawns", "Waiting for your first report",
