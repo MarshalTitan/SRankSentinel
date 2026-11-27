@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.7.78.0</Version>
+    <Version>0.7.79.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -20,8 +20,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="MarshalTitan.SentinelCore" Version="[0.4.1.2]" />
-    <PackageReference Include="MarshalTitan.SentinelCore.UI" Version="[0.4.1.2]" />
+    <PackageReference Include="MarshalTitan.SentinelCore" Version="[0.4.1.3]" />
+    <PackageReference Include="MarshalTitan.SentinelCore.UI" Version="[0.4.1.3]" />
     <InternalsVisibleTo Include="SRankSentinel.UiTests" />
   </ItemGroup>
 
