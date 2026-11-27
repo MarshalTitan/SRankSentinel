@@ -280,9 +280,10 @@ internal static partial class Program
                 Check(activity.DC.CursorMaxPos.X <= activity.Pos.X + activity.Size.X + 1f &&
                     activity.DC.CursorMaxPos.Y <= activity.Pos.Y + activity.Size.Y + 1f && !activity.ScrollbarX && !activity.ScrollbarY,
                     "Stacked history chart overflows its Core card.");
-                var footerRoom = activity.InnerClipRect.Max.Y - activity.DC.CursorMaxPos.Y;
-                Check(footerRoom >= 3f * scale - 1f,
-                    $"History footer reaches the clip boundary at scale {scale}: {footerRoom}px.");
+                var datePadding = activity.InnerClipRect.Max.Y - activity.DC.CursorMaxPos.Y;
+                Check(datePadding >= 8f * scale - 1f,
+                    $"History date labels reach the clip boundary at scale {scale}: {datePadding}px.");
+                Check(activity.Size.Y < 176f * scale, "The compact chart retained the old footer height.");
                 var windows = ImGui.GetCurrentContext().Windows;
                 for (var index = 0; index < windows.Size; index++)
                     Check(!Marshal.PtrToStringUTF8((nint)windows[index].Name)!.Contains("##CreditedHistory"),
@@ -575,7 +576,8 @@ internal static partial class Program
         entries[1].CreditedAtUtc = entries[1].TaggedAtUtc;
         entries[5].CreditedAtUtc = entries[5].TaggedAtUtc; // outside this week
         var week = HuntHistoryActivity.BuildWeek(entries, today.AddHours(19));
-        Check(HuntHistoryActivity.Footer(week) == "5 reports · 3 tagged · 1 confirmed", "Footer mixed report dates or counted tags as credit.");
+        Check(week.Sum(day => day.Tagged) == 3 && week.Sum(day => day.Confirmed) == 1,
+            "Weekly counts mixed report dates or counted tags as credit.");
         var now = DateTime.UtcNow;
         var alert = HistoryAlert(now);
         var cfg = new Configuration();

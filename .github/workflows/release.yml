@@ -130,7 +130,7 @@ jobs:
             Write-Host "Revalidating the existing immutable release for this exact source."
           }
           else {
-            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes-file docs/NAVIGATION_POLISH.md --prerelease
+            gh release create $tag $asset --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "S Rank Sentinel ${{ steps.version.outputs.value }}" --notes "The seven-day History chart has a compact header with its colour legend beside the title and more breathing room below the date labels. The redundant totals line has been removed." --prerelease
             if ($LASTEXITCODE -ne 0) { throw "Failed to create $tag." }
           }
 

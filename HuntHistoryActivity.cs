@@ -28,16 +28,11 @@ internal static class HuntHistoryActivity
         return days;
     }
 
-    internal static string Footer(IReadOnlyList<HuntHistoryActivityDay> days) =>
-        $"{days.Sum(day => day.Reported):N0} reports · {days.Sum(day => day.Tagged):N0} tagged · {days.Sum(day => day.Confirmed):N0} confirmed";
+    internal const float BarHeight = 68f;
 
-    internal static float Draw(IReadOnlyList<HuntHistoryActivityDay> days, float scale)
+    internal static void Draw(IReadOnlyList<HuntHistoryActivityDay> days, float scale)
     {
-        ImGui.TextColored(SentinelModernPalette.Accent, "Untagged");
-        ImGui.SameLine();
-        ImGui.TextColored(SentinelModernPalette.Teal, "Tagged");
-        var labelBottom = ImGui.GetCursorScreenPos().Y;
-        if (!ImGui.BeginTable("##SpawnActivity", days.Count, ImGuiTableFlags.SizingStretchSame)) return labelBottom;
+        if (!ImGui.BeginTable("##SpawnActivity", days.Count, ImGuiTableFlags.SizingStretchSame)) return;
         try
         {
             var maximum = Math.Max(1, days.Max(day => day.Reported));
@@ -47,7 +42,7 @@ internal static class HuntHistoryActivity
                 ImGui.PushID(day.Date.ToString("yyyy-MM-dd"));
                 try
                 {
-                    var size = new Vector2(MathF.Max(1f, ImGui.GetContentRegionAvail().X), 68f * scale);
+                    var size = new Vector2(MathF.Max(1f, ImGui.GetContentRegionAvail().X), BarHeight * scale);
                     ImGui.InvisibleButton("##ActivityDay", size);
                     var minimum = ImGui.GetItemRectMin();
                     var bottom = ImGui.GetItemRectMax();
@@ -71,12 +66,10 @@ internal static class HuntHistoryActivity
                     var label = day.Date.ToString("MMM d");
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + MathF.Max(0f, (size.X - ImGui.CalcTextSize(label).X) / 2f));
                     ImGui.TextUnformatted(label);
-                    labelBottom = Math.Max(labelBottom, ImGui.GetItemRectMax().Y);
                 }
                 finally { ImGui.PopID(); }
             }
         }
         finally { ImGui.EndTable(); }
-        return labelBottom;
     }
 }
