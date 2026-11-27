@@ -16,17 +16,17 @@
       },
       "MarshalTitan.SentinelCore": {
         "type": "Direct",
-        "requested": "[0.4.1.2, 0.4.1.2]",
-        "resolved": "0.4.1.2",
-        "contentHash": "ggGA7P1x97fIsv9quAbgYwYj8xW6+8F/++tkDUKHpPHZt6kgT7mRyATg6GKdD7bk/UhlbGnKgA2sxHY3pCHNfw=="
+        "requested": "[0.4.1.3, 0.4.1.3]",
+        "resolved": "0.4.1.3",
+        "contentHash": "bZVNaPeyIgB1pjoINesYvoHVttCNH6nxXN0qheOzivXZNRLpOuNGNEG5jWMjuFFkuB9ttdZrZTbGrG5097G/3A=="
       },
       "MarshalTitan.SentinelCore.UI": {
         "type": "Direct",
-        "requested": "[0.4.1.2, 0.4.1.2]",
-        "resolved": "0.4.1.2",
-        "contentHash": "XtHYnmok8vSCr45M6gNIoXnGQHtMFxg5vlQavtXXTX4TL6C/CA5BGuBS9XLr9MDtkvAkJMOuHgjCRtSkmjBDPw==",
+        "requested": "[0.4.1.3, 0.4.1.3]",
+        "resolved": "0.4.1.3",
+        "contentHash": "MX3hT+wWTH7iBU4RPl8SEzoyIUuH9Gn6EZ80pb4qYa2LtXMC9dfPqS6wSAbLQJbrt7811TuHzZpp+98l6DJlVg==",
         "dependencies": {
-          "MarshalTitan.SentinelCore": "0.4.1.2"
+          "MarshalTitan.SentinelCore": "0.4.1.3"
         }
       }
     }
