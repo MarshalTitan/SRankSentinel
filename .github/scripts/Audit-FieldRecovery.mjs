@@ -6,13 +6,13 @@ if (!pluginPath || !combatPath || !policyPath || !projectPath) {
 }
 
 // Recovery UI and IPC now call the same extracted actions; include that partial in the veto audit.
-const plugin = readFileSync(pluginPath, "utf8") + readFileSync("Plugin.Ui.cs", "utf8") + readFileSync("Plugin.RemoteRecovery.cs", "utf8");
+const plugin = readFileSync(pluginPath, "utf8") + readFileSync("Plugin.Ui.cs", "utf8") + readFileSync("Plugin.RemoteRecovery.cs", "utf8") + readFileSync("Plugin.Mounting.cs", "utf8");
 const combat = readFileSync(combatPath, "utf8");
 const policy = readFileSync(policyPath, "utf8");
 const project = readFileSync(projectPath, "utf8");
 
 const required = [
-  [project, "<Version>0.7.80.0</Version>"],
+  [project, "<Version>0.7.81.0</Version>"],
   [plugin, "tagCycle.TryLatch"],
   [plugin, "BeginTagRequiredRecovery"],
   [plugin, "parking is suspended until the current checkpoint is confirmed"],
@@ -33,7 +33,7 @@ const required = [
   [plugin, "Blocked automatic hunt exit: source={Source}, state={State}"],
   [plugin, "HuntExitRequestSource.FrameworkException"],
   [plugin, "HuntExitRequestSource.ManualSkip"],
-  [plugin, "CompanyChocoboMountId = 1"],
+  [readFileSync("MountPreferences.cs", "utf8"), "CompanyChocoboMountId = 1"],
   [plugin, "EnsureLongApproachMovementReady"],
   [plugin, "LongApproachStartupAction.AbandonWithoutGroundFallback"],
   [plugin, "LongApproachStartupAction.ResetForNextCycle"],
@@ -41,9 +41,12 @@ const required = [
   [plugin, "Flight-startup recovery/reset complete"],
   [plugin, "Final abandonment after second flight-startup failure"],
   [plugin, "UseGeneralAction(2)"],
-  [plugin, "ActionType.Mount, CompanyChocoboMountId"],
+  [plugin, "manager->GetActionStatus(ActionType.Mount, mountId) == 0"],
+  [plugin, "manager->UseAction(ActionType.Mount, mountId)"],
+  [plugin, "player->IsMountUnlocked(id)"],
+  [plugin, "UseGeneralAction(9)"],
   [plugin, "InFlight was lost before or during the long-distance flying route"],
-  [policy, "SentinelMountChoice.CompanyChocobo"],
+  [policy, "name is not null && requestAvailableMount(preference)"],
   [policy, "LongApproachStartupAction.BeginFlyingRoute"],
   [plugin, "SentinelState.ParkingSettle"],
   [plugin, "ParkingLandingHorizontalTolerance = 2f"],

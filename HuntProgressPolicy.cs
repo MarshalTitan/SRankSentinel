@@ -49,12 +49,6 @@ internal enum LongApproachStartupAction
     AbandonWithoutGroundFallback,
 }
 
-internal enum SentinelMountChoice
-{
-    CompanyChocobo,
-    MountRoulette,
-}
-
 /// <summary>
 /// Pure decisions shared by the live state machine and the no-dependency regression harness.
 /// Keeping these boundaries free of Dalamud types makes the latches and bounded-recovery rules
@@ -136,13 +130,21 @@ internal static class HuntProgressPolicy
         float horizontalDistance, float scanRange, float tolerance) =>
         horizontalDistance > scanRange + tolerance;
 
-    public static SentinelMountChoice SelectMount(
-        bool preferredAttemptAllowed,
-        bool companyChocoboUnlocked,
-        bool companyChocoboActionReady) =>
-        preferredAttemptAllowed && companyChocoboUnlocked && companyChocoboActionReady
-            ? SentinelMountChoice.CompanyChocobo
-            : SentinelMountChoice.MountRoulette;
+    internal static MountRequest SelectMount(uint preference, bool firstAttempt, Func<uint, string?> unlockedName,
+        Func<uint, bool> requestAvailableMount, Func<bool> requestRoulette)
+    {
+        if (preference == MountOption.Roulette.Id)
+            return new(MountOption.Roulette.Name, requestRoulette(), "roulette selected");
+        if (!firstAttempt)
+            return new(MountOption.Roulette.Name, requestRoulette(), "retry without mounted confirmation");
+
+        var name = unlockedName(preference);
+        if (name is not null && requestAvailableMount(preference))
+            return new(name, true, "preferred mount accepted");
+
+        return new(MountOption.Roulette.Name, requestRoulette(), name is null
+            ? "preferred mount is locked or unavailable" : $"{name} unavailable or request rejected");
+    }
 
     public static LongApproachStartupAction DecideLongApproachStartup(
         bool flightAvailabilityKnown,

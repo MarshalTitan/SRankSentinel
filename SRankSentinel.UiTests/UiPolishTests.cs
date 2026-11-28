@@ -10,7 +10,7 @@ internal static partial class Program
 {
     private static void TestDisclosurePersistence()
     {
-        string[] sections = ["Main.Expansions", "Main.DataCenters", "Main.Tagging", "Distance.close-safe",
+        string[] sections = ["Main.Expansions", "Main.DataCenters", "Main.Mounting", "Main.Tagging", "Distance.close-safe",
             "Distance.proximity-sensitive", "Plugins.Normal", "Plugins.Combat", "History.Spawns"];
         foreach (var section in sections)
         foreach (var key in new[] { ImGuiKey.None, ImGuiKey.Space, ImGuiKey.GamepadFaceDown }) InContext(() =>
@@ -20,6 +20,7 @@ internal static partial class Program
             var config = new Configuration { FullCombatAssist = true, TagAt25Percent = false,
                 HuntDataCenters = NorthAmericanDataCenters.Aether, EnableCenturio = true };
             config.Initialize(pi);
+            config.PreferredMounts[101] = 73;
             var snapshot = HuntSnapshot(config);
             var plugin = CreateConsumer(config);
             var method = typeof(Plugin).GetMethod("UiSection", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -89,7 +90,7 @@ internal static partial class Program
             LoadWindowPlacement(new Vector2(480, 520) * scale);
             foreach (var collapsed in new[] { false, true })
             {
-                config.CollapsedUiSections = collapsed ? ["Main.Expansions", "Main.DataCenters", "Main.Tagging"] : [];
+                config.CollapsedUiSections = collapsed ? ["Main.Expansions", "Main.DataCenters", "Main.Mounting", "Main.Tagging"] : [];
                 for (var frame = 0; frame < 20; frame++) ConsumerFrame(plugin);
                 var page = FindWindow(Plugin.ConfigurationWindowId, "##Modern2Page");
                 var settings = FindWindow(Plugin.ConfigurationWindowId, "##MainSettings");

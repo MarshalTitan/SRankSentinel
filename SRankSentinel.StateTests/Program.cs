@@ -103,8 +103,7 @@ using SRankSentinel;
     ("manual Skip remains allowed while the mark is alive", ManualSkipRemainsAllowed),
     ("genuinely missing unresolved mark may still be abandoned", MissingUnresolvedMarkMayBeAbandoned),
     ("positively dead mark permits normal recovery", DeadMarkPermitsRecovery),
-    ("Company Chocobo is preferred when available", CompanyChocoboIsPreferred),
-    ("unavailable Company Chocobo falls back to Mount Roulette", CompanyChocoboFallsBack),
+    .. MountPreferenceTests.Cases(),
     ("Heritage Found southwest flag chooses attuned western crystal", HeritageFoundSouthwestCrystal),
     ("Heritage Found eastern and northern flags choose their nearest crystals", HeritageFoundOtherCrystals),
     ("marker fallback chooses nearer crystals in other hunt zones", OtherZonesChooseNearestCrystal),
@@ -263,20 +262,6 @@ static void DeadMarkPermitsRecovery() =>
     Equal(HuntExitDecision.Allow,
         HuntProgressPolicy.DecideHuntExit(
             HuntExitRequestSource.ConfirmedDeath, true, true, false));
-
-static void CompanyChocoboIsPreferred() =>
-    Equal(SentinelMountChoice.CompanyChocobo,
-        HuntProgressPolicy.SelectMount(true, true, true));
-
-static void CompanyChocoboFallsBack()
-{
-    Equal(SentinelMountChoice.MountRoulette,
-        HuntProgressPolicy.SelectMount(true, false, false));
-    Equal(SentinelMountChoice.MountRoulette,
-        HuntProgressPolicy.SelectMount(true, true, false));
-    Equal(SentinelMountChoice.MountRoulette,
-        HuntProgressPolicy.SelectMount(false, true, true));
-}
 
 static void HeritageFoundSouthwestCrystal() =>
     Equal(212u, HuntProgressPolicy.SelectMapMarkerAetheryte(

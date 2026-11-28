@@ -44,6 +44,7 @@ public sealed partial class Plugin
                 DrawHuntStatus();
                 if (UiSection("Main.Expansions", "EXPANSION HUNTING")) DrawExpansionControls();
                 if (UiSection("Main.DataCenters", "DATA CENTER HUNTING")) DrawDataCenterControls();
+                if (UiSection("Main.Mounting", "MOUNTING")) DrawPreferredMount();
                 if (UiSection("Main.Tagging", "TAGGING")) DrawTagCheckpointControls();
             }
         }

@@ -118,6 +118,9 @@ public sealed partial class Plugin
         ImGui.TextUnformatted("DATA CENTER HUNTING");
         DrawDataCenterControls();
         ImGui.Separator();
+        ImGui.TextUnformatted("MOUNTING");
+        DrawPreferredMount();
+        ImGui.Separator();
         ImGui.TextUnformatted("TAGGING");
         DrawTagCheckpointControls();
         ImGui.Separator();
