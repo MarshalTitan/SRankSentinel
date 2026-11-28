@@ -1,8 +1,8 @@
 {
   "baselineCommit": "fd5cbb43a2ee92d27e28ebead66564e4959e2b38",
-  "note": "Plugin.cs has its UI block extracted and declaration made partial. Audit-SentinelModern removes exactly five passive history observer lines before comparing this unchanged v0.7.44 hunt/service baseline. The guard rejects any other automation change.",
+  "note": "Plugin.cs has its UI block extracted and declaration made partial. Audit-SentinelModern removes exactly five passive history observer lines before comparing this unchanged v0.7.44 hunt/service baseline. The Plugin.cs and HuntProgressPolicy.cs fingerprints also include the reviewed 0.7.81 mount request selection changes. The guard rejects other automation changes.",
   "sha256": {
-    "Plugin.cs": "2064015ed5dbb7faacf792cef657acd056598fbb31b9847dd5d045876f584a1d",
+    "Plugin.cs": "ce3ef324ee6318f80ea45e1ecee1372de547559184e520a0421c6f541b33b617",
     "CombatController.cs": "7b438054c3298b7ec726e7d9019dbdc029231345b4f1a1ee5be40124f7733439",
     "NativeTravel.cs": "cb66df5b7972ad6798cbb1feda148cee72571a7f388cec20eea9ab9e01b2e97c",
     "VNavmeshIpc.cs": "f2d67d4b098c9935ab42116d86550b34572daff8324809479a13fa3559277c31",
@@ -11,7 +11,7 @@
     "FaloopCredentialProtection.cs": "018cea2d4d9f046d9c5b29a44eabca407dfa5db0d949adc5853dccbde012a2cf",
     "FaloopCatalog.cs": "4971e7902f37f6c75851f3137abf36da6b9efda10d14de1c87224841c40485f6",
     "HuntCatalog.cs": "532f5b19a711def0cf0fdd2312007e906b59c26c7389a80837dd54e8ce8cfd4d",
-    "HuntProgressPolicy.cs": "eb7394dc6e6b3c43674823d3d8462ff749813e5cf002ce3cde58ac81d7de2cf4",
+    "HuntProgressPolicy.cs": "1865d79e5db5670af6bbe42f4761777f8799cdc8446e64774b976f9270b0b5bd",
     "HuntAlertSnapshot.cs": "efca2b48d0ed933aec9e277ccbeaae190212619d8895e12eea46f32bfa33b46e",
     "ReflectionReader.cs": "7f68c34e73aaa1dd532a4ea9ad06da36e17eb0960735c4169fdf71769867d23a"
   }

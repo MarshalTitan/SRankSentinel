@@ -12,7 +12,7 @@ public sealed partial class Plugin
     private uint lastHuntJob;
     private string? jobPause;
     private DateTime jobPausedSince;
-    private ulong GearsetOwner => huntJobPlayer is { IsLoaded: true } ? huntJobPlayer.ContentId : 0;
+    private ulong CharacterContentId => huntJobPlayer is { IsLoaded: true } ? huntJobPlayer.ContentId : 0;
 
     private HuntGearset? ChosenSet(ulong owner) => config.HuntingGearsets.GetValueOrDefault(owner);
 
@@ -29,7 +29,7 @@ public sealed partial class Plugin
 
     private void DrawHuntGearset()
     {
-        var owner = GearsetOwner;
+        var owner = CharacterContentId;
         if (owner == 0 || travel.IsBusy) return;
         var choice = ChosenSet(owner);
         if (ImGui.BeginCombo("Combat gearset", choice is null ? "None (manual job change)" : $"#{choice.Slot + 1} {choice.Name}"))
@@ -88,7 +88,7 @@ public sealed partial class Plugin
     {
         var player = objects.LocalPlayer;
         var job = player?.ClassJob.RowId ?? 0;
-        var owner = GearsetOwner;
+        var owner = CharacterContentId;
         var selected = ChosenSet(owner);
         var supported = CombatController.GetBaseRangedTagAction(job) != 0;
         if (job != 0 && lastHuntJob != job)
@@ -157,7 +157,7 @@ public sealed partial class Plugin
         {
             // Recheck identity, restrictions and selection at the actual write; never cancel another activity.
             var m = RaptureGearsetModule.Instance();
-            if (m != null && owner == GearsetOwner && selected == ChosenSet(owner) &&
+            if (m != null && owner == CharacterContentId && selected == ChosenSet(owner) &&
                 GearsetBlock() == null && ReadHuntGearset(selected!.Slot) == selected)
             {
                 var result = m->EquipGearset(selected.Slot);

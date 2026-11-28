@@ -32,6 +32,18 @@ public sealed class Configuration : IPluginConfiguration
     public CombatRotationProvider RotationProvider { get; set; } = CombatRotationProvider.WrathCombo;
     public bool FullCombatAssist { get; set; } // opt-in; absent on existing installs is false
     public Dictionary<ulong, HuntGearset> HuntingGearsets { get; set; } = [];
+    public Dictionary<ulong, uint> PreferredMounts { get; set; } = [];
+
+    internal uint GetPreferredMount(ulong owner) => owner == 0 ? MountOption.Roulette.Id :
+        PreferredMounts?.GetValueOrDefault(owner, MountOption.CompanyChocoboMountId) ?? MountOption.CompanyChocoboMountId;
+
+    internal void SavePreferredMount(ulong owner, uint id)
+    {
+        if (owner == 0) return;
+        (PreferredMounts ??= [])[owner] = id;
+        Save();
+    }
+
     public bool RetagAfterRaise { get; set; } = true;
     public string FaloopUsername { get; set; } = string.Empty;
     public string FaloopSessionId { get; set; } = string.Empty;

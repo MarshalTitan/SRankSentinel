@@ -93,7 +93,6 @@ public sealed partial class Plugin : IDalamudPlugin
     private const float ApproachMeaningfulProgressDistance = 3f;
     private const int ApproachEarlyStopLimit = 3;
     private const float ApproachScanTolerance = 3f;
-    private const uint CompanyChocoboMountId = 1;
     private const double LongApproachFlightStartupCycleBudgetSeconds = 10;
     private const int LongApproachFlightStartupCycleLimit = 2;
     private const double LongApproachFlightResetBudgetSeconds = 10;
@@ -169,6 +168,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private DateTime longApproachFlightResetStartedUtc = DateTime.MinValue;
     private DateTime nextLongApproachFlightActionUtc = DateTime.MinValue;
     private int longApproachFlightStartupCycle = 1;
+    private bool shortApproachMountRequested;
     private int longApproachMountRequests;
     private int longApproachTakeoffRequests;
     private int longApproachFlightResetRequests;
@@ -4088,6 +4088,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void ResetLongApproachFlightStartup()
     {
+        shortApproachMountRequested = false;
         longApproachFlightStartupUtc = DateTime.MinValue;
         longApproachFlightResetStartedUtc = DateTime.MinValue;
         nextLongApproachFlightActionUtc = DateTime.MinValue;
@@ -7725,12 +7726,16 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private bool EnsureMounted(DateTime now)
     {
-        if (condition[ConditionFlag.Mounted])
+        if (condition[ConditionFlag.Mounted] || condition[ConditionFlag.InFlight])
+        {
+            shortApproachMountRequested = false;
             return true;
-        if (now < nextActionUtc || condition[ConditionFlag.Mounting])
+        }
+        if (now < nextActionUtc || MountSummonInProgress())
             return false;
 
-        var submitted = TryRequestSentinelMount(out var requestedMount, out var diagnostic);
+        var submitted = TryRequestSentinelMount(out var requestedMount, out var diagnostic, !shortApproachMountRequested);
+        shortApproachMountRequested = true;
         nextActionUtc = now.AddSeconds(LongApproachMountRetrySeconds);
         status = submitted
             ? $"Mount requested: {requestedMount}; waiting for mounted confirmation"
@@ -7804,7 +7809,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 return false;
 
             case LongApproachStartupAction.RequestMount:
-                if (condition[ConditionFlag.Mounting])
+                if (MountSummonInProgress())
                 {
                     status = $"Mounting {longApproachLastMountRequest}; waiting for mounted confirmation before takeoff";
                     return false;
@@ -7897,7 +7902,7 @@ public sealed partial class Plugin : IDalamudPlugin
             mounted, inFlight, longApproachMountRequests, longApproachTakeoffRequests,
             flightAvailabilityKnown, flightAvailable, GetFlightAllowedStatusDiagnostic());
         log.Information(
-            "Flight-startup recovery/reset begun for {Mark}: movement stopped; landing/dismounting before a fresh Company Chocobo-first cycle 2/2",
+            "Flight-startup recovery/reset begun for {Mark}: movement stopped; landing/dismounting before a fresh preferred-mount cycle 2/2",
             current?.CreatureName ?? "active hunt");
         longApproachFlightResetPending = true;
         longApproachFlightResetStartedUtc = now;
@@ -7913,7 +7918,7 @@ public sealed partial class Plugin : IDalamudPlugin
         var resetElapsed = (now - longApproachFlightResetStartedUtc).TotalSeconds;
         var mounted = condition[ConditionFlag.Mounted];
         var inFlight = condition[ConditionFlag.InFlight];
-        var mounting = condition[ConditionFlag.Mounting];
+        var mounting = MountSummonInProgress();
         if (resetElapsed >= LongApproachFlightResetBudgetSeconds)
         {
             var reason =
@@ -7959,7 +7964,7 @@ public sealed partial class Plugin : IDalamudPlugin
         longApproachFlightResetRequests = 0;
         StartLongApproachFlightStartupCycle(now, 2);
         log.Information(
-            "Flight-startup recovery/reset complete for {Mark} after {ResetElapsed:0.0}s; second-cycle start confirmed with a fresh 10.0s Company Chocobo-first remount/takeoff budget",
+            "Flight-startup recovery/reset complete for {Mark} after {ResetElapsed:0.0}s; second-cycle start confirmed with a fresh 10.0s remount/takeoff budget",
             current?.CreatureName ?? "active hunt", resetElapsed);
         status = "Flight-startup reset complete; beginning cycle 2/2 with a fresh 10.0s budget";
         return false;
@@ -7993,61 +7998,6 @@ public sealed partial class Plugin : IDalamudPlugin
             log.Debug(ex, "Could not read the native flight-allowed status");
             return "unavailable";
         }
-    }
-
-    private unsafe bool TryRequestSentinelMount(
-        out string requestedMount,
-        out string diagnostic,
-        bool allowPreferredMount = true)
-    {
-        requestedMount = "Company Chocobo";
-        diagnostic = string.Empty;
-        var playerState = NativePlayerState.Instance();
-        var companyChocoboUnlocked = playerState is not null &&
-                                     playerState->IsMountUnlocked(CompanyChocoboMountId);
-        var manager = ActionManager.Instance();
-        var companyChocoboActionStatus = manager is null
-            ? uint.MaxValue
-            : manager->GetActionStatus(ActionType.Mount, CompanyChocoboMountId);
-        var mountChoice = HuntProgressPolicy.SelectMount(
-            allowPreferredMount,
-            companyChocoboUnlocked,
-            companyChocoboActionStatus == 0);
-        if (mountChoice == SentinelMountChoice.CompanyChocobo)
-        {
-            var accepted = manager is not null &&
-                           manager->UseAction(ActionType.Mount, CompanyChocoboMountId);
-            log.Information(
-                "Mount requested for {Mark}: mount=Company Chocobo, id={MountId}, unlocked=true, actionStatus={ActionStatus}, accepted={Accepted}",
-                current?.CreatureName ?? "active hunt", CompanyChocoboMountId,
-                companyChocoboActionStatus, accepted);
-            if (accepted)
-            {
-                diagnostic = "Company Chocobo request accepted";
-                return true;
-            }
-
-            log.Warning(
-                "Company Chocobo request was unavailable or rejected for {Mark}; falling back to Mount Roulette without blocking the hunt",
-                current?.CreatureName ?? "active hunt");
-        }
-        else
-        {
-            log.Information(
-                "Company Chocobo is unavailable for {Mark}; preferredAttemptAllowed={PreferredAttemptAllowed}, unlocked={Unlocked}, actionStatus={ActionStatus}; falling back to Mount Roulette",
-                current?.CreatureName ?? "active hunt", allowPreferredMount,
-                companyChocoboUnlocked, companyChocoboActionStatus);
-        }
-
-        requestedMount = "Mount Roulette";
-        var rouletteAccepted = UseGeneralAction(9);
-        diagnostic = rouletteAccepted
-            ? "Mount Roulette request accepted"
-            : "Company Chocobo unavailable/rejected and Mount Roulette was not accepted";
-        log.Information(
-            "Mount requested for {Mark}: mount=Mount Roulette, accepted={Accepted}, preferredUnlocked={PreferredUnlocked}",
-            current?.CreatureName ?? "active hunt", rouletteAccepted, companyChocoboUnlocked);
-        return rouletteAccepted;
     }
 
     private unsafe bool UseGeneralAction(uint id)

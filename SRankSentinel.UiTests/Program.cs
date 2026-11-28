@@ -33,6 +33,9 @@ internal static partial class Program
         {
             Test("UI disclosure mouse, keyboard and gamepad state persists without gameplay changes", TestDisclosurePersistence);
             Test("mode readiness distinguishes ordinary tagging from verified combat handoffs", TestModeReadinessPresentation);
+            Test("native mount dropdown saves an unlocked mount and roulette", TestMountDropdownInput);
+            Test("mounted, flying and casting guards bypass both summon actions", TestMountGuards);
+            Test("per-character mount selection survives reload and temporary data loss", TestMountPreferences);
             Test("collapsed cards, reports and anchored Recovery fit text/UI scales", TestCollapsiblePageLayout);
             Test("v15 migration preserves all hunt values, credentials, and queues", TestLegacyMigration);
             Test("Modern choice and selected page survive save/load", TestThemeRoundTrip);
